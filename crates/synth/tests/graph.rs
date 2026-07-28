@@ -7,8 +7,8 @@
 
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
 use apteronotus_synth::{
-    Adsr, Basis, Curve, GraphBuilder, GraphTemplate, Input, Note, Op, ParamSpec, ShapeKind, Source,
-    TemplateError, instantiate, n,
+    Adsr, Basis, Curve, DelayRange, DelayRangeError, GraphBuilder, GraphLimitError, GraphLimits,
+    GraphTemplate, Input, Note, Op, ParamSpec, ShapeKind, Source, TemplateError, instantiate, n,
 };
 
 const SR: f64 = 48_000.0;
@@ -65,6 +65,18 @@ fn arithmetic_on_a_symbolic_input_stages_as_nodes() {
 
     assert!(voice.nodes.iter().any(|node| node.op == Op::Mul));
     let audio = play(&voice, &Note::new(220.0), 0.5);
+    assert!((zero_crossing_hz(&audio[0], SR) - 440.0).abs() < 2.0);
+}
+
+#[test]
+fn division_on_a_symbolic_input_stages_as_a_node() {
+    let mut graph = GraphBuilder::new();
+    let halved = graph.div(n::HZ, 2.0);
+    let oscillator = graph.sine(halved);
+    let voice = graph.out_mono(oscillator).unwrap();
+
+    assert!(voice.nodes.iter().any(|node| node.op == Op::Div));
+    let audio = play(&voice, &Note::new(880.0), 0.5);
     assert!((zero_crossing_hz(&audio[0], SR) - 440.0).abs() < 2.0);
 }
 
@@ -181,6 +193,78 @@ fn an_impulse_into_a_resonator_rings_and_then_stops() {
     assert!(late < early * 0.5, "early {early}, late {late}");
 }
 
+// --------------------------------------------------------------------- delay
+
+#[test]
+fn delay_ranges_are_validated_before_they_reach_a_backend() {
+    assert_eq!(
+        DelayRange::new(f64::NAN, 1.0),
+        Err(DelayRangeError::NonFinite)
+    );
+    assert_eq!(
+        DelayRange::new(-0.1, 1.0),
+        Err(DelayRangeError::Negative { min_seconds: -0.1 })
+    );
+    assert_eq!(
+        DelayRange::new(1.0, 0.5),
+        Err(DelayRangeError::Reversed {
+            min_seconds: 1.0,
+            max_seconds: 0.5
+        })
+    );
+}
+
+#[test]
+fn an_interpolating_delay_places_an_impulse_at_the_requested_time() {
+    let seconds = 0.01;
+    let mut graph = GraphBuilder::new();
+    let impulse = graph.impulse();
+    let delayed = graph.delay(impulse, seconds, DelayRange::fixed(seconds).unwrap());
+    let voice = graph.out_mono(delayed).unwrap();
+
+    assert_eq!(voice.tail(), seconds);
+    let audio = play(&voice, &Note::new(440.0), 0.02);
+    let peak = audio[0]
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+        .unwrap()
+        .0;
+    let expected = (seconds * SR) as usize;
+    assert!(
+        peak.abs_diff(expected) <= 1,
+        "delayed impulse appeared at sample {peak}, expected {expected}"
+    );
+}
+
+#[test]
+fn delay_tails_accumulate_in_series_and_buffers_sum_in_parallel() {
+    let mut graph = GraphBuilder::new();
+    let impulse = graph.impulse();
+    let first = graph.delay(impulse, 0.1, DelayRange::fixed(0.1).unwrap());
+    let second = graph.delay(first, 0.2, DelayRange::fixed(0.2).unwrap());
+    let parallel = graph.delay(impulse, 0.4, DelayRange::fixed(0.4).unwrap());
+    let mixed = graph.add(second, parallel);
+    let voice = graph.out_mono(mixed).unwrap();
+
+    assert!((voice.tail() - 0.4).abs() < 1e-12);
+    assert!((voice.cost().delay_buffer_seconds - 0.7).abs() < 1e-12);
+
+    let limits = GraphLimits {
+        nodes: usize::MAX,
+        connections: usize::MAX,
+        input_channels: usize::MAX,
+        output_channels: usize::MAX,
+        delay_buffer_seconds: 0.69,
+        tail_seconds: f64::INFINITY,
+    };
+    assert!(matches!(
+        voice.validate_limits(limits),
+        Err(GraphLimitError::DelayBuffer { found, limit })
+            if (found - 0.7).abs() < 1e-12 && limit == 0.69
+    ));
+}
+
 // --------------------------------------------------------------------- stereo
 
 #[test]
@@ -205,6 +289,7 @@ fn arity_is_a_property_of_the_op() {
         nodes: vec![apteronotus_synth::Node {
             op: Op::Lowpass,
             inputs: vec![Input::new(Source::Const(0.0))],
+            tail: 0.0,
             src: None,
         }],
         outputs: vec![Source::port(0, 0)],
@@ -236,6 +321,7 @@ fn a_dangling_port_never_reaches_the_backend() {
         nodes: vec![apteronotus_synth::Node {
             op: Op::Noise,
             inputs: vec![],
+            tail: 0.0,
             src: None,
         }],
         outputs: vec![Source::port(0, 1)],
@@ -254,11 +340,13 @@ fn a_forward_reference_is_a_cycle_and_is_refused() {
             apteronotus_synth::Node {
                 op: Op::DcBlock,
                 inputs: vec![Input::new(Source::port(1, 0))],
+                tail: 0.0,
                 src: None,
             },
             apteronotus_synth::Node {
                 op: Op::DcBlock,
                 inputs: vec![Input::new(Source::port(0, 0))],
+                tail: 0.0,
                 src: None,
             },
         ],
@@ -277,6 +365,89 @@ fn a_graph_with_no_outputs_is_not_a_graph() {
         GraphTemplate::default().validate(),
         Err(TemplateError::NoOutputs)
     );
+}
+
+#[test]
+fn invalid_tail_metadata_never_reaches_the_scheduler() {
+    let template = GraphTemplate {
+        nodes: vec![apteronotus_synth::Node {
+            op: Op::Noise,
+            inputs: vec![],
+            tail: f64::NAN,
+            src: None,
+        }],
+        outputs: vec![Source::port(0, 0)],
+        ..GraphTemplate::default()
+    };
+    assert!(matches!(
+        template.validate(),
+        Err(TemplateError::InvalidTail { node: 0, .. })
+    ));
+}
+
+#[test]
+fn invalid_parameter_ranges_never_reach_note_binding() {
+    let template = GraphTemplate {
+        params: vec![ParamSpec::new("broken", 2.0, 1.0, 1.5)],
+        outputs: vec![Source::Const(0.0)],
+        ..GraphTemplate::default()
+    };
+    assert_eq!(
+        template.validate(),
+        Err(TemplateError::InvalidParamRange { param: 0 })
+    );
+}
+
+#[test]
+fn publication_budgets_use_a_deterministic_graph_cost() {
+    let voice = tone();
+    let cost = voice.cost();
+    assert_eq!(cost.nodes, 1);
+    assert_eq!(cost.input_channels, 0);
+    assert_eq!(cost.output_channels, 1);
+
+    let limits = GraphLimits {
+        nodes: 0,
+        connections: usize::MAX,
+        input_channels: usize::MAX,
+        output_channels: usize::MAX,
+        delay_buffer_seconds: f64::INFINITY,
+        tail_seconds: f64::INFINITY,
+    };
+    assert_eq!(
+        voice.validate_limits(limits),
+        Err(GraphLimitError::Nodes { found: 1, limit: 0 })
+    );
+}
+
+#[test]
+fn per_voice_initialization_depends_only_on_event_seed_and_stream() {
+    let mut g = GraphBuilder::new();
+    let initialized = g.init_random(17, -1.0, 1.0);
+    let voice = g.out_mono(initialized).unwrap();
+
+    let sample = |seed, stream_voice: &GraphTemplate| {
+        play(stream_voice, &Note::new(440.0).seed(seed), 1.0 / SR)[0][0]
+    };
+    let a = sample(123, &voice);
+    assert_eq!(a, sample(123, &voice));
+    assert_ne!(a, sample(124, &voice));
+
+    let mut g = GraphBuilder::new();
+    let initialized = g.init_random(18, -1.0, 1.0);
+    let other_stream = g.out_mono(initialized).unwrap();
+    assert_ne!(a, sample(123, &other_stream));
+}
+
+#[test]
+fn init_random_cannot_collapse_a_runtime_signal_implicitly() {
+    let mut g = GraphBuilder::new();
+    let moving = g.sine(1.0);
+    let initialized = g.init_random(0, moving, 1.0);
+    assert!(matches!(
+        g.out_mono(initialized),
+        Err(TemplateError::DynamicInitRandom { node: 1, port: 0 })
+    ));
 }
 
 // --------------------------------------------------- the data-only invariant

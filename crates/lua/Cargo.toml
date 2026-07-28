@@ -1,0 +1,19 @@
+[package]
+name = "apteronotus-lua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sandboxed Lua evaluation and bindings for Apteronotus"
+
+[dependencies]
+apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
+apteronotus-synth = { version = "0.1.0", path = "../synth" }
+# The 0.3.3 release predates arithmetic/bitwise metamethod dispatch and also
+# contains a table-growth panic after deleting string keys. The local snapshot
+# is exact upstream revision ce709eb1 plus one documented wasm32 seed fix.
+piccolo = { path = "../../vendor/piccolo" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Piccolo initializes its (unexposed) stdlib RNG while loading `math`.
+getrandom = { version = "0.2", features = ["js"] }
+getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }

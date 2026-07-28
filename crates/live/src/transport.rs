@@ -4,9 +4,16 @@
 //! quarter-note beats per cycle is the default meter; keeping it in transport
 //! means a 3/4 cycle needs no change to the pattern algebra.
 
-use apteronotus_pattern::Frac;
+use apteronotus_pattern::{Frac, Span};
 
 const APPROX_DENOMINATOR: i64 = 1_000_000;
+
+/// A monotonic mapping between exact cycle coordinates and backend seconds.
+pub trait CycleTime {
+    fn cycle_to_seconds(&self, cycle: Frac) -> f64;
+    fn span_to_seconds(&self, span: Span) -> f64;
+    fn seconds_to_cycle(&self, seconds: f64) -> Result<Frac, TransportError>;
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Transport {
@@ -61,6 +68,10 @@ impl Transport {
         self.cycle_to_seconds(cycles)
     }
 
+    pub fn span_to_seconds(self, span: Span) -> f64 {
+        self.duration_to_seconds(span.length())
+    }
+
     /// Convert wall/sequencer time back to a stable rational query boundary.
     ///
     /// cpal supplies floating-point seconds at the outer edge. The pattern
@@ -75,6 +86,20 @@ impl Transport {
             seconds * self.cycles_per_second(),
             APPROX_DENOMINATOR,
         ))
+    }
+}
+
+impl CycleTime for Transport {
+    fn cycle_to_seconds(&self, cycle: Frac) -> f64 {
+        (*self).cycle_to_seconds(cycle)
+    }
+
+    fn span_to_seconds(&self, span: Span) -> f64 {
+        (*self).span_to_seconds(span)
+    }
+
+    fn seconds_to_cycle(&self, seconds: f64) -> Result<Frac, TransportError> {
+        (*self).seconds_to_cycle(seconds)
     }
 }
 

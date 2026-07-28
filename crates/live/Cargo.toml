@@ -10,3 +10,8 @@ apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
 apteronotus-synth = { version = "0.1.0", path = "../synth" }
 cpal = "0.18.1"
 fundsp = { version = "0.23.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Keeps the production runtime independent of the language while allowing the
+# end-to-end acceptance test and native example to start from authored Lua.
+apteronotus-lua = { version = "0.1.0", path = "../lua" }

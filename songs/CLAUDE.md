@@ -17,7 +17,12 @@ The first four are cyclic and fix every parameter at onset. The last two exist
 because that turned out to be a property of the author rather than of music —
 see session 3 in `../_Tasks/000-architecture/LOG.md`.
 
-## Vocabulary the four of them use
+## Vocabulary the six songs use
+
+This is the target vocabulary inventory, not a claim that every word is already
+bound. The current executable Lua subset is tracked in
+`../crates/lua/README.md`; engine status and unresolved shapes are tracked in
+`../_Tasks/000-architecture/README.md`.
 
 **Top level** — `tempo`, `play`, `voice`, `send`, `master`, and from session 3
 `patch` (persistent lifetime), `run` (activate an autonomous rack), `timeline`
@@ -74,41 +79,49 @@ needs a control map per event; `crates/pattern` currently carries a single
 bare values into a one-key map, and a `Merge` node taking structure from the
 left. Everything else in the score notation is blocked on it.
 
-**2. The merge sampling rule is a deliberate deviation from Tidal.** Tidal
+**2. The merge sampling rule is a deliberate deviation from Tidal. Settled,
+not yet implemented because structured event controls do not exist.** Tidal
 emits one output event per right-hand event, which multiplies when the right
-side is faster. Proposal: sample the right side with a **zero-width query at
+side is faster. Rule: sample the right side with a **zero-width query at
 the left event's onset** and take the first value. One voice per note, no
 combinatorial blowup, and continuous signals fall out correctly — which suits a
 model where a voice is instantiated at onset with its parameters baked in.
 Ratcheting is then something you write in the notation instead.
 
-**3. `slew(n.hz, n.glide)` in `techno.eod` has no way to work.** Portamento
+**3. `slew(n.hz, n.glide)` in `techno.eod` has no way to work as an ordinary
+polyphonic voice.** Portamento
 needs the *previous* note's pitch, and a voice instantiated per note has never
-heard of one. Either the scheduler passes `n.prev_hz` and `n.legato`, or an
-instrument may declare itself monophonic and get one persistent graph with
-`Shared` pitch. The second is more honest — a 303 *is* monophonic — but it is a
-second voice model. **Unresolved.**
+heard of one. The persistent `PatchTemplate` and program controls now provide
+the honest monosynth lifetime, but the score-to-control driver that turns note
+events into pitch/gate changes is still unwritten. Passing `n.prev_hz` and
+`n.legato` remains the alternative; the song-level choice is unresolved.
 
 **4. `duck(pattern, amount)` is not a per-note parameter.** It modulates a
-whole line's output from a rhythm, which means a played line needs its own bus
-and that **a pattern must be convertible into a control signal** — sample and
-hold, with a shaped release. New concept, needed by two of the four songs.
+whole line's output from a rhythm. Bus/stem routing now exists, but **a pattern
+must still be convertible into a control signal** — sample and hold, with a
+shaped release. New score-level concept, needed by two of the original four
+songs.
 
 **5. `to(send, x)` is used at two different levels and they are not the same.**
 Inside a graph (`glass`, `cowbell`) it is a fixed patch; in a score
-(`supersaw`) it is a per-note send level. Either allow both and define them
-separately, or force sends to be score-level only. **Unresolved.**
+(`supersaw`) it is a per-note send level. **Resolved as two operations:** a
+graph send taps internal graph channels and its level may itself be a signal;
+an event send copies the completed voice channels with a scalar bound at the
+onset. Both resolve a lexical bus binding to an opaque `BusId`, and routed
+lowering sums them into the same program-wide stem layout.
 
-**6. `arp("up")` needs chords to survive as chords.** `[a3,c4,e4]` becomes a
-`Stack`, and a query returns its events unordered. The arpeggiator has to
-recover "these three share a `whole`" and order them by pitch. Groupable, but
-it means `arp` is not a plain pattern transform — it needs the events, not the
-tree.
+**6. `arp("up")` needs chords to survive as chords. Initial identity slice
+implemented.** `[a3,c4,e4]` now becomes a `Group`, not a plain `Stack`, and its
+events carry immutable group key, original member index and original count.
+Unrelated coincident layers remain a `Stack`. The arpeggiator itself is still
+unwritten: it must consume grouped events and choose an explicit pitch/order
+policy rather than infer grouping from coincidence.
 
-**7. Every voice has implicit parameters it never declares.** `n.pan` is used
-in three songs and declared in none; `n.hz`, `n.vel`, `n.dur` likewise. There
-is a fixed implicit set — decide it once and document it, rather than letting
-it accrete.
+**7. Every voice has implicit parameters it never declares. Resolved and
+implemented in synth/Lua.** The fixed symbolic set is `n.hz`, `n.velocity`,
+`n.duration`, and `n.pan`, with documented defaults. Reproducible event seed
+and runtime voice handle are separate identities: `init_random` consumes the
+former, and nothing may seed sound from the latter.
 
 **8. Voice-build code needs real loops and tables.** `for i = -3, 3`,
 `ipairs({2810, 3730, ...})`, table literals. That is at voice-build rate, so it
@@ -147,25 +160,26 @@ voicing still knows how many notes it made and in what order:
 `voicing(…):each(function(note, index, count) … end)`, a build-time closure that
 disappears like `every`'s. Neither song exercises it yet.
 
-**11b. A `Stack` should know whether it is a chord.** #6 and #11a are one gap:
-the query layer cannot address members of a simultaneity because a `Stack`
-records no group identity or member order. Nothing currently stops `arp`
-arpeggiating across `stack(bassline, melody)` — two lines that coincide are not
-a chord, and `[a3,c4,e4]` is. Record identity where it is known: in the voicing
-builder, and in the parser, which sees the syntactic group and discards it.
+**11b. A `Stack` should know whether it is a chord. Resolved in the pattern
+layer.** #6 and #11a were one gap. Mini-notation now records `[a3,c4,e4]` as a
+`Group` with member provenance, while `stack(bassline, melody)` remains an
+unrelated `Stack`. `degrade`, `rev` and branch transforms preserve the original
+member coordinates. The future music-layer voicing builder must create the same
+metadata; `arp` will consume it.
 
 **12. The first four songs were all cyclic, and that was an accident of the
-author.** `waves.eod` and `synthwave.eod` fake linear time by gating gains with
-curve windows over cyclic material, which works because their material *is*
-cyclic. A film-score cue's is not. The query model is fine; the constructor set
-was the narrow part.
+author. Initial engine slice implemented.** `waves.eod` and `synthwave.eod`
+fake linear time by gating gains with curve windows over cyclic material, which
+works because their material *is* cyclic. `Pattern::Timeline` now supplies
+finite, non-repeating material and `live::TempoMap` supplies step/ramped tempo
+conversion. Their Lua song-level constructors remain to be bound.
 
-**13. External triggers are not patterns.** `jamming.eod` fires bells from an
-audio onset detector, and you cannot query the future of a live stream. Anything
-that generates events from outside can only schedule at now-plus-latency, so it
-must not be typed as an ordinary pattern. Recording one turns it into a finite
-`timeline`, which is also what makes such a piece reproducible — one conversion,
-both problems.
+**13. External triggers are not patterns. Initial live boundary implemented.**
+`jamming.eod` fires bells from an audio onset detector, and you cannot query the
+future of a live stream. `live::ExternalTrigger` deliberately has no query
+contract; `TriggerRecorder` captures arrival ordinals and converts recordings
+to a finite `Timeline`, recovering queryability and reproducibility. The audio
+detector/device binding is still absent.
 
 **14. A stateful signal read from several graphs must lower to one node.**
 `their_hz` in `jamming.eod` is a pitch tracker referenced by two racks and the
@@ -183,7 +197,8 @@ resonator that kept tracking would slide for its whole ring. It is a typed rate
 boundary, `Signal<T> → Init<T>`, and the only legal collapse from signal to
 init — enforced by the rate checker, not by documentation.
 
-**16. Anything a voice seeds from must be derived, never counted.**
+**16. Anything a voice seeds from must be derived, never counted. Implemented
+through the first graph initializer.**
 `neon.eod`'s `init_rand(n.id, …)` reproduces analogue component tolerance as
 deterministic per-voice drift. A runtime counter for `n.id` would change with
 query chunking, with offline versus live scheduling, and — worst — with the
@@ -191,7 +206,9 @@ order a `Stack`'s members come back in, which #6 says is unspecified. So the
 implicit contract's voice identity splits: a derived `event_seed` for anything
 reproducible, a `voice_handle` counter for addressing a sounding voice and
 nothing else. `waves.eod` is specified as giving the same nine minutes every
-time it is opened; this is what that costs.
+time it is opened; this is what that costs. Pattern provenance now derives the
+event seed, the scheduler binds it into `Note`, and
+`init_random(stream, min, max)` deterministically consumes it.
 
 ## Rules these songs are written to
 

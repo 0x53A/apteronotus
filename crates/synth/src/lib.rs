@@ -28,14 +28,25 @@
 //! liftable behind an ABI later without disturbing anything above it.
 
 pub mod builder;
+pub mod control;
+pub mod instrument;
 pub mod lower;
 pub mod note;
+pub mod routing;
+pub mod stdlib;
 pub mod template;
 
 pub use builder::{GraphBuilder, n};
-pub use lower::instantiate;
+pub use control::{ControlError, ControlId, ControlLayout, ControlSpec};
+pub use instrument::{InstrumentLifetime, PatchError, PatchTemplate};
+pub use lower::{
+    ControlStore, LowerError, instantiate, instantiate_patch, instantiate_routed,
+    instantiate_routed_with_controls, instantiate_with_controls,
+};
 pub use note::Note;
+pub use routing::{BusId, BusLayout, EventRouting, EventSend, RoutingError};
 pub use template::{
-    Adsr, Basis, Curve, CurveTerm, GraphTemplate, Implicit, Input, Node, NodeId, Op, ParamId,
-    ParamSpec, ShapeKind, Source, TemplateError,
+    Adsr, Basis, Curve, CurveTerm, DelayRange, DelayRangeError, GraphCost, GraphLimitError,
+    GraphLimits, GraphSend, GraphTemplate, Implicit, Input, Node, NodeId, Op, ParamId, ParamSpec,
+    ShapeKind, Source, TemplateError,
 };

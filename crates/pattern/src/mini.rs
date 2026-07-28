@@ -18,7 +18,7 @@
 //! | `a?` `a?0.3` | dropped at random, reproducibly |
 //! | `a(3,8)` `a(3,8,2)` | spread over a euclidean rhythm, optionally rotated |
 
-use crate::event::{SrcSpan, Value};
+use crate::event::{EventOrigin, GroupNode, SrcSpan, Value};
 use crate::frac::Frac;
 use crate::pattern::Pattern;
 
@@ -64,6 +64,15 @@ pub mod limits {
 
 /// Parse mini-notation into a pattern.
 pub fn parse(src: &str) -> Result<Pattern, ParseError> {
+    parse_at(src, 0)
+}
+
+/// Parse with the identity of the source-language binding or call site.
+///
+/// Byte spans inside mini-notation are local to the string. The outer frontend
+/// supplies `binding` so two identical strings written at different call sites
+/// remain distinct event provenance.
+pub fn parse_at(src: &str, binding: u64) -> Result<Pattern, ParseError> {
     let mut p = Parser {
         chars: src.char_indices().collect(),
         end: src.len(),
@@ -71,6 +80,7 @@ pub fn parse(src: &str) -> Result<Pattern, ParseError> {
         seed: 0,
         depth: 0,
         nodes: 0,
+        binding,
     };
     let pat = p.stack(&[])?;
     p.skip_ws();
@@ -78,7 +88,10 @@ pub fn parse(src: &str) -> Result<Pattern, ParseError> {
         return Err(p.err_here("unexpected character"));
     }
     let density = pat.density();
-    if !(density <= limits::EVENTS) {
+    if !matches!(
+        density.partial_cmp(&limits::EVENTS),
+        Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
+    ) {
         return Err(ParseError {
             message: format!(
                 "produces about {density:.0} events per cycle, more than the limit of {}",
@@ -100,6 +113,7 @@ struct Parser {
     seed: u64,
     depth: u32,
     nodes: usize,
+    binding: u64,
 }
 
 struct Step {
@@ -186,7 +200,7 @@ impl Parser {
 
     /// A count or factor, rejected if it is outside what music needs.
     fn bounded(&self, start: usize, n: i64, what: &str) -> Result<i64, ParseError> {
-        if n < 1 || n > limits::COUNT {
+        if !(1..=limits::COUNT).contains(&n) {
             return Err(self.err_at(
                 start,
                 &format!("{what} must be between 1 and {}", limits::COUNT),
@@ -197,11 +211,15 @@ impl Parser {
 
     /// Comma-separated groups, played together.
     fn stack(&mut self, closers: &[char]) -> Result<Pattern, ParseError> {
+        Ok(Pattern::stack(self.stack_layers(closers)?))
+    }
+
+    fn stack_layers(&mut self, closers: &[char]) -> Result<Vec<Pattern>, ParseError> {
         let mut layers = vec![self.sequence(closers)?];
         while self.eat(',') {
             layers.push(self.sequence(closers)?);
         }
-        Ok(Pattern::stack(layers))
+        Ok(layers)
     }
 
     /// Whitespace-separated steps sharing one cycle.
@@ -344,11 +362,18 @@ impl Parser {
             }
             Some('[') => {
                 self.bump();
-                let inner = self.stack(&[']'])?;
+                let layers = self.stack_layers(&[']'])?;
                 if !self.eat(']') {
                     return Err(self.err_at(start, "unclosed `[`"));
                 }
-                Ok(inner)
+                if layers.len() > 1 {
+                    Ok(Pattern::group(
+                        GroupNode::from_source(self.binding, start),
+                        layers,
+                    ))
+                } else {
+                    Ok(Pattern::stack(layers))
+                }
             }
             Some('<') => {
                 self.bump();
@@ -373,6 +398,7 @@ impl Parser {
                 Ok(Pattern::Pure {
                     value,
                     src: Some(span),
+                    origin: EventOrigin::source(self.binding, Some(span)),
                 })
             }
         }

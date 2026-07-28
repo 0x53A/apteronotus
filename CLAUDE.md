@@ -10,21 +10,34 @@ roughly a kilohertz.
 ## Layout
 
 - `crates/pattern` — the pattern algebra and the mini-notation. **No audio, no
-  I/O, no dependencies.** The only way in is `mini::parse`, the only way out is
-  `Pattern::query`. Everything here is testable without a sound card, which is
-  why it is a crate of its own and why it must stay that way.
+  I/O, no dependencies.** Cyclic patterns and finite `Timeline`s share the same
+  pure `Pattern::query` boundary; recorded timelines preserve arrival ordinals,
+  and chord groups carry provenance beside values.
 - `crates/music` — the first pure slice is written: typed scientific-notation
   pitch, accidentals and pitch ↔ frequency. Scales and modes, chord symbols,
   voicing dictionaries, anchors and inversions remain. Deliberately *not*
   inside `pattern`, which has no musical domain knowledge and should keep it
   that way.
-- `crates/synth` — the first voice path is written: data-only `GraphTemplate`,
-  validation, a Rust builder and lowering onto fundsp. `InstrumentSpec` and
-  the wider primitive set remain.
-- `crates/live` — the first output path is written: constant-tempo transport
-  with configurable beats per cycle, a monotonic-frontier pitch scheduler,
-  and cpal output over `fundsp::Sequencer::backend()`. Editor, live activation
-  and MIDI in remain.
+- `crates/synth` — data-only `GraphTemplate`, validation and caller-supplied
+  publication budgets, per-note voices, routed stems, program-scope writable
+  controls, explicit graph inputs, an allocation-bounded interpolating delay,
+  and the first persistent `PatchTemplate` lowering onto fundsp. The wider
+  primitive set remains.
+- `crates/live` — constant and ramped tempo maps, a monotonic-frontier pitch
+  scheduler, transactional generation activation, external-trigger recording,
+  and cpal output over `fundsp::Sequencer::backend()`. Editor and device/MIDI
+  binding remain.
+- `crates/lua` — a fresh, sandboxed Piccolo VM per evaluation, producing only
+  owned pattern/graph/program data. The same crate builds natively and for
+  `wasm32-unknown-unknown`. Typed graph operators, voices, persistent patches,
+  controls, buses/sends and direct `pattern`/`play` call-site attribution are
+  connected; graph-expression spans, tempo/timeline bindings and the wider
+  score API remain.
+- `crates/app` — the first native user path: a Lua text editor, explicit Run
+  command, diagnostics and a control-thread player over the production
+  evaluator, revision slot, multi-track scheduler and cpal output. It is a
+  deliberately narrow desktop checkpoint; browser UI, file handling,
+  continuous syntax diagnostics and the wider runtime features remain.
 
 `pattern` never learns that fundsp exists; `synth` never learns there is a
 language. That seam is the point: it is what keeps the engine liftable behind
@@ -44,14 +57,15 @@ one row, and it is the topmost:
 | control | 500 Hz (fundsp `envelope`/`lfo` sample at 2 ms and interpolate) | envelopes, sweeps, LFOs | compiled expressions only |
 | audio | 48 kHz, blocks of 64 | oscillators, filters, shapers | compiled expressions or built-in nodes |
 
-**`graph = function(n)` runs once per edit, not once per note.** `n.hz`, `n.vel`
-and every declared parameter are *symbolic* while it executes; it builds a
-`GraphTemplate` that the runtime instantiates per onset. Loops and tables may
-generate topology, but a branch on a symbolic note value has to become an
-explicit graph operation rather than an ordinary `if`. All four songs stage
-cleanly under this rule — none of them contains an `if`, and every loop is over
-literal constants. If a real instrument ever needs event-dependent topology the
-answer is an explicitly marked dynamic factory, not making every voice dynamic.
+**`graph = function(n)` runs once per edit, not once per note.** `n.hz`,
+`n.velocity`, `n.duration`, `n.pan` and every declared parameter are *symbolic*
+while it executes; it builds a `GraphTemplate` that the runtime instantiates per
+onset. Loops and tables may generate topology, but a branch on a symbolic note
+value has to become an explicit graph operation rather than an ordinary `if`.
+All six specification songs' graph functions stage cleanly under this rule —
+none contains such an `if`, and every topology-building loop is over literal
+constants. If a real instrument ever needs event-dependent topology the answer
+is an explicitly marked dynamic factory, not making every voice dynamic.
 
 **No host-language closure may survive into the graph.** Once
 `Sequencer::push` hands a voice to the backend it is rendered *on the audio
@@ -144,10 +158,10 @@ they can never trigger a voice. They are for steering a parameter. `segment(n)`
 is what gives one onsets when you do want to play it.
 
 **Notation desugars into a small node set.** `Silence`, `Pure`, `Stack`,
-`Slowcat`, `Timecat`, `Fast`, `Shift`, `Rev`, `When`, `Degrade`, `Signal`,
-`Segment`, `Range` — that is all of it. `*`, `/`, `!`, `@`, `?`, `(k,n,r)` are
-parser sugar; euclidean rhythms become a `Timecat` of the pattern and silence.
-The algebra has no special cases for notation.
+`Group`, `Slowcat`, `Timecat`, `Fast`, `Shift`, `Rev`, `When`, `Degrade`,
+`Signal`, `Segment`, `Range`, `Timeline` — that is all of it. `*`, `/`, `!`,
+`@`, `?`, `(k,n,r)` are parser sugar; euclidean rhythms become a `Timecat` of
+the pattern and silence. The algebra has no special cases for notation.
 
 **`every` holds branches, not functions.** `When { modulo, offset, then,
 otherwise }` — the transform is applied while the tree is built, so the tree
@@ -181,20 +195,57 @@ persistent graph with `Shared` control values is a monosynth. `Shared` keeps
 its place for what it is good at — global, continuously varying controls that
 outlive any note.
 
+**A patch is one persistent graph instance with explicit writable controls and
+host audio inputs.** It may not refer to `n.*`, declared per-note parameters,
+note-clock envelopes or per-voice initializers. Program-scope `ControlId`
+handles lower to one shared atomic node per graph with fan-out; handles are
+arena-scoped, so equal declaration ordinals in two program generations cannot
+alias. A persistent patch can consume the flattened bus stems produced by voice
+lowering. Replacement and clocked patch automation remain separate concerns,
+not hidden inside this first lifetime slice.
+
+**Per-voice randomness derives from event provenance.** Pattern events hash
+their construction origin, exact occurrence span, and group-member identity.
+Recorded events additionally carry their captured ordinal. The scheduler binds
+that seed into `Note`, and `init_random(stream, min, max)` is the only graph
+operation that consumes it. Runtime voice handles remain addressing tokens and
+must never seed sound.
+
+**Voice tails are conservative construction-time metadata.** Stateful nodes
+declare how long they may remain audible after their inputs stop, and those
+durations add along serial paths. A stdlib composition may attach the metadata
+without becoming a DSP primitive: `ring(hz, decay)` is still a multiply plus a
+band-pass. When `decay` is symbolic, its upper bound is derived from declared
+`ParamSpec` ranges by interval propagation through scalar arithmetic. A runtime
+curve or audio signal may not decide lifetime; the scheduler never samples one
+to learn when a voice is done.
+
+**Graph sends and event sends are different data.** A graph send taps named
+internal `Source`s and may use a symbolic signal as its level; an event send
+copies the completed voice outputs with a scalar bound once per onset. Both
+target opaque program-scope `BusId` handles, never strings. Routed lowering
+flattens main and bus stems into one channel layout and sums collisions before
+anything reaches fundsp. A graph containing sends is rejected by the
+main-output-only lowering path rather than silently losing its wet path. Bus
+effects remain persistent processors over those stems; routing does not make
+them part of a voice.
+
 **Every primitive is exposed in its modulatable form.** Bind `lowpass()` (cutoff
 and Q as inputs), never `lowpass_hz()`, and auto-lift scalars to `dc()`. One
 function, and any parameter of anything accepts any signal. That single rule is
 what makes it a rack rather than a preset browser, and it is why a curve needs
 no special support — it is just another signal into the same input.
 
-**The same sandbox runs on desktop and web.** That is the v1 requirement, and it
-is the only open assumption that can still invalidate the crate layout. Note the
-phrasing: *the same Apteronotus Lua sandbox with full relevant language
-semantics*, not a complete PUC Lua distribution. A sandbox is expected to be a
-subset — nobody expects `io` in a browser — so peripheral stdlib gaps are a
-property of the sandbox, not a defect in it. What may **not** be missing is core
-language behaviour: if it looks like Lua, tables and closures have to behave like
-Lua's.
+**The same sandbox runs on desktop and web.** The language-feasibility risk is
+retired: `crates/lua` builds natively and for `wasm32-unknown-unknown`, with no
+alternate browser VM or language boundary. The native integration suite verifies
+the behavioral contract; executing it in a browser remains shell/harness work,
+not a crate-layout assumption. The contract is the Apteronotus Lua sandbox with
+full relevant language semantics, not a complete PUC Lua distribution. A
+sandbox is expected to be a subset — nobody expects `io` in a browser — so
+peripheral stdlib omissions are policy, not defects. Core language behaviour
+remains non-negotiable: tables, closures, varargs, loops and metamethods behave
+like Lua's.
 
 Lua-shaped because Lua 5.3+ has `__shr`, `__bor`, `__band`, so it hosts fundsp's
 operator algebra almost verbatim (only `^` → `~` for branch, since `^` is
@@ -202,7 +253,7 @@ exponentiation).
 
 ### What the sandbox exposes
 
-Required language semantics — the spike passes or fails on these:
+Required language semantics, now covered by the integration suite:
 
 functions, closures and lexical scope; tables and table constructors; numeric
 and generic `for`; `pairs`/`ipairs`; multiple returns and varargs; metatables
@@ -213,11 +264,11 @@ and numeric operations.
 |---|---|
 | `base` | selected safe functions |
 | `math` | deterministic subset — **no `math.random`**, use the pattern algebra's seeded randomness |
-| `string` | practical text manipulation |
-| `table` | `insert`/`remove`/`sort`/`concat` and friends |
-| `utf8` | probably useful |
-| `coroutine` | optional; piccolo already has it |
-| `apteronotus` | patterns, graphs, music theory, transport |
+| `string` | Piccolo's practical text operations |
+| `table` | Piccolo plus sandbox implementations of `insert`/`remove`/`sort`/`concat` |
+| `coroutine` | Piccolo's core coroutine library |
+| `utf8` | not exposed yet; no specification song requires it |
+| `apteronotus` | current pattern and synthesis builders; music theory and tempo/timeline bindings remain |
 
 Deliberately absent: `io`, `os`, `loadfile`, `dofile`, `package.loadlib`,
 `debug`, filesystem-backed `require` (host-controlled stdlib modules only). Also
@@ -228,43 +279,32 @@ behaviour, exact error wording, exact table iteration order, C API compatibility
 contains zero dynamic evaluation, and it complicates source attribution and
 resource accounting for no demonstrated musical benefit.
 
-### The route, and why it is not the obvious one
+### The implemented route, and why it was not the obvious one
 
 mlua does support `wasm32-unknown-emscripten`, but **wasm-bindgen does not
 support that target** (`rustwasm/wasm-bindgen#2722`) and the two targets' WASM is
 ABI-incompatible. So mlua cannot simply become another dependency of the
 existing `unknown-unknown` application.
 
-Try **piccolo** first: a Lua VM in pure Rust, `wasm32-unknown-unknown`, one
-module, direct interop, no emscripten toolchain. Verified against 0.3.3 (June
-2026), it already has closures with proper upvalues, proper tail calls, varargs,
-coroutines that yield transparently through Rust callbacks, `_ENV`, fully
-recursive metamethods, safe-downcasting userdata, an incremental cycle-detecting
-GC in the style of PUC 5.3/5.4, **execution fuel**, and accurate memory
-accounting inside its `gc-arena`. The stackless design is *for* sandboxing and
-resilience against untrusted-script DoS, so the instruction budget and the
-interrupt-a-runaway-loop requirement are design goals rather than a debug hook
-bolted on afterwards. That serves G1 better than mlua does.
+`crates/lua` uses a vendored **Piccolo** revision: a pure-Rust Lua VM that
+targets `wasm32-unknown-unknown` directly, with no Emscripten toolchain. Its
+stackless executor provides enforceable fuel, and `gc-arena` provides measured
+memory accounting. Apteronotus fills the table-library operations its topology
+builders need, removes host access and nondeterministic randomness, and carries
+an audited wasm portability patch. The crates.io 0.3.3 release also lacked the
+arithmetic/bitwise metamethod dispatch required by the graph algebra and had a
+table-growth panic; the pinned revision contains those fixes. Exact revision and
+patch provenance live in `vendor/piccolo/APTERONOTUS.md`.
 
-Its real gaps, from the same check: `io`, `file`, `os`, `package`, `string`,
-`table` and `utf8` are missing or sparse; no stack traces; no debugger, probably
-ever; poor error messages; frequent pre-1.0 API breakage. Against the contract
-above, most of that is irrelevant — but `string` and `table` are *not*
-peripheral and are the thing to measure. They are also a bounded, contributable
-amount of work under piccolo's MIT/CC0 licensing.
+The missing `debug` library means exact call sites come from source
+transformation rather than stack walking. The first pass is implemented:
+direct `pattern(...)` and `play(...)` calls receive original byte offsets and
+feed `mini::parse_at`. Graph-expression spans and a complete diagnostic source
+map are the remaining attribution work.
 
-The missing `debug` library has one consequence worth stating separately:
-**exact call sites must come from source transformation**, not from a stack
-walk. That is the better answer anyway — it is what gives byte-accurate spans
-rather than mlua's line-level attribution — but it has to be built, not assumed.
-
-The fallback ladder, in order: use piccolo directly; fork and fill its bounded
-gaps; an emscripten Lua module that builds the whole program internally and
-transfers **one encoded `Program` per edit** (the same Rust pattern/graph crates
-compile into both modules and ship together, so the schema need never be stable
-or public — this is far cheaper than it first sounds and preserves real PUC
-compatibility); implement the remaining VM functionality in Rust ourselves.
-`full_moon` (StyLua's parser) supplies Lua syntax in pure Rust for that last rung.
+The old fallback ladder—further Piccolo fixes, an Emscripten module transferring
+one encoded `Program` per edit, or a purpose-built VM—is retained only in the
+historical architecture proposals. None is currently needed.
 
 **Primitives are two-tier.** If it needs internal state or a per-sample
 feedback path it is a Rust node; if it is composition of existing nodes it
@@ -292,6 +332,14 @@ bus (persistent, continuous). Placement stays syntactically visible — silently
 inferring a clock is charming for a week and maddening after. Known and
 documented limitation: the pattern placement samples at onset, so a long held
 note freezes its value.
+
+**An interpolating delay declares its allocation range when staged.** Its delay
+time remains an ordinary modulatable signal, but a signal cannot be sampled to
+discover a safe maximum. `DelayRange` therefore supplies construction-time
+minimum/maximum seconds, lowering allocates once from the maximum, and graph
+publication budgets count the sum of those maxima. A delay node retains
+history; it does not by itself authorize an arbitrary graph cycle. Feedback
+gets an explicit representation before cycles become legal.
 
 **"Add a filter" is a mix, not a rebuild.** Graph topology is fixed once built,
 so a swept effect is always present with its contribution automated. Genuine
@@ -343,9 +391,16 @@ that cpal and eframe dlopen at runtime; `crates/pattern` needs none of it and
 builds anywhere.
 
 ```
-cargo test              # the whole workspace
+cargo test --workspace
+cargo check -p apteronotus-lua --target wasm32-unknown-unknown
+cargo clippy -p apteronotus-pattern -p apteronotus-music \
+  -p apteronotus-synth -p apteronotus-live -p apteronotus-lua \
+  --all-targets --no-deps -- -D warnings
 cargo fmt
 ```
+
+Piccolo is a pinned upstream snapshot and is intentionally not subjected to
+the first-party warnings-as-errors Clippy gate.
 
 Reference prototypes, all outside this repo: `~/src/da-beat` (cpal + fundsp +
 MIDI, monophonic `Channel` trait — the approach is worth lifting, the code is

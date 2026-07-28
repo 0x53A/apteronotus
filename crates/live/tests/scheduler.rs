@@ -1,4 +1,6 @@
-use apteronotus_live::{PitchScheduler, ScheduleError, Transport};
+use apteronotus_live::{
+    PitchScheduler, ProgramScheduler, ScheduleError, ScheduledTrack, Transport,
+};
 use apteronotus_pattern::{Frac, mini};
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
 use apteronotus_synth::{Adsr, GraphBuilder, GraphTemplate, n};
@@ -84,4 +86,44 @@ fn pattern_through_scheduler_and_synth_makes_first_sound() {
     assert!(rms(&audio[0]) > 0.01);
     let measured = zero_crossing_hz(&audio[0][2_000..20_000], SR);
     assert!((measured - 261.63).abs() < 3.0, "measured {measured} Hz");
+}
+
+#[test]
+fn a_program_window_is_atomic_across_tracks() {
+    let valid = mini::parse("c4 e4").unwrap();
+    let invalid = mini::parse("not_a_note").unwrap();
+    let voice = voice();
+    let transport = Transport::new(120.0).unwrap();
+    let mut scheduler = ProgramScheduler::default();
+    let mut sequencer = PitchScheduler::sequencer(&voice);
+    sequencer.set_sample_rate(SR);
+
+    let error = scheduler
+        .fill_to(
+            Frac::ONE,
+            [
+                ScheduledTrack::new(&valid, &voice),
+                ScheduledTrack::new(&invalid, &voice),
+            ],
+            transport,
+            &mut sequencer,
+        )
+        .unwrap_err();
+    assert!(matches!(error, ScheduleError::Pitch { .. }));
+    assert_eq!(scheduler.frontier(), Frac::ZERO);
+    let audio = render(&mut sequencer, SR, 0.25);
+    assert!(rms(&audio[0]) < 1.0e-9);
+
+    let report = scheduler
+        .fill_to(
+            Frac::ONE,
+            [
+                ScheduledTrack::new(&valid, &voice),
+                ScheduledTrack::new(&valid, &voice),
+            ],
+            transport,
+            &mut sequencer,
+        )
+        .unwrap();
+    assert_eq!(report.voices, 4);
 }

@@ -11,10 +11,11 @@
 //! ahead of the audio clock and the editor asks about the same instant again;
 //! both must get the same answer. Nothing in here may advance a cursor.
 
-use crate::event::{Event, SrcSpan, Value};
+use crate::event::{Event, EventOrigin, GroupNode, GroupProvenance, SrcSpan, Value};
 use crate::frac::Frac;
 use crate::rand;
 use crate::span::Span;
+use crate::timeline::Timeline;
 
 /// A continuous signal: defined everywhere, with an onset nowhere.
 ///
@@ -80,9 +81,15 @@ pub enum Pattern {
     Pure {
         value: Value,
         src: Option<SrcSpan>,
+        origin: EventOrigin,
     },
     /// Everything at once.
     Stack(Vec<Pattern>),
+    /// Related simultaneous members, unlike a plain [`Pattern::Stack`].
+    Group {
+        node: GroupNode,
+        members: Vec<Pattern>,
+    },
     /// One per cycle, in turn. `<a b>` in the mini-notation.
     Slowcat(Vec<Pattern>),
     /// A weighted sequence filling one cycle. This is what a bare mini-notation
@@ -128,6 +135,8 @@ pub enum Pattern {
         hi: f64,
         inner: Box<Pattern>,
     },
+    /// Finite, non-repeating material.
+    Timeline(Timeline),
 }
 
 impl Pattern {
@@ -147,7 +156,7 @@ impl Pattern {
         match self {
             Pattern::Silence => {}
 
-            Pattern::Pure { value, src } => {
+            Pattern::Pure { value, src, origin } => {
                 for c in span.cycles() {
                     let sam = c.begin.sam();
                     out.push(Event {
@@ -155,6 +164,8 @@ impl Pattern {
                         part: c,
                         value: value.clone(),
                         src: *src,
+                        origin: *origin,
+                        group: None,
                     });
                 }
             }
@@ -162,6 +173,18 @@ impl Pattern {
             Pattern::Stack(ps) => {
                 for p in ps {
                     p.query_into(span, out);
+                }
+            }
+
+            Pattern::Group { node, members } => {
+                let count = members.len() as u32;
+                for (index, member) in members.iter().enumerate() {
+                    for mut event in member.query(span) {
+                        let occurrence = event.whole.unwrap_or(event.part);
+                        event.group =
+                            Some(GroupProvenance::new(*node, occurrence, index as u32, count));
+                        out.push(event);
+                    }
                 }
             }
 
@@ -250,6 +273,14 @@ impl Pattern {
                             part: e.part.reflect(cyc),
                             value: e.value,
                             src: e.src,
+                            origin: e.origin,
+                            group: e.group.map(|group| {
+                                group.at_occurrence(
+                                    e.whole
+                                        .map(|whole| whole.reflect(cyc))
+                                        .unwrap_or_else(|| e.part.reflect(cyc)),
+                                )
+                            }),
                         });
                     }
                 }
@@ -284,7 +315,9 @@ impl Pattern {
                     // so a window that bisects a note decides the same way as
                     // one that contains it.
                     let t = e.whole.map(|w| w.begin).unwrap_or(e.part.begin);
-                    let r = rand::at(t, *seed);
+                    // Provenance and group membership distinguish simultaneous
+                    // events without making the result depend on query order.
+                    let r = rand::at(t, *seed ^ e.seed());
                     if (r < *amount) == *keep {
                         out.push(e);
                     }
@@ -297,6 +330,8 @@ impl Pattern {
                     part: span,
                     value: Value::F(sig.at(span.midpoint())),
                     src: None,
+                    origin: EventOrigin::ANONYMOUS,
+                    group: None,
                 });
             }
 
@@ -324,6 +359,8 @@ impl Pattern {
                                 part,
                                 value: v.value,
                                 src: v.src,
+                                origin: v.origin,
+                                group: v.group.map(|group| group.at_occurrence(slot)),
                             });
                         }
                         k += 1;
@@ -342,6 +379,8 @@ impl Pattern {
                     out.push(e);
                 }
             }
+
+            Pattern::Timeline(timeline) => timeline.query_into(span, out),
         }
     }
 
@@ -391,7 +430,9 @@ impl Pattern {
         match self {
             Pattern::Silence => 0.0,
             Pattern::Pure { .. } | Pattern::Signal(_) => 1.0,
-            Pattern::Stack(ps) => ps.iter().map(Pattern::density).sum(),
+            Pattern::Stack(ps) | Pattern::Group { members: ps, .. } => {
+                ps.iter().map(Pattern::density).sum()
+            }
             Pattern::Slowcat(ps) => ps.iter().map(Pattern::density).fold(0.0, f64::max),
             Pattern::Timecat(parts) => parts.iter().map(|(_, p)| p.density()).sum(),
             Pattern::Fast { factor, inner } => inner.density() * factor.to_f64().abs(),
@@ -403,6 +444,7 @@ impl Pattern {
                 then, otherwise, ..
             } => then.density().max(otherwise.density()),
             Pattern::Segment { steps, .. } => *steps as f64,
+            Pattern::Timeline(timeline) => timeline.events().len() as f64,
         }
     }
 
@@ -413,7 +455,11 @@ impl Pattern {
     }
 
     pub fn pure(value: Value) -> Pattern {
-        Pattern::Pure { value, src: None }
+        Pattern::Pure {
+            value,
+            src: None,
+            origin: EventOrigin::ANONYMOUS,
+        }
     }
 
     pub fn num(x: f64) -> Pattern {
@@ -441,6 +487,13 @@ impl Pattern {
         }
     }
 
+    pub fn group(node: GroupNode, members: Vec<Pattern>) -> Pattern {
+        match members.len() {
+            0 => Pattern::Silence,
+            _ => Pattern::Group { node, members },
+        }
+    }
+
     /// One item per cycle, in turn.
     pub fn cat(items: Vec<Pattern>) -> Pattern {
         match items.len() {
@@ -452,6 +505,10 @@ impl Pattern {
 
     pub fn signal(sig: Signal) -> Pattern {
         Pattern::Signal(sig)
+    }
+
+    pub fn timeline(timeline: Timeline) -> Pattern {
+        Pattern::Timeline(timeline)
     }
 
     // --------------------------------------------------------------- methods

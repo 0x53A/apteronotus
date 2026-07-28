@@ -1,12 +1,36 @@
 [workspace]
 resolver = "3"
-members = ["crates/live", "crates/music", "crates/pattern", "crates/synth"]
+members = [
+    "crates/app",
+    "crates/live",
+    "crates/lua",
+    "crates/music",
+    "crates/pattern",
+    "crates/synth",
+]
 # `live` is excluded: it is the only crate that links the host audio stack.
 # Its scheduler tests are offline, but the lower crates need no cpal/alsa build
 # environment at all.
-default-members = ["crates/music", "crates/pattern", "crates/synth"]
+default-members = [
+    "crates/lua",
+    "crates/music",
+    "crates/pattern",
+    "crates/synth",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+
+# The normal development command launches a realtime application. Keep the UI
+# and Lua evaluator debuggable, but do not ask the audio callback or DSP graph
+# to meet device deadlines with unoptimized code.
+[profile.dev.package.apteronotus-live]
+opt-level = 3
+
+[profile.dev.package.apteronotus-synth]
+opt-level = 3
+
+[profile.dev.package.fundsp]
+opt-level = 3

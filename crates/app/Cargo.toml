@@ -1,0 +1,21 @@
+[package]
+name = "apteronotus-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "apteronotus"
+path = "src/main.rs"
+
+[dependencies]
+apteronotus-live = { version = "0.1.0", path = "../live" }
+apteronotus-lua = { version = "0.1.0", path = "../lua" }
+apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+

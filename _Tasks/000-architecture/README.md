@@ -1,10 +1,11 @@
 # 000 — Architecture
 
-Current state and open questions. Kept pruned; the reasoning trail, including
-everything rejected, is in `LOG.md`.
+Current state, roadmap and open questions. Kept pruned; the reasoning trail,
+including everything rejected, is in `LOG.md`.
 
 Conclusions that have hardened live in `/CLAUDE.md` and `/songs/CLAUDE.md`.
-This file is what is *not* settled.
+This file is the implementation/status ledger and the boundary of what is *not*
+settled.
 
 `codex-architecture.md` is a second, independent architecture proposal, written
 before reading this directory. Its major fork — construct a concrete voice once
@@ -21,61 +22,61 @@ feature.
 
 | | |
 |---|---|
-| `crates/pattern` | **done.** 65 tests, no dependencies. Mini-notation, pattern algebra, continuous signals, source spans, parse limits. |
-| `songs/*.eod` | **written as the specification.** Four songs, unimplemented. Known too narrow — no music theory, no select/join, and (session 3) all four cyclic, all four with parameters fixed at onset. |
+| `crates/pattern` | **foundational slice complete.** 72 tests, no dependencies. Mini-notation, cyclic algebra, finite timelines, continuous signals, group/event provenance, source spans and parse limits. Structured event controls remain the next shape decision. |
+| `songs/*.eod` | **written as the specification.** Four original songs plus two session-3 stress cases, not yet runnable as whole songs. The original four are known too narrow — no music theory, no select/join, all cyclic, all parameters fixed at onset. |
 | `songs/neon.eod`, `songs/jamming.eod` | session 3, covering free time + gestures and live input respectively. See below. |
 | the Strudel corpus audit | **done.** 723 snippets, 249 k chars. See `LOG.md` and `corpus/`. |
 | the synthesis corpus audit | **not started.** This is the one that bears on the graph model. |
 | `crates/music` | **first slice written.** Scientific pitch notation, fractional MIDI, accidentals, pitch ↔ frequency. Music-theory expansion remains open. |
-| `crates/synth` | **first voice path written.** Data-only `GraphTemplate`, per-input and per-node spans, validation, Rust builder, note binding and fundsp lowering. 18 offline graph tests. |
-| `crates/live` | **first sound path written.** Configurable-meter constant transport, monotonic-frontier pitch scheduler, cpal frontend/backend output and `examples/first_sound.rs`. 4 offline scheduler tests. Editor, generations/activation and MIDI remain. |
-| the scripting language | Lua-shaped, **on the web is now a hard requirement** |
+| `crates/synth` | **voice, routing and first persistent slice written.** Data-only `GraphTemplate`, spans, validation/budgets, graph inputs, per-note and program controls, routed stems, `PatchTemplate`, deterministic per-voice initialization, allocation-bounded interpolating delay and fundsp lowering; 54 offline synthesis tests. |
+| `crates/live` | **first runtime path written.** Constant/ramped tempo maps, monotonic-frontier single- and multi-track schedulers, transactional generations, trigger recording, cpal frontend/backend output and examples. Multi-track windows lower completely before any voice is pushed. Device/MIDI binding remains. |
+| `crates/lua` | **ordinary voice path connected end to end; first persistent slice written.** One Lua `voice`/`play` script now evaluates to an owned program, passes transactional publication validation, resolves `VoiceId`, schedules `"c4 e4 g4"` into fundsp, and produces measured offline audio; a native-output example uses the same path. The binding also has typed patch operators, persistent patches, graph inputs, program controls, buses/sends, curves, bounded delays, deterministic initializers, separate construction/publication limits, and call-site-aware mini parsing. `n.velocity`/`n.duration` exactly match the synth contract; there are no live-gate aliases. Its 23 crate tests plus the live acceptance test pass. Tempo/timeline integration, graph-expression spans, external resources and the decision-blocked score API remain. |
+| `crates/app` | **first native GUI path written.** A monospace Lua editor and explicit Run/Ctrl-Enter command drive the production evaluator, revision slot, atomic multi-track scheduler, fundsp sequencer and cpal output on a worker thread. Failed evaluation or staging retains the active program; successful edits begin at the next unscheduled frontier and previously submitted tails drain. Continuous parsing/highlighting, files, transport controls, browser packaging and persistent patches/controls/bus processing remain. |
+
+Lua-boundary decisions, provisional policy, and explicit non-decisions are
+catalogued in [`crates/lua/DESIGN.md`](../../crates/lua/DESIGN.md). Keep that
+distinction intact when promoting first-slice behavior into architecture.
 
 The first sound path is deliberately narrower than the score model:
 mini-notation note names or MIDI values feed one staged voice. It proves the
-seams without pre-empting the open `Value`/control-map decisions. The workspace
-integration test renders `c4` through pattern → scheduler → synth → sequencer
-and measures nonzero audio at approximately 261.6 Hz; no sound card is needed.
+seams without pre-empting the open `Value`/control-map decisions. One integration
+test renders Rust-built `c4` through pattern → scheduler → synth → sequencer;
+another evaluates Lua containing `"c4 e4 g4"`, transactionally publishes the
+owned `Program`, resolves its `VoiceId`, schedules it through the same path and
+measures nonzero audio at approximately 261.6 Hz. Neither needs a sound card.
 
-## Next, in order
+The native GUI is the same path with a device at the end, not a second player.
+Its host policy and transactional ordering are documented in
+[`crates/app/README.md`](../../crates/app/README.md). In particular, the first
+GUI locks the cpal stream's output channel count when audio opens and rejects
+currently unconnected persistent/runtime features instead of silently ignoring
+them.
 
-The browser-language spike moved to the front because "the full language runs in
-the browser" became a v1 requirement, and it is the only open assumption that
-can invalidate the crate layout.
+## Roadmap and completed slices
 
-1. **Browser-language spike.** A disposable crate or branch, answering only
-   whether piccolo is a viable foundation. It builds natively *and* as
-   `wasm32-unknown-unknown` and runs the same tests on both. The contract it is
-   tested against — required semantics, exposed libraries, deliberate omissions
-   — is in `/CLAUDE.md`; the question is no longer "is this complete Lua 5.4?"
-   but:
+The one assumption that could invalidate the crate layout is retired: the same
+sandbox now builds natively and for `wasm32-unknown-unknown`, enforces fuel and
+memory limits, and returns only owned Rust data. Piccolo needed a small audited
+portability patch and bounded library/metamethod fixes; those are vendored and
+documented. Direct `pattern(...)` and `play(...)` source transformation now
+preserves original byte-offset identities; graph-expression spans and a complete
+diagnostic source map remain integration work, not a language-feasibility
+question.
 
-   - does the core language implement the required semantics (closures and
-     upvalues, tables and constructors, both `for` forms, `pairs`/`ipairs`,
-     multiple returns and varargs, `pcall`)?
-   - are all the operator metamethods the patch algebra needs present —
-     `sine(440) >> lowpass(1200) >> gain(0.2)`, and constant-topology loops
-     accumulating with `mix`?
-   - can the required `string`/`table` functions be filled cheaply? These are
-     the real gap; the peripheral libs are irrelevant under the contract.
-   - do fuel and memory limits actually enforce the sandbox — does an infinite
-     loop stop?
-   - can **source transformation** supply byte-accurate call sites, given there
-     is no `debug` library and never will be?
-   - do Rust callbacks build real `Pattern` and provisional `GraphTemplate`
-     values, with **no Lua object surviving** into the returned program?
-   - does repeated evaluation retain nothing from the previous program?
-   - does the same sandbox pass identically on both targets?
-
-   Fallback ladder if it does not: fill piccolo's bounded gaps; an emscripten
-   Lua module transferring one encoded `Program` per edit; our own VM.
+1. **Browser-language foundation, typed synthesis seam and first call-site pass
+   complete.** Continue graph-expression attribution, tempo/timeline integration
+   and the wider song-level API in `crates/lua`, without moving Lua objects or
+   callbacks below evaluation rate. Do not duplicate `TempoMap` merely to avoid
+   `live`'s current cpal edge; split or feature-gate that edge first.
 2. **Control maps in `crates/pattern`.** `Value` gains a multi-value form, a
    `Named` node lifting bare values into it, a `Merge` node taking structure
    from the left. Everything in the score notation is blocked on this. **Two
    open questions must be answered before this fixes `Value`'s shape** — ordered
    versus named, and scalar versus signal. The second was found in session 3 and
    is the more expensive of the two to get wrong.
-3. **Commit the merge sampling rule** (below — it is no longer a coin flip).
+3. **Merge sampling rule settled, implementation waits on step 2.** Sample the
+   right side at each left onset and take its first value; do not multiply
+   voices by right-hand event density.
 4. **Initial slice complete: the smallest data-only symbolic graph builder.**
    `GraphTemplate` owns an operand-list DAG and outputs, with one
    `Input { source, src }` per port. There is no versioned primitive registry,
@@ -86,13 +87,47 @@ can invalidate the crate layout.
    frequency → sine → low-pass → duration-keyed envelope/VCA → output, through
    the exact pattern frontier and `fundsp::Sequencer`. The scheduled unit lives
    for gate duration plus graph tail.
-6. **Transcribe progressively harder instruments** from the four songs against
-   that builder.
-7. **Buses and sends**, then pattern-to-control conversion and ducking.
-8. **The persistent `patch` lifetime**, which is where portamento lives.
-9. **Serialization only when it earns its place** — for caching, sharing or
+6. **Underway: transcribe progressively harder instruments** from the original
+   four songs against that builder. All five `poles.eod` voices are complete as
+   framework fixtures:
+   `ring` derives a band-pass Q from the requested settling time and attaches
+   conservative tail metadata while remaining composition rather than a DSP
+   primitive. Declared parameter ranges propagate through scalar arithmetic, so
+   `n.ring * 0.85` and `n.ring / i` have construction-time upper bounds without
+   sampling a runtime signal. The bell also proves literal topology-building
+   loops, one-source fan-out, parallel-tail maxima and one template bound to
+   different pitches. The tom proves a note-clock control signal can sweep a
+   filter port; the cymbal proves one short noise excitation can fan out into a
+   resonator bank. Timbre matching is not a gate; move on.
+7. **Initial buses-and-sends slice complete.** `BusLayout` assigns opaque
+   lexical `BusId` handles to a program-wide flattened channel layout.
+   Graph-level sends tap internal symbolic sources; event-level sends copy the
+   finished voice at a per-onset scalar level. Routed lowering sums both into
+   main/bus stems, validates every channel shape before backend construction,
+   includes send-only paths in the voice tail, and refuses to silently drop
+   sends through the old main-only path. Persistent bus processors consume the
+   same flattened stems through explicit graph input ports.
+8. **Initial persistent `patch` slice complete.** Program-scope `ControlId`
+   handles lower to shared atomic values; one handle becomes one graph node
+   with fan-out, and handles from different program arenas cannot alias.
+   `PatchTemplate` rejects per-note inputs and clocks, instantiates once, keeps
+   oscillator/filter state across control changes, and can process host audio
+   or bus stems. Replacement/crossfade and persistent transport-clock curves
+   remain deliberately separate.
+9. **Also complete because their contracts were settled:** finite `Timeline`
+   querying with captured external-event ordinals; group provenance and
+   event-derived seeds; `init_random`; piecewise step/ramped `TempoMap`
+   integration in both directions; caller-supplied graph budgets;
+   transactional generation activation; live-trigger recording into a
+   timeline; and the allocation-bounded interpolating delay primitive. Delay
+   time is modulatable, maximum buffer length is publication metadata, and
+   serial delays accumulate tails. Feedback networks still need an explicit
+   representation; a delay node does not silently make arbitrary graph cycles
+   legal.
+10. **Serialization only when it earns its place** — for caching, sharing or
    offline rendering, not as an upfront format.
-10. **Lua** once the Rust builder surface has survived all of the above.
+11. **Lua integration underway** against the Rust builder surface, in parallel
+    with the remaining engine decisions.
 
 The synthesis corpus audit (below) can run in parallel with any of this; it
 gates nothing but informs step 4 onward.
@@ -263,9 +298,9 @@ whole output from a rhythm, so a played line needs its own bus and **patterns
 must be convertible into control signals** — sample and hold with a shaped
 release. Two of the four songs need it.
 
-**`to(send, x)` is used at two levels.** Inside a graph it is a fixed routing
-edge; in a score it is a per-note send level. Define both separately or forbid
-one. They should not be one ambiguous operation.
+**`to(send, x)` is used at two levels. Resolved.** A graph send taps an internal
+symbolic source; an event send copies the completed voice at onset. Both target
+arena-scoped `BusId` handles and routed lowering sums them into the same stem.
 
 **`arp("up")` operates on events, not on the tree.** `[a3,c4,e4]` becomes a
 `Stack` and queries return it unordered; the arpeggiator has to recover "these

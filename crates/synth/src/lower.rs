@@ -13,7 +13,10 @@
 //! The lookahead has to cover this work plus a GC pause: 100–200 ms makes a
 //! 10 ms collection inaudible, and 20 ms does not.
 
+use crate::control::{ControlError, ControlId, ControlLayout};
+use crate::instrument::PatchTemplate;
 use crate::note::Note;
+use crate::routing::{BusLayout, EventRouting, RoutingError};
 use crate::template::{GraphTemplate, Op, ShapeKind, Source, TemplateError};
 use fundsp::net::{Net, NodeId as FundspNode};
 use fundsp::prelude32::*;
@@ -30,15 +33,164 @@ use std::collections::HashMap;
 pub fn instantiate(
     template: &GraphTemplate,
     note: &Note,
-) -> Result<Box<dyn AudioUnit>, TemplateError> {
+) -> Result<Box<dyn AudioUnit>, LowerError> {
     template.validate()?;
+    if !template.sends.is_empty() {
+        return Err(LowerError::LayoutRequired);
+    }
 
-    let mut net = Net::new(0, template.channels());
+    instantiate_to_lanes(
+        template,
+        note,
+        None,
+        template.channels(),
+        template
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(lane, source)| (lane, *source, 1.0)),
+    )
+}
+
+/// Instantiate a voice that may read program-scope writable controls.
+pub fn instantiate_with_controls(
+    template: &GraphTemplate,
+    note: &Note,
+    controls: &ControlStore,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    template.validate()?;
+    if !template.sends.is_empty() {
+        return Err(LowerError::LayoutRequired);
+    }
+    instantiate_to_lanes(
+        template,
+        note,
+        Some(controls),
+        template.channels(),
+        template
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(lane, source)| (lane, *source, 1.0)),
+    )
+}
+
+/// Instantiate one persistent patch. The caller keeps this unit alive instead
+/// of submitting a fresh copy per onset.
+pub fn instantiate_patch(
+    patch: &PatchTemplate,
+    controls: &ControlStore,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_with_controls(patch.graph(), &Note::new(440.0), controls)
+}
+
+/// Build one voice whose outputs are the flattened main and bus stems.
+///
+/// This does not run bus effects. It makes routing concrete: the returned
+/// channel order is exactly [`BusLayout`]'s order, ready for a persistent
+/// processor to consume without learning anything about graph-local sources.
+pub fn instantiate_routed(
+    template: &GraphTemplate,
+    note: &Note,
+    layout: &BusLayout,
+    event: &EventRouting,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_routed_impl(template, note, layout, event, None)
+}
+
+pub fn instantiate_routed_with_controls(
+    template: &GraphTemplate,
+    note: &Note,
+    layout: &BusLayout,
+    event: &EventRouting,
+    controls: &ControlStore,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_routed_impl(template, note, layout, event, Some(controls))
+}
+
+fn instantiate_routed_impl(
+    template: &GraphTemplate,
+    note: &Note,
+    layout: &BusLayout,
+    event: &EventRouting,
+    controls: Option<&ControlStore>,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    template.validate()?;
+    if template.channels() != layout.main_channels() {
+        return Err(RoutingError::MainChannelMismatch {
+            template: template.channels(),
+            layout: layout.main_channels(),
+        }
+        .into());
+    }
+
+    // `(flattened lane, graph source, gain)`. Graph sends already carry their
+    // possibly symbolic gain as a Mul node; event sends bind one scalar per
+    // onset and are scaled during concrete lowering.
+    let mut routes = Vec::new();
+    routes.extend(
+        template
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(lane, source)| (lane, *source, 1.0)),
+    );
+
+    for send in &template.sends {
+        let range = layout
+            .bus_range(send.bus)
+            .ok_or(RoutingError::UnknownBus(send.bus))?;
+        if send.outputs.len() != range.len() {
+            return Err(RoutingError::BusChannelMismatch {
+                bus: send.bus,
+                expected: range.len(),
+                found: send.outputs.len(),
+            }
+            .into());
+        }
+        routes.extend(
+            range
+                .zip(&send.outputs)
+                .map(|(lane, input)| (lane, input.source, 1.0)),
+        );
+    }
+
+    for send in event.sends() {
+        let range = layout
+            .bus_range(send.bus)
+            .ok_or(RoutingError::UnknownBus(send.bus))?;
+        if template.channels() != range.len() {
+            return Err(RoutingError::BusChannelMismatch {
+                bus: send.bus,
+                expected: range.len(),
+                found: template.channels(),
+            }
+            .into());
+        }
+        routes.extend(
+            range
+                .zip(&template.outputs)
+                .map(|(lane, source)| (lane, *source, send.level)),
+        );
+    }
+
+    instantiate_to_lanes(template, note, controls, layout.total_channels(), routes)
+}
+
+fn instantiate_to_lanes(
+    template: &GraphTemplate,
+    note: &Note,
+    controls: Option<&ControlStore>,
+    output_channels: usize,
+    routes: impl IntoIterator<Item = (usize, Source, f64)>,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    let mut net = Net::new(template.inputs, output_channels);
 
     // Push every node first, so wiring is a second pass and node order in the
     // template need not be a topological order for the walk to work. (It still
-    // must be one — `validate` rejects forward references, because a cycle
-    // without a delay has no meaning and there is no delay primitive yet.)
+    // must be one — `validate` rejects forward references. A Delay node owns
+    // history, but it does not make an arbitrary Net cycle well-defined;
+    // feedback needs an explicit graph representation before it is legal.)
     let mut nodes: Vec<FundspNode> = Vec::with_capacity(template.nodes.len());
     for node in &template.nodes {
         nodes.push(net.push(unit_for(&node.op, note)));
@@ -47,30 +199,111 @@ pub fn instantiate(
     // Lifted scalars, keyed by bit pattern. A voice typically reuses `0`, `1`
     // and a handful of literals; sharing them keeps the instantiated net closer
     // in size to the template than to its edge count.
-    let mut constants: HashMap<u64, FundspNode> = HashMap::new();
+    let mut resolver = Resolver {
+        template,
+        note,
+        controls,
+        nodes: &nodes,
+        net: &mut net,
+        constants: HashMap::new(),
+        control_nodes: HashMap::new(),
+        input_nodes: HashMap::new(),
+    };
 
     for (index, node) in template.nodes.iter().enumerate() {
         for (port, input) in node.inputs.iter().enumerate() {
-            let (from, channel) = resolve(
-                input.source,
-                template,
-                note,
-                &nodes,
-                &mut net,
-                &mut constants,
-            );
-            net.connect(from, channel, nodes[index], port);
+            let (from, channel) = resolver.resolve(input.source)?;
+            resolver.net.connect(from, channel, nodes[index], port);
         }
     }
 
-    for (channel, source) in template.outputs.iter().enumerate() {
-        let (from, from_channel) =
-            resolve(*source, template, note, &nodes, &mut net, &mut constants);
-        net.connect_output(from, from_channel, channel);
+    let mut lanes = vec![Vec::new(); output_channels];
+    for (lane, source, gain) in routes {
+        let concrete = resolver.resolve(source)?;
+        let concrete = if gain == 1.0 {
+            concrete
+        } else {
+            let scaled = resolver.net.push(Box::new(mul(gain as f32)));
+            resolver.net.connect(concrete.0, concrete.1, scaled, 0);
+            (scaled, 0)
+        };
+        lanes[lane].push(concrete);
     }
 
+    for (lane, sources) in lanes.into_iter().enumerate() {
+        let (from, channel) = mix_sources(sources, resolver.net, &mut resolver.constants);
+        resolver.net.connect_output(from, channel, lane);
+    }
+
+    drop(resolver);
     Ok(Box::new(net))
 }
+
+fn mix_sources(
+    mut sources: Vec<(FundspNode, usize)>,
+    net: &mut Net,
+    constants: &mut HashMap<u64, FundspNode>,
+) -> (FundspNode, usize) {
+    let Some(mut mixed) = sources.pop() else {
+        return (constant_node(0.0, net, constants), 0);
+    };
+    for source in sources {
+        let add = net.push(Box::new(pass() + pass()));
+        net.connect(mixed.0, mixed.1, add, 0);
+        net.connect(source.0, source.1, add, 1);
+        mixed = (add, 0);
+    }
+    mixed
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum LowerError {
+    Template(TemplateError),
+    Routing(RoutingError),
+    Control(ControlError),
+    /// A graph-local send cannot be discarded by the main-only lowering path.
+    LayoutRequired,
+    ControlStoreRequired,
+}
+
+impl From<TemplateError> for LowerError {
+    fn from(error: TemplateError) -> LowerError {
+        LowerError::Template(error)
+    }
+}
+
+impl From<RoutingError> for LowerError {
+    fn from(error: RoutingError) -> LowerError {
+        LowerError::Routing(error)
+    }
+}
+
+impl From<ControlError> for LowerError {
+    fn from(error: ControlError) -> LowerError {
+        LowerError::Control(error)
+    }
+}
+
+impl core::fmt::Display for LowerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            LowerError::Template(error) => error.fmt(f),
+            LowerError::Routing(error) => error.fmt(f),
+            LowerError::Control(error) => error.fmt(f),
+            LowerError::LayoutRequired => {
+                write!(f, "graph has sends and requires a program bus layout")
+            }
+            LowerError::ControlStoreRequired => {
+                write!(
+                    f,
+                    "graph has writable controls and requires a control store"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for LowerError {}
 
 /// Turn a template source into a concrete `(node, channel)` pair, lifting
 /// scalars and symbolic parameters to constants.
@@ -79,18 +312,106 @@ pub fn instantiate(
 /// primitives are bound in their modulatable form — `lowpass()` with cutoff and
 /// Q as inputs, never `lowpass_hz()`. One rule, and then any parameter of
 /// anything accepts any signal, with a plain number as the degenerate case.
-fn resolve(
-    source: Source,
-    template: &GraphTemplate,
-    note: &Note,
-    nodes: &[FundspNode],
-    net: &mut Net,
-    constants: &mut HashMap<u64, FundspNode>,
-) -> (FundspNode, usize) {
-    match source {
-        Source::Port { node, channel } => (nodes[node], channel as usize),
-        Source::Const(x) => (constant_node(x, net, constants), 0),
-        Source::Param(id) => (constant_node(note.value(id, template), net, constants), 0),
+struct Resolver<'a> {
+    template: &'a GraphTemplate,
+    note: &'a Note,
+    controls: Option<&'a ControlStore>,
+    nodes: &'a [FundspNode],
+    net: &'a mut Net,
+    constants: HashMap<u64, FundspNode>,
+    control_nodes: HashMap<ControlId, FundspNode>,
+    input_nodes: HashMap<usize, FundspNode>,
+}
+
+impl Resolver<'_> {
+    fn resolve(&mut self, source: Source) -> Result<(FundspNode, usize), LowerError> {
+        match source {
+            Source::Port { node, channel } => Ok((self.nodes[node], channel as usize)),
+            Source::Const(x) => Ok((constant_node(x, self.net, &mut self.constants), 0)),
+            Source::Param(id) => Ok((
+                constant_node(
+                    self.note.value(id, self.template),
+                    self.net,
+                    &mut self.constants,
+                ),
+                0,
+            )),
+            Source::Control(id) => {
+                let controls = self.controls.ok_or(LowerError::ControlStoreRequired)?;
+                let node = match self.control_nodes.get(&id) {
+                    Some(node) => *node,
+                    None => {
+                        let shared = controls.shared(id)?;
+                        let node = self.net.push(Box::new(var(shared)));
+                        self.control_nodes.insert(id, node);
+                        node
+                    }
+                };
+                Ok((node, 0))
+            }
+            Source::Input(channel) => {
+                let node = match self.input_nodes.get(&channel) {
+                    Some(node) => *node,
+                    None => {
+                        let node = self.net.push(Box::new(pass()));
+                        self.net.connect_input(channel, node, 0);
+                        self.input_nodes.insert(channel, node);
+                        node
+                    }
+                };
+                Ok((node, 0))
+            }
+        }
+    }
+}
+
+/// Backend values corresponding one-for-one with a data-only [`ControlLayout`].
+pub struct ControlStore {
+    layout: ControlLayout,
+    values: Vec<Shared>,
+}
+
+impl ControlStore {
+    pub fn new(layout: &ControlLayout) -> ControlStore {
+        ControlStore {
+            layout: layout.clone(),
+            values: layout
+                .specs()
+                .iter()
+                .map(|spec| shared(spec.default as f32))
+                .collect(),
+        }
+    }
+
+    pub fn set(&self, id: ControlId, value: f64) -> Result<(), ControlError> {
+        if !value.is_finite() {
+            return Err(ControlError::NonFiniteValue);
+        }
+        let spec = self
+            .layout
+            .spec(id)
+            .ok_or(ControlError::UnknownControl(id))?;
+        self.values[id.index()].set(spec.clamp(value) as f32);
+        Ok(())
+    }
+
+    pub fn value(&self, id: ControlId) -> Result<f64, ControlError> {
+        self.layout
+            .spec(id)
+            .ok_or(ControlError::UnknownControl(id))?;
+        self.values
+            .get(id.index())
+            .map(|value| value.value() as f64)
+            .ok_or(ControlError::UnknownControl(id))
+    }
+
+    fn shared(&self, id: ControlId) -> Result<&Shared, ControlError> {
+        self.layout
+            .spec(id)
+            .ok_or(ControlError::UnknownControl(id))?;
+        self.values
+            .get(id.index())
+            .ok_or(ControlError::UnknownControl(id))
     }
 }
 
@@ -107,6 +428,12 @@ fn unit_for(op: &Op, note: &Note) -> Box<dyn AudioUnit> {
         Op::Pulse => Box::new(pulse()),
         Op::Noise => Box::new(noise()),
         Op::Impulse => Box::new(impulse::<U1>()),
+        Op::InitRandom { stream } => {
+            let unit = seed_unit(note.seed ^ stream);
+            Box::new(map(move |input: &Frame<f32, U2>| {
+                input[0] + unit * (input[1] - input[0])
+            }))
+        }
 
         Op::Lowpass => Box::new(lowpass()),
         Op::Highpass => Box::new(highpass()),
@@ -124,10 +451,12 @@ fn unit_for(op: &Op, note: &Note) -> Box<dyn AudioUnit> {
             }
         }
         Op::DcBlock => Box::new(dcblock()),
+        Op::Delay(range) => Box::new(tap(range.min_seconds() as f32, range.max_seconds() as f32)),
 
         Op::Add => Box::new(pass() + pass()),
         Op::Sub => Box::new(pass() - pass()),
         Op::Mul => Box::new(pass() * pass()),
+        Op::Div => Box::new(map(|input: &Frame<f32, U2>| input[0] / input[1])),
         Op::Neg => Box::new(mul(-1.0)),
 
         // Both envelopes read the note clock, which starts at zero when the
@@ -145,6 +474,14 @@ fn unit_for(op: &Op, note: &Note) -> Box<dyn AudioUnit> {
 
         Op::Pan => Box::new(panner()),
     }
+}
+
+fn seed_unit(mut seed: u64) -> f32 {
+    seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    seed = (seed ^ (seed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    seed = (seed ^ (seed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    seed ^= seed >> 31;
+    ((seed >> 40) as f32) / ((1u32 << 24) as f32)
 }
 
 /// Render a voice offline into interleaved samples.

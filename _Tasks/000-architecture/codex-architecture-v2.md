@@ -1,5 +1,11 @@
 # Apteronotus architecture proposal, post-corpus
 
+> **Historical proposal.** This was the post-corpus recommendation before the
+> Rust and Lua slices were implemented. It remains useful for rationale and
+> corpus findings, but its implementation order is no longer project status.
+> Current decisions live in `/CLAUDE.md`; current status and open questions live
+> in this directory's `README.md`.
+
 This is the second independent Codex architecture proposal. It incorporates:
 
 - the four specification songs;
@@ -10,9 +16,8 @@ This is the second independent Codex architecture proposal. It incorporates:
   operating-system-facing Lua standard library;
 - the decision that independently playable serialized songs are optional.
 
-Where this document conflicts with `codex-architecture.md`, this document is
-the current recommendation. The first proposal remains useful as a reasoning
-record, especially for its account of graph staging and live replacement.
+Where this document conflicts with `codex-architecture.md`, this is the later
+historical proposal. Neither overrides the current documents named above.
 
 ## Product definition
 
@@ -815,7 +820,7 @@ script adapter knows the program builders
 audio backend lowers prepared program data
 ```
 
-## Implementation order
+## Historical implementation order
 
 ### 1. Browser-language spike
 

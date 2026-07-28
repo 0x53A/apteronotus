@@ -1,5 +1,10 @@
 # Apteronotus architecture proposal
 
+> **Historical proposal.** This predates the corpus audit and implementation.
+> It is preserved as a reasoning record, not as current project status or an
+> implementation checklist. Current decisions live in `/CLAUDE.md`; current
+> status and open questions live in this directory's `README.md`.
+
 This document is an independent proposal written before inspecting the other
 files in this task directory. It records the architecture implied by the design
 discussion, including the decisions that should remain deliberate rather than

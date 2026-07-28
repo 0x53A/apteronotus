@@ -9,9 +9,11 @@
 //! one node here with two outputs, and pretending otherwise would hide the
 //! channel from the type that carries it.
 
+use crate::control::ControlId;
+use crate::routing::BusId;
 use crate::template::{
-    Adsr, Curve, GraphTemplate, Implicit, Input, Node, NodeId, Op, ParamId, ParamSpec, ShapeKind,
-    Source, TemplateError,
+    Adsr, Curve, DelayRange, GraphSend, GraphTemplate, Implicit, Input, Node, NodeId, Op, ParamId,
+    ParamSpec, ShapeKind, Source, TemplateError,
 };
 use apteronotus_pattern::SrcSpan;
 
@@ -21,9 +23,70 @@ pub struct GraphBuilder {
     src: Option<SrcSpan>,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Bounds {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Bounds {
+    fn new(min: f64, max: f64) -> Option<Bounds> {
+        (min.is_finite() && max.is_finite() && min <= max).then_some(Bounds { min, max })
+    }
+
+    fn add(self, other: Bounds) -> Option<Bounds> {
+        Bounds::new(self.min + other.min, self.max + other.max)
+    }
+
+    fn sub(self, other: Bounds) -> Option<Bounds> {
+        Bounds::new(self.min - other.max, self.max - other.min)
+    }
+
+    fn mul(self, other: Bounds) -> Option<Bounds> {
+        let products = [
+            self.min * other.min,
+            self.min * other.max,
+            self.max * other.min,
+            self.max * other.max,
+        ];
+        let min = products.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = products.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Bounds::new(min, max)
+    }
+
+    fn div(self, other: Bounds) -> Option<Bounds> {
+        if other.min <= 0.0 && other.max >= 0.0 {
+            return None;
+        }
+        let quotients = [
+            self.min / other.min,
+            self.min / other.max,
+            self.max / other.min,
+            self.max / other.max,
+        ];
+        let min = quotients.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = quotients.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Bounds::new(min, max)
+    }
+
+    fn neg(self) -> Option<Bounds> {
+        Bounds::new(-self.max, -self.min)
+    }
+}
+
 impl GraphBuilder {
     pub fn new() -> GraphBuilder {
         GraphBuilder::default()
+    }
+
+    pub fn with_inputs(channels: usize) -> GraphBuilder {
+        let mut builder = GraphBuilder::default();
+        builder.template.inputs = channels;
+        builder
+    }
+
+    pub fn input(&self, channel: usize) -> Source {
+        Source::Input(channel)
     }
 
     /// Attribute every node built from here on to `src`.
@@ -73,9 +136,61 @@ impl GraphBuilder {
         self.template.nodes.push(Node {
             op,
             inputs: inputs.into_iter().collect(),
+            tail: 0.0,
             src: self.src,
         });
         Source::port(id, 0)
+    }
+
+    /// Attach conservative lifetime metadata to the node producing `source`.
+    ///
+    /// Kept crate-private because ordinary graph authors should not guess
+    /// tails. Stdlib compositions such as `ring` use it when their musical
+    /// parameter already states the lifetime explicitly.
+    pub(crate) fn set_tail(&mut self, source: Source, seconds: f64) {
+        let node = self
+            .node_id(source)
+            .expect("tail metadata can only be attached to a node output");
+        self.template.nodes[node].tail = if seconds.is_finite() && seconds >= 0.0 {
+            self.template.nodes[node].tail.max(seconds)
+        } else {
+            // Preserve the bad value so validation can turn it into a
+            // diagnostic instead of silently laundering it into zero.
+            seconds
+        };
+    }
+
+    /// Conservative construction-time bounds for a scalar expression.
+    ///
+    /// Declared parameters are safe to bound because note binding clamps them
+    /// to their [`ParamSpec`] ranges. Arithmetic nodes propagate intervals.
+    /// Oscillators, filters, curves and implicit note inputs deliberately
+    /// return `None`: sampling a runtime signal to decide lifetime would cross
+    /// the rate boundary this metadata exists to protect.
+    pub(crate) fn bounds(&self, source: Source) -> Option<Bounds> {
+        match source {
+            Source::Const(value) => Bounds::new(value, value),
+            Source::Param(ParamId::Declared(index)) => {
+                let spec = self.template.params.get(index)?;
+                Bounds::new(spec.min, spec.max)
+            }
+            Source::Param(ParamId::Implicit(_)) => None,
+            Source::Control(_) => None,
+            Source::Input(_) => None,
+            Source::Port { node, channel: 0 } => {
+                let node = self.template.nodes.get(node)?;
+                let input = |index: usize| self.bounds(node.inputs.get(index)?.source);
+                match node.op {
+                    Op::Add => input(0)?.add(input(1)?),
+                    Op::Sub => input(0)?.sub(input(1)?),
+                    Op::Mul => input(0)?.mul(input(1)?),
+                    Op::Div => input(0)?.div(input(1)?),
+                    Op::Neg => input(0)?.neg(),
+                    _ => None,
+                }
+            }
+            Source::Port { .. } => None,
+        }
     }
 
     pub fn node_id(&self, source: Source) -> Option<NodeId> {
@@ -83,6 +198,11 @@ impl GraphBuilder {
             Source::Port { node, .. } => Some(node),
             _ => None,
         }
+    }
+
+    /// Reference a writable scalar owned by the program control arena.
+    pub fn control(&self, id: ControlId) -> Source {
+        Source::Control(id)
     }
 
     // ------------------------------------------------------------ generators
@@ -108,6 +228,17 @@ impl GraphBuilder {
 
     pub fn impulse(&mut self) -> Source {
         self.node(Op::Impulse, [])
+    }
+
+    /// One reproducible per-voice scalar in `[min, max)`.
+    pub fn init_random(
+        &mut self,
+        stream: u64,
+        min: impl Into<Source>,
+        max: impl Into<Source>,
+    ) -> Source {
+        let (min, max) = (self.arg(min), self.arg(max));
+        self.node(Op::InitRandom { stream }, [min, max])
     }
 
     // --------------------------------------------------------------- filters
@@ -173,6 +304,22 @@ impl GraphBuilder {
         self.node(Op::DcBlock, [audio])
     }
 
+    // --------------------------------------------------------------- memory
+
+    /// Delay `audio` by the signal `seconds`.
+    ///
+    /// `range` is construction-time allocation metadata, not a second source
+    /// of truth for the audible delay. The runtime signal is clamped to it.
+    pub fn delay(
+        &mut self,
+        audio: Source,
+        seconds: impl Into<Source>,
+        range: DelayRange,
+    ) -> Source {
+        let (audio, seconds) = (self.arg(audio), self.arg(seconds));
+        self.node(Op::Delay(range), [audio, seconds])
+    }
+
     // ------------------------------------------------------------ arithmetic
 
     pub fn add(&mut self, a: impl Into<Source>, b: impl Into<Source>) -> Source {
@@ -188,6 +335,11 @@ impl GraphBuilder {
     pub fn mul(&mut self, a: impl Into<Source>, b: impl Into<Source>) -> Source {
         let (a, b) = (self.arg(a), self.arg(b));
         self.node(Op::Mul, [a, b])
+    }
+
+    pub fn div(&mut self, a: impl Into<Source>, b: impl Into<Source>) -> Source {
+        let (a, b) = (self.arg(a), self.arg(b));
+        self.node(Op::Div, [a, b])
     }
 
     pub fn neg(&mut self, a: Source) -> Source {
@@ -217,6 +369,29 @@ impl GraphBuilder {
     }
 
     // ---------------------------------------------------------------- output
+
+    /// Tap graph-local channels and route them to `bus`.
+    ///
+    /// `level` is a signal, not merely a scalar, so an instrument may automate
+    /// its own send without asking the score layer to address an internal wire.
+    /// The bus channel count is checked later against the program's
+    /// [`crate::routing::BusLayout`].
+    pub fn send(&mut self, bus: BusId, channels: &[Source], level: impl Into<Source>) {
+        let level = level.into();
+        let outputs = channels
+            .iter()
+            .copied()
+            .map(|channel| {
+                let scaled = self.mul(channel, level);
+                self.arg(scaled)
+            })
+            .collect();
+        self.template.sends.push(GraphSend {
+            bus,
+            outputs,
+            src: self.src,
+        });
+    }
 
     /// Equal-power pan. Returns `(left, right)`.
     pub fn pan(&mut self, audio: Source, position: impl Into<Source>) -> (Source, Source) {

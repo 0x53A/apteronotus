@@ -31,6 +31,8 @@
 //! This is also the exact shape fundsp's `Net::set_source(node, channel, …)`
 //! wants, so lowering is a walk rather than a translation.
 
+use crate::control::ControlId;
+use crate::routing::BusId;
 use apteronotus_pattern::SrcSpan;
 
 /// Index of a node within one [`GraphTemplate`]. Meaningless anywhere else.
@@ -145,6 +147,10 @@ pub enum Source {
     Const(f64),
     /// A symbolic note input, resolved per onset.
     Param(ParamId),
+    /// A writable scalar owned by the program control arena.
+    Control(ControlId),
+    /// One channel supplied by the host of this graph instance.
+    Input(usize),
     /// Channel `channel` of node `node`.
     Port {
         node: NodeId,
@@ -191,6 +197,80 @@ pub enum ShapeKind {
     /// Quantise to `amount` levels.
     Crush,
 }
+
+/// Allocation bounds for one interpolating delay line.
+///
+/// Delay time is a signal, so the graph cannot discover its extrema by
+/// sampling it. The author supplies this range at construction time instead;
+/// the backend allocates once from `max_seconds` and clamps modulation to the
+/// range while rendering. Keeping the allocation bound in the data-only IR is
+/// what lets publication budgets reject an extravagant graph before it reaches
+/// the audio thread.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DelayRange {
+    min_seconds: f64,
+    max_seconds: f64,
+}
+
+impl DelayRange {
+    pub fn new(min_seconds: f64, max_seconds: f64) -> Result<DelayRange, DelayRangeError> {
+        if !min_seconds.is_finite() || !max_seconds.is_finite() {
+            return Err(DelayRangeError::NonFinite);
+        }
+        if min_seconds < 0.0 {
+            return Err(DelayRangeError::Negative { min_seconds });
+        }
+        if min_seconds > max_seconds {
+            return Err(DelayRangeError::Reversed {
+                min_seconds,
+                max_seconds,
+            });
+        }
+        Ok(DelayRange {
+            min_seconds,
+            max_seconds,
+        })
+    }
+
+    pub fn fixed(seconds: f64) -> Result<DelayRange, DelayRangeError> {
+        DelayRange::new(seconds, seconds)
+    }
+
+    pub fn min_seconds(self) -> f64 {
+        self.min_seconds
+    }
+
+    pub fn max_seconds(self) -> f64 {
+        self.max_seconds
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DelayRangeError {
+    NonFinite,
+    Negative { min_seconds: f64 },
+    Reversed { min_seconds: f64, max_seconds: f64 },
+}
+
+impl core::fmt::Display for DelayRangeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DelayRangeError::NonFinite => write!(f, "delay bounds must be finite"),
+            DelayRangeError::Negative { min_seconds } => {
+                write!(f, "delay minimum cannot be negative: {min_seconds}")
+            }
+            DelayRangeError::Reversed {
+                min_seconds,
+                max_seconds,
+            } => write!(
+                f,
+                "delay minimum {min_seconds} exceeds maximum {max_seconds}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for DelayRangeError {}
 
 /// A term of an automation curve.
 ///
@@ -403,6 +483,10 @@ pub enum Op {
     /// in `poles.eod` is pole placement: the impulse response of a resonant
     /// second-order section is a struck bar.
     Impulse,
+    /// (min, max) → one deterministic scalar per voice.
+    InitRandom {
+        stream: u64,
+    },
 
     // --------------------------------------------------------------- filters
     /// (audio, cutoff, q) → audio
@@ -421,6 +505,11 @@ pub enum Op {
     /// (audio) → audio
     DcBlock,
 
+    // --------------------------------------------------------------- memory
+    /// (audio, delay_seconds) → audio. Cubic-interpolating, with allocation
+    /// bounds fixed when the graph is staged.
+    Delay(DelayRange),
+
     // ------------------------------------------------------------ arithmetic
     /// (a, b) → a + b. Mix.
     Add,
@@ -428,6 +517,8 @@ pub enum Op {
     Sub,
     /// (a, b) → a × b. A VCA when one side is an envelope.
     Mul,
+    /// (a, b) → a ÷ b
+    Div,
     /// (a) → −a
     Neg,
 
@@ -448,7 +539,14 @@ impl Op {
         match self {
             Op::Noise | Op::Impulse | Op::Adsr(_) | Op::Curve(_) => 0,
             Op::Sine | Op::Saw | Op::Shape { .. } | Op::DcBlock | Op::Neg => 1,
-            Op::Pulse | Op::Add | Op::Sub | Op::Mul | Op::Pan => 2,
+            Op::Pulse
+            | Op::InitRandom { .. }
+            | Op::Delay(_)
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Pan => 2,
             Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Moog => 3,
         }
     }
@@ -466,6 +564,7 @@ impl Op {
     /// cut off at its note length.
     pub fn tail(&self) -> f64 {
         match self {
+            Op::Delay(range) => range.max_seconds(),
             Op::Adsr(a) => a.tail(),
             Op::Curve(c) => c
                 .terms
@@ -520,25 +619,130 @@ pub struct Node {
     pub op: Op,
     /// One entry per input port, in the order [`Op`] documents.
     pub inputs: Vec<Input>,
+    /// Conservative time this node can keep producing audible output after its
+    /// inputs stop, in seconds.
+    ///
+    /// Most primitives are memoryless and leave this at zero. A readable
+    /// stdlib composition may know more than its final primitive does:
+    /// `ring(hz, decay)` is a band-pass plus a derived Q, and annotates that
+    /// band-pass with `decay` without turning `ring` into a Rust DSP primitive.
+    pub tail: f64,
     /// Where in the source text this node was written. Survives into
     /// diagnostics and, later, into the editor's highlighting — the same reason
     /// the pattern is an AST rather than a tree of closures.
     pub src: Option<SrcSpan>,
 }
 
+/// A graph-local tap routed to a program bus.
+///
+/// These outputs may name any internal graph source. A score-level send cannot:
+/// it copies the finished [`GraphTemplate::outputs`] and lives in
+/// [`crate::routing::EventRouting`] instead.
+#[derive(Clone, PartialEq, Debug)]
+pub struct GraphSend {
+    pub bus: BusId,
+    pub outputs: Vec<Input>,
+    pub src: Option<SrcSpan>,
+}
+
 /// A staged voice: everything except the note's actual numbers.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct GraphTemplate {
+    /// Host-provided audio-rate input channels.
+    pub inputs: usize,
     pub nodes: Vec<Node>,
     /// Declared note parameters, indexed by [`ParamId::Declared`].
     pub params: Vec<ParamSpec>,
     /// One source per output channel. Two, for a stereo voice.
     pub outputs: Vec<Source>,
+    /// Graph-local taps. Their bus handles are resolved against a
+    /// program-wide [`crate::routing::BusLayout`] during routed lowering.
+    pub sends: Vec<GraphSend>,
 }
 
 impl GraphTemplate {
     pub fn channels(&self) -> usize {
         self.outputs.len()
+    }
+
+    pub fn cost(&self) -> GraphCost {
+        GraphCost {
+            nodes: self.nodes.len(),
+            connections: self
+                .nodes
+                .iter()
+                .map(|node| node.inputs.len())
+                .sum::<usize>()
+                + self.outputs.len()
+                + self
+                    .sends
+                    .iter()
+                    .map(|send| send.outputs.len())
+                    .sum::<usize>(),
+            input_channels: self.inputs,
+            output_channels: self.outputs.len()
+                + self
+                    .sends
+                    .iter()
+                    .map(|send| send.outputs.len())
+                    .sum::<usize>(),
+            declared_parameters: self.params.len(),
+            delay_buffer_seconds: self
+                .nodes
+                .iter()
+                .map(|node| match node.op {
+                    Op::Delay(range) => range.max_seconds(),
+                    _ => 0.0,
+                })
+                .sum(),
+            tail_seconds: self.tail(),
+        }
+    }
+
+    /// Validate caller-selected publication limits.
+    ///
+    /// The engine does not smuggle policy into the IR by choosing one universal
+    /// ceiling. Desktop, browser and embedded hosts supply their own budgets,
+    /// but all enforce them over the same deterministic estimate.
+    pub fn validate_limits(&self, limits: GraphLimits) -> Result<GraphCost, GraphLimitError> {
+        let cost = self.cost();
+        if cost.nodes > limits.nodes {
+            return Err(GraphLimitError::Nodes {
+                found: cost.nodes,
+                limit: limits.nodes,
+            });
+        }
+        if cost.connections > limits.connections {
+            return Err(GraphLimitError::Connections {
+                found: cost.connections,
+                limit: limits.connections,
+            });
+        }
+        if cost.input_channels > limits.input_channels {
+            return Err(GraphLimitError::InputChannels {
+                found: cost.input_channels,
+                limit: limits.input_channels,
+            });
+        }
+        if cost.output_channels > limits.output_channels {
+            return Err(GraphLimitError::OutputChannels {
+                found: cost.output_channels,
+                limit: limits.output_channels,
+            });
+        }
+        if cost.delay_buffer_seconds > limits.delay_buffer_seconds {
+            return Err(GraphLimitError::DelayBuffer {
+                found: cost.delay_buffer_seconds,
+                limit: limits.delay_buffer_seconds,
+            });
+        }
+        if cost.tail_seconds > limits.tail_seconds {
+            return Err(GraphLimitError::Tail {
+                found: cost.tail_seconds,
+                limit: limits.tail_seconds,
+            });
+        }
+        Ok(cost)
     }
 
     /// The longest tail on any path to an output, in seconds.
@@ -567,10 +771,15 @@ impl GraphTemplate {
                     _ => 0.0,
                 })
                 .fold(0.0, f64::max);
-            through[id] = upstream + node.op.tail();
+            through[id] = upstream + node.tail.max(node.op.tail());
         }
         self.outputs
             .iter()
+            .chain(
+                self.sends
+                    .iter()
+                    .flat_map(|send| send.outputs.iter().map(|input| &input.source)),
+            )
             .map(|source| match source {
                 Source::Port { node, .. } => through.get(*node).copied().unwrap_or(0.0),
                 _ => 0.0,
@@ -588,13 +797,39 @@ impl GraphTemplate {
         if self.outputs.is_empty() {
             return Err(TemplateError::NoOutputs);
         }
+        for (param, spec) in self.params.iter().enumerate() {
+            if !spec.min.is_finite()
+                || !spec.max.is_finite()
+                || !spec.default.is_finite()
+                || spec.min > spec.max
+                || !(spec.min..=spec.max).contains(&spec.default)
+            {
+                return Err(TemplateError::InvalidParamRange { param });
+            }
+        }
         for (id, node) in self.nodes.iter().enumerate() {
+            if !node.tail.is_finite() || node.tail < 0.0 {
+                return Err(TemplateError::InvalidTail {
+                    node: id,
+                    seconds: node.tail,
+                });
+            }
             if node.inputs.len() != node.op.inputs() {
                 return Err(TemplateError::Arity {
                     node: id,
                     expected: node.op.inputs(),
                     found: node.inputs.len(),
                 });
+            }
+            if matches!(node.op, Op::InitRandom { .. }) {
+                for (port, input) in node.inputs.iter().enumerate() {
+                    if matches!(
+                        input.source,
+                        Source::Port { .. } | Source::Control(_) | Source::Input(_)
+                    ) {
+                        return Err(TemplateError::DynamicInitRandom { node: id, port });
+                    }
+                }
             }
             for (port, input) in node.inputs.iter().enumerate() {
                 self.check_source(input.source, Some((id, port)))?;
@@ -605,6 +840,14 @@ impl GraphTemplate {
                 TemplateError::DanglingPort { .. } => TemplateError::BadOutput { channel },
                 other => other,
             })?;
+        }
+        for (send_index, send) in self.sends.iter().enumerate() {
+            if send.outputs.is_empty() {
+                return Err(TemplateError::EmptySend { send: send_index });
+            }
+            for input in &send.outputs {
+                self.check_source(input.source, None)?;
+            }
         }
         Ok(())
     }
@@ -626,6 +869,14 @@ impl GraphTemplate {
                 Err(TemplateError::UndeclaredParam(i))
             }
             Source::Param(_) => Ok(()),
+            Source::Control(_) => Ok(()),
+            Source::Input(channel) => {
+                if channel < self.inputs {
+                    Ok(())
+                } else {
+                    Err(TemplateError::BadInput { channel })
+                }
+            }
             Source::Port { node, channel } => {
                 let target = self
                     .nodes
@@ -634,10 +885,11 @@ impl GraphTemplate {
                 if channel as usize >= target.op.outputs() {
                     return Err(TemplateError::DanglingPort { node, channel });
                 }
-                // Forward references are how a cycle would be written, and a
-                // cycle needs a delay to be meaningful. There is no delay
-                // primitive yet, so require a DAG in build order and reject
-                // the rest with something a user can act on.
+                // Forward references are how a cycle would be written. A
+                // Delay node owns audio history, but merely putting one in an
+                // otherwise arbitrary cycle does not define feedback order or
+                // gain. Require a DAG in build order until feedback has its
+                // own explicit representation.
                 if let Some((id, port)) = at
                     && node >= id
                 {
@@ -669,7 +921,24 @@ pub enum TemplateError {
         port: usize,
     },
     UndeclaredParam(usize),
+    InvalidParamRange {
+        param: usize,
+    },
     NonFiniteConstant,
+    InvalidTail {
+        node: NodeId,
+        seconds: f64,
+    },
+    EmptySend {
+        send: usize,
+    },
+    BadInput {
+        channel: usize,
+    },
+    DynamicInitRandom {
+        node: NodeId,
+        port: usize,
+    },
 }
 
 impl core::fmt::Display for TemplateError {
@@ -692,9 +961,91 @@ impl core::fmt::Display for TemplateError {
                 )
             }
             TemplateError::UndeclaredParam(i) => write!(f, "parameter {i} was never declared"),
+            TemplateError::InvalidParamRange { param } => {
+                write!(f, "parameter {param} has an invalid range or default")
+            }
             TemplateError::NonFiniteConstant => write!(f, "constant is not finite"),
+            TemplateError::InvalidTail { node, seconds } => {
+                write!(f, "node {node} has invalid tail {seconds} seconds")
+            }
+            TemplateError::EmptySend { send } => {
+                write!(f, "graph send {send} has no output channels")
+            }
+            TemplateError::BadInput { channel } => {
+                write!(f, "graph has no input channel {channel}")
+            }
+            TemplateError::DynamicInitRandom { node, port } => write!(
+                f,
+                "node {node} init-random input {port} is not fixed at voice instantiation"
+            ),
         }
     }
 }
 
 impl core::error::Error for TemplateError {}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GraphCost {
+    pub nodes: usize,
+    pub connections: usize,
+    pub input_channels: usize,
+    /// Main outputs plus graph-send stem channels.
+    pub output_channels: usize,
+    pub declared_parameters: usize,
+    /// Sum of maximum delay-line lengths. At a known sample rate this converts
+    /// directly to the dominant state-memory allocation.
+    pub delay_buffer_seconds: f64,
+    pub tail_seconds: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GraphLimits {
+    pub nodes: usize,
+    pub connections: usize,
+    pub input_channels: usize,
+    pub output_channels: usize,
+    pub delay_buffer_seconds: f64,
+    pub tail_seconds: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum GraphLimitError {
+    Nodes { found: usize, limit: usize },
+    Connections { found: usize, limit: usize },
+    InputChannels { found: usize, limit: usize },
+    OutputChannels { found: usize, limit: usize },
+    DelayBuffer { found: f64, limit: f64 },
+    Tail { found: f64, limit: f64 },
+}
+
+impl core::fmt::Display for GraphLimitError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            GraphLimitError::Nodes { found, limit } => {
+                write!(f, "graph has {found} nodes, more than the limit of {limit}")
+            }
+            GraphLimitError::Connections { found, limit } => write!(
+                f,
+                "graph has {found} connections, more than the limit of {limit}"
+            ),
+            GraphLimitError::InputChannels { found, limit } => write!(
+                f,
+                "graph has {found} input channels, more than the limit of {limit}"
+            ),
+            GraphLimitError::OutputChannels { found, limit } => write!(
+                f,
+                "graph has {found} output channels, more than the limit of {limit}"
+            ),
+            GraphLimitError::DelayBuffer { found, limit } => write!(
+                f,
+                "graph allocates {found} delay-line seconds, more than the limit of {limit}"
+            ),
+            GraphLimitError::Tail { found, limit } => write!(
+                f,
+                "graph has a {found}-second tail, more than the limit of {limit}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for GraphLimitError {}

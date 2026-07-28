@@ -37,9 +37,11 @@ pub mod mini;
 pub mod pattern;
 pub mod rand;
 pub mod span;
+pub mod timeline;
 
-pub use event::{Event, SrcSpan, Value};
+pub use event::{Event, EventOrigin, GroupKey, GroupNode, GroupProvenance, SrcSpan, Value};
 pub use frac::Frac;
-pub use mini::{ParseError, parse};
+pub use mini::{ParseError, parse, parse_at};
 pub use pattern::{Pattern, Signal, bjorklund};
 pub use span::Span;
+pub use timeline::{Timeline, TimelineError, TimelineEvent, TimelineId};

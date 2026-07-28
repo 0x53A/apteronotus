@@ -1510,3 +1510,56 @@ the crate layout, then the `Value`/control-map shape, which every later musical
 feature depends on and which now carries three decisions rather than one —
 signal versus scalar, ordered versus named, and group identity. Further pressure
 should come from implementation rather than from more prose.
+
+---
+
+## Implementation checkpoint — 2026-07-28
+
+The browser-language assumption above is retired. A vendored Piccolo revision
+now builds both natively and for `wasm32-unknown-unknown`; the sandbox enforces
+fuel and measured memory limits and returns only owned Rust program data. Direct
+`pattern(...)` and `play(...)` calls receive source-transformed byte-offset
+identities. Graph-expression spans and the complete diagnostic source map remain.
+
+The first real path now crosses every intended seam: Lua evaluates a
+`voice`/`play` program, transactional publication validates it, `VoiceId`
+resolves to a data-only `GraphTemplate`, the monotonic scheduler submits notes
+to fundsp, and an offline test measures the rendered pitch. The same path has a
+native cpal example.
+
+Engine implementation also reached finite timelines, group/event provenance,
+ramped tempo maps, deterministic per-event graph initialization, routed
+buses/sends, persistent patches and controls, trigger recording, conservative
+voice tails, caller-supplied graph budgets, and an allocation-bounded
+interpolating delay. All five `poles.eod` voices are offline framework fixtures.
+
+The expensive boundary did not move: structured event controls still require a
+decision about named versus ordered values and scalar versus curve-valued event
+parameters. Feedback topology likewise needs an explicit IR representation; a
+delay node does not make arbitrary graph cycles legal. Current status is kept in
+`README.md`; this log remains append-only.
+
+---
+
+## Native GUI checkpoint — 2026-07-28
+
+The first desktop GUI deliberately reuses the production path instead of
+wrapping the native sound example: editor Run → fresh Lua evaluation → owned
+`Program` → transactional revision → atomic multi-track scheduling →
+`GraphTemplate` instantiation → fundsp frontend/backend → cpal.
+
+The non-obvious ordering is preflight first, publication second. Every track in
+the candidate's first scheduling window lowers into a throwaway sequencer before
+the active revision changes. The live sequencer is then filled from the same
+exact frontier. Per-window preparation is all-or-nothing, and the app retains
+the preceding program as a fallback if a latent error only appears in a later
+window. Previously submitted voices are not cancelled, so their conservative
+tails drain across an edit; crossfading persistent processors remains a
+different, still-deferred lifetime problem.
+
+The app rejects persistent patches, controls, live graph inputs and bus sends
+for now. This is host capability negotiation, not a language restriction:
+those values already exist in the owned program, but silently discarding their
+audio would make a successful Run lie. The first cpal stream also fixes the
+output channel count for its lifetime; changing it requires restart until
+device-stream replacement has explicit semantics.

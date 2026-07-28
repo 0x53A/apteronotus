@@ -5,11 +5,25 @@
 //! numbers. Instrument selection, control maps, generations and activation at
 //! musical boundaries come later, after their shapes are settled.
 
-use crate::transport::{Transport, TransportError};
+use crate::tempo::TempoMap;
+use crate::transport::{CycleTime, Transport, TransportError};
 use apteronotus_music::{Pitch, PitchError};
 use apteronotus_pattern::{Frac, Pattern, Span, Value};
-use apteronotus_synth::{GraphTemplate, Note, TemplateError, instantiate};
+use apteronotus_synth::{GraphTemplate, LowerError, Note, TemplateError, instantiate};
 use fundsp::prelude32::{AudioUnit, Fade, ReplayMode, Sequencer};
+
+/// One pattern/template pair participating in an atomic scheduling window.
+#[derive(Clone, Copy)]
+pub struct ScheduledTrack<'a> {
+    pub pattern: &'a Pattern,
+    pub template: &'a GraphTemplate,
+}
+
+impl<'a> ScheduledTrack<'a> {
+    pub fn new(pattern: &'a Pattern, template: &'a GraphTemplate) -> ScheduledTrack<'a> {
+        ScheduledTrack { pattern, template }
+    }
+}
 
 /// A scheduler owns exactly one frontier. Windows it submits are adjacent and
 /// therefore cannot duplicate an onset even when callers poll irregularly.
@@ -40,6 +54,29 @@ impl PitchScheduler {
         transport: Transport,
         sequencer: &mut Sequencer,
     ) -> Result<FillReport, ScheduleError> {
+        self.fill_with_clock(end, pattern, template, &transport, sequencer)
+    }
+
+    /// The same scheduler path over a variable tempo map.
+    pub fn fill_to_tempo_map(
+        &mut self,
+        end: Frac,
+        pattern: &Pattern,
+        template: &GraphTemplate,
+        tempo: &TempoMap,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
+        self.fill_with_clock(end, pattern, template, tempo, sequencer)
+    }
+
+    fn fill_with_clock(
+        &mut self,
+        end: Frac,
+        pattern: &Pattern,
+        template: &GraphTemplate,
+        clock: &impl CycleTime,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
         let begin = self.frontier;
         if end <= begin {
             return Ok(FillReport {
@@ -48,35 +85,15 @@ impl PitchScheduler {
             });
         }
 
-        template.validate().map_err(ScheduleError::Template)?;
-        if sequencer.inputs() != 0 || sequencer.outputs() != template.channels() {
-            return Err(ScheduleError::ChannelMismatch {
-                expected: template.channels(),
-                found: sequencer.outputs(),
-            });
-        }
-
         let span = Span::new(begin, end);
-        let tail = template.tail();
-        let mut pending = Vec::new();
-        for event in pattern.onsets(span) {
-            let whole = event.whole.expect("onsets always have a whole span");
-            let pitch = pitch_from_value(&event.value)?;
-            let hz = pitch.hz();
-            if !hz.is_finite() || hz <= 0.0 {
-                return Err(ScheduleError::InvalidFrequency(hz));
-            }
-            let start = transport.cycle_to_seconds(whole.begin);
-            let gate = transport.duration_to_seconds(whole.length());
-            let note = Note::new(hz).duration(gate);
-            let unit = instantiate(template, &note).map_err(ScheduleError::Template)?;
-            pending.push((start, start + gate + tail, unit));
-        }
-
+        let pending = prepare_window(
+            span,
+            [ScheduledTrack::new(pattern, template)],
+            clock,
+            sequencer,
+        )?;
         let voices = pending.len();
-        for (start, end, unit) in pending {
-            sequencer.push(start, end, Fade::Smooth, 0.0, 0.0, unit);
-        }
+        commit_window(pending, sequencer);
         self.frontier = end;
         Ok(FillReport { span, voices })
     }
@@ -96,9 +113,153 @@ impl PitchScheduler {
         self.fill_to(end, pattern, template, transport, sequencer)
     }
 
+    pub fn fill_to_seconds_tempo_map(
+        &mut self,
+        seconds: f64,
+        pattern: &Pattern,
+        template: &GraphTemplate,
+        tempo: &TempoMap,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
+        let end = tempo
+            .seconds_to_cycle(seconds)
+            .map_err(ScheduleError::Transport)?;
+        self.fill_to_tempo_map(end, pattern, template, tempo, sequencer)
+    }
+
     /// A correctly shaped empty sequencer for offline tests and simple hosts.
     pub fn sequencer(template: &GraphTemplate) -> Sequencer {
-        Sequencer::new(0, template.channels(), ReplayMode::None)
+        Sequencer::new(template.inputs, template.channels(), ReplayMode::None)
+    }
+}
+
+/// A single frontier shared by every track in one program.
+///
+/// Unlike one [`PitchScheduler`] per track, this prepares every voice in the
+/// window before the first sequencer push. A bad pitch or graph in any track
+/// therefore leaves the entire window unpublished.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ProgramScheduler {
+    frontier: Frac,
+}
+
+impl ProgramScheduler {
+    pub fn new(start: Frac) -> ProgramScheduler {
+        ProgramScheduler { frontier: start }
+    }
+
+    pub fn frontier(&self) -> Frac {
+        self.frontier
+    }
+
+    pub fn fill_to<'a>(
+        &mut self,
+        end: Frac,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        transport: Transport,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
+        self.fill_with_clock(end, tracks, &transport, sequencer)
+    }
+
+    pub fn fill_to_tempo_map<'a>(
+        &mut self,
+        end: Frac,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        tempo: &TempoMap,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
+        self.fill_with_clock(end, tracks, tempo, sequencer)
+    }
+
+    fn fill_with_clock<'a>(
+        &mut self,
+        end: Frac,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        clock: &impl CycleTime,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
+        let begin = self.frontier;
+        if end <= begin {
+            return Ok(FillReport {
+                span: Span::new(begin, begin),
+                voices: 0,
+            });
+        }
+        let span = Span::new(begin, end);
+        let pending = prepare_window(span, tracks, clock, sequencer)?;
+        let voices = pending.len();
+        commit_window(pending, sequencer);
+        self.frontier = end;
+        Ok(FillReport { span, voices })
+    }
+
+    pub fn fill_to_seconds<'a>(
+        &mut self,
+        seconds: f64,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        transport: Transport,
+        sequencer: &mut Sequencer,
+    ) -> Result<FillReport, ScheduleError> {
+        let end = transport
+            .seconds_to_cycle(seconds)
+            .map_err(ScheduleError::Transport)?;
+        self.fill_to(end, tracks, transport, sequencer)
+    }
+}
+
+impl Default for ProgramScheduler {
+    fn default() -> Self {
+        ProgramScheduler::new(Frac::ZERO)
+    }
+}
+
+type PendingVoice = (f64, f64, Box<dyn AudioUnit>);
+
+fn prepare_window<'a>(
+    span: Span,
+    tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+    clock: &impl CycleTime,
+    sequencer: &Sequencer,
+) -> Result<Vec<PendingVoice>, ScheduleError> {
+    let mut pending = Vec::new();
+    for track in tracks {
+        let template = track.template;
+        template.validate().map_err(ScheduleError::Template)?;
+        if sequencer.inputs() != template.inputs {
+            return Err(ScheduleError::InputChannelMismatch {
+                expected: template.inputs,
+                found: sequencer.inputs(),
+            });
+        }
+        if sequencer.outputs() != template.channels() {
+            return Err(ScheduleError::ChannelMismatch {
+                expected: template.channels(),
+                found: sequencer.outputs(),
+            });
+        }
+
+        let tail = template.tail();
+        for event in track.pattern.onsets(span) {
+            let whole = event.whole.expect("onsets always have a whole span");
+            let pitch = pitch_from_value(&event.value)?;
+            let hz = pitch.hz();
+            if !hz.is_finite() || hz <= 0.0 {
+                return Err(ScheduleError::InvalidFrequency(hz));
+            }
+            let start = clock.cycle_to_seconds(whole.begin);
+            let gate = clock.span_to_seconds(whole);
+            let note = Note::new(hz).duration(gate).seed(event.seed());
+            let unit = instantiate(template, &note).map_err(ScheduleError::Lower)?;
+            pending.push((start, start + gate + tail, unit));
+        }
+    }
+    Ok(pending)
+}
+
+fn commit_window(pending: Vec<PendingVoice>, sequencer: &mut Sequencer) {
+    for (start, end, unit) in pending {
+        sequencer.push(start, end, Fade::Smooth, 0.0, 0.0, unit);
     }
 }
 
@@ -131,7 +292,9 @@ pub enum ScheduleError {
     NotPitch(Value),
     InvalidFrequency(f64),
     Template(TemplateError),
+    Lower(LowerError),
     Transport(TransportError),
+    InputChannelMismatch { expected: usize, found: usize },
     ChannelMismatch { expected: usize, found: usize },
 }
 
@@ -146,7 +309,12 @@ impl core::fmt::Display for ScheduleError {
                 write!(f, "pitch produced invalid frequency {hz}")
             }
             ScheduleError::Template(error) => write!(f, "invalid graph template: {error}"),
+            ScheduleError::Lower(error) => write!(f, "cannot lower graph: {error}"),
             ScheduleError::Transport(error) => error.fmt(f),
+            ScheduleError::InputChannelMismatch { expected, found } => write!(
+                f,
+                "voice has {expected} input channels but sequencer has {found}"
+            ),
             ScheduleError::ChannelMismatch { expected, found } => write!(
                 f,
                 "voice has {expected} output channels but sequencer has {found}"

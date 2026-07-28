@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/pattern"]
-default-members = ["crates/pattern"]
+members = ["crates/live", "crates/music", "crates/pattern", "crates/synth"]
+# `live` is excluded: it is the only crate that links the host audio stack.
+# Its scheduler tests are offline, but the lower crates need no cpal/alsa build
+# environment at all.
+default-members = ["crates/music", "crates/pattern", "crates/synth"]
 
 [workspace.package]
 version = "0.1.0"

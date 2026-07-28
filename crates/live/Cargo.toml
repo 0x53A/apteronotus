@@ -1,0 +1,12 @@
+[package]
+name = "apteronotus-live"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+apteronotus-music = { version = "0.1.0", path = "../music" }
+apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
+apteronotus-synth = { version = "0.1.0", path = "../synth" }
+cpal = "0.18.1"
+fundsp = { version = "0.23.0", default-features = false, features = ["std"] }

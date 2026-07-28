@@ -1,0 +1,199 @@
+-- jamming.eod — the knifefish's other trick, as a piece of music.
+--
+-- Apteronotus emits a discharge and listens to its own field. When a
+-- neighbour's discharge sits close enough to beat against it, it shifts away:
+-- the jamming avoidance response. That is a feedback loop through the outside
+-- world — emit, sense, move — and it is the only structure this file has.
+--
+-- So the live input is the neighbour, and nothing here has a fixed pitch.
+-- Play it a voice, a guitar, a room. It will get out of your way.
+--
+-- Stresses: live audio as a graph source, the audio -> control crossing,
+-- `patch` as a persistent rack rather than as a monosynth, the pattern algebra
+-- driving effect parameters instead of notes, external triggers and their
+-- lookahead problem, and a piece that is not reproducible until its input is
+-- recorded.
+
+tempo(72)          -- only `segment` and the degrade seeds use it.
+
+---------------------------------------------------------------------- inputs
+
+-- Lexical, not a global namespace with string lookups: the local binding is
+-- the internal identity, `name` is the external one the host binds against, and
+-- device identity never enters the song. An absent interface takes the
+-- fallback and reports a diagnostic — G1, unplugging something must not stop
+-- the sound.
+local them = audio_input {
+  name     = "neighbour",
+  channels = 1,
+  fallback = "silence",
+}
+
+local distance = control_input { name = "distance", range = { 0, 1 }, default = 0.35 }
+local field    = control_input { name = "field",    range = { 0, 1 }, default = 0.55 }
+
+--------------------------------------------------------------------- sensing
+
+-- Three numbers out of one live signal, and three *named* crossings from
+-- audio rate to control rate. None of these is a port coercion: throwing away
+-- 48 kHz to get 500 Hz is a decision, so it gets a node.
+--
+-- All three are stateful, and all three are read from more than one place —
+-- `their_hz` alone is used by both racks and by the score. They must lower to
+-- *one* node each with fan-out, not to a copy per referencing graph: two pitch
+-- trackers can disagree, and then this stops being one thing listening to one
+-- thing, which is the only idea the piece has.
+their_hz  = them >> pitch_tracker { min = 65, max = 1100, hold = ms(140) }
+their_amp = them >> envelope_follower(ms(6), ms(320))
+their_hit = them >> onset_detector { floor = 0.04, hold = ms(90) }
+
+-- `their_hit` is the interesting one, and it is a problem. It produces events
+-- from outside, and the scheduler fills [frontier, frontier + lookahead) — you
+-- cannot query the future of a live stream. So it can only ever fire at
+-- now-plus-minimum-latency, which means it is *not* a pattern however much it
+-- reads like one, and it gets its own type so it cannot be mistaken for one.
+--
+-- The way out is the same one that makes this file reproducible: record the
+-- stream and it becomes an ordinary finite `timeline`, queryable like anything
+-- else. One conversion, two holes closed.
+
+------------------------------------------------------------------------ rack
+
+-- The response itself: a pair sitting a fixed interval away from wherever the
+-- neighbour currently is, so it can never beat against them, and moving
+-- continuously because they do.
+--
+-- A `patch` and not a `voice`, for the honest reason rather than the
+-- convenient one. It has no notes. It runs from the first sample to the last,
+-- its oscillators free-run, and its pitch is a continuous function of
+-- something outside the program. The persistence is musically observable,
+-- which is the test `techno.eod`'s acid line could not provide on its own.
+jar = patch {
+  params = {
+    interval = { 1.05, 1.60, 1.335 },    -- roughly a tritone of flight
+    body     = { 200, 5000, 1150, "hz" },
+  },
+  graph = function(cv)
+    -- Trackers jitter; a glide is both the fix and the sound.
+    local away = (their_hz * cv.interval) >> slew(ms(60))
+
+    -- Two oscillators a few cents apart. The beat between *these* is the one
+    -- interference in the piece that is allowed to exist.
+    local pair = soft_saw(away * 0.997)
+               + soft_saw(away * 1.003) * 0.9
+               + sine(away * 0.5) * 0.35
+
+    -- It gets out of the way. Loud neighbour, quiet response — that is the
+    -- avoidance, and it is why this breathes with no envelope anywhere in it.
+    local room = 1 - 0.75 * their_amp
+
+    -- Cyclic where cyclic is actually right: a slow figure the algebra is good
+    -- at, laid over material that has no cycle at all. Note this needs the
+    -- pattern-to-control conversion that `duck` also wants — same open
+    -- question, arrived at from the other direction.
+    local pulse = 0.35 + 0.65 * ("1 0.2 0.6 0.15" >> segment(4) >> slow(3))
+
+    return (pair * 0.22 | cv.body * (1 + 3 * pulse * room) | dc(0.45))
+        >> lowpass()
+        >> mul(room * field)
+        >> (pan(-0.55) ~ pan(0.55))
+        >> to(hall, 0.6)
+  end,
+}
+
+-- Them, in the room with it. Without this the piece is a synthesiser reacting
+-- to something you cannot hear, which is a demo and not a duet.
+presence = patch {
+  graph = function()
+    return them
+        >> highpass(70)
+        >> shape("tanh", 1 + 2 * distance)
+        >> width(0.4 + 0.5 * distance)
+        >> to(hall, 0.25 + 0.6 * distance)
+  end,
+}
+
+-- Struck, and tuned to whatever they just played. `poles.eod`'s method with a
+-- frequency that is not known until the moment it happens: δ into a resonator
+-- bank, decay solved from t60 rather than dialled.
+bell = voice {
+  params = {
+    ring   = { 0.4, 6.0, 2.4, "s" },
+    bright = { 0, 1, 0.55 },
+  },
+  graph = function(n)
+    return impulse() >> mix({
+          ring(n.hz,         n.ring),
+          ring(n.hz * 2.756, n.ring * 0.60) * (0.50 * n.bright),
+          ring(n.hz * 5.404, n.ring * 0.30) * (0.25 * n.bright),
+        })
+        >> mul(n.velocity * 0.4)
+        >> dcblock()
+        >> pan(rand(-0.6, 0.6))
+        >> to(hall, 0.85)
+  end,
+}
+
+----------------------------------------------------------------------- sends
+
+-- Not one opaque `reverb()`. Predelay, early reflections, diffusion, then a
+-- modulated feedback matrix — all composition over delays, allpasses and
+-- matrix mixing, so the only Rust primitive underneath is the interpolating
+-- delay line. The modulation is what stops a seven-second tail turning
+-- metallic, and it is the single largest thing standing between this and
+-- sounding like a stock plugin.
+hall = send {
+  graph =
+      predelay(ms(38))
+      >> early({ ms(11), ms(17), ms(23), ms(31), ms(43) }, 0.62)
+      >> diffuse({ ms(4.7), ms(6.8), ms(10.1), ms(13.7) }, 0.72)
+      >> fdn {
+           size       = 8,
+           t60        = secs(7.5),
+           damping    = 0.42,
+           modulation = { depth = ms(1.6), rate = 0.11 },
+         }
+      >> width(0.92),
+  level = 0.5,
+}
+
+----------------------------------------------------------------------- score
+
+-- Almost nothing, and no arrangement, because the piece has no length — it is
+-- over when you stop playing into it. Every other song in this directory has a
+-- shape imposed from above; this one only has a rule.
+--
+-- Declarations are inert, so the two racks have to be started. Neither has
+-- notes to be driven by, so neither is `play`ed: `run` is for a graph that is
+-- simply on. No span, because there is no end.
+run(jar)
+run(presence)
+
+-- The single `play` in the file takes its events from outside and its pitch
+-- from a tracker, which is about as far from `"bd ~ ~ bd"` as the notation goes
+-- and is exactly why it is here.
+-- `at_onset` and not the bare signal, and the difference is audible: a struck
+-- resonator whose pitch kept tracking would slide for its whole four-second
+-- ring, chasing whatever came after the strike. The jar wants the live signal,
+-- the bell wants the value at the moment it was hit. Same source, two
+-- projections, and neither can be the silent default.
+play(bell, their_hit
+      >> hz(at_onset(their_hz >> slew(ms(20))))
+      >> velocity(at_onset(scale(0.15, 0.90, their_amp)))
+      >> ring(scale(1.2, 5.0, 1 - distance))
+      >> bright(scale(0.2, 0.95, perlin(0.05)))
+      >> degrade(0.35))          -- not every discharge gets an answer
+
+master(limiter(0.01, 0.4) >> gain(0.8))
+
+-- What this file was written to find, now that it has found it:
+--
+--   * A stateful signal read from several graphs must be *one* node. Nothing
+--     else in this directory ever shared one, so nothing else could have shown
+--     it. See the sensing block.
+--
+--   * An external event stream is not a pattern, because you cannot query the
+--     future of one. Recording it makes it a `timeline` and it becomes one.
+--
+--   * `at_onset` cannot be implicit, because this file needs both readings of
+--     the same signal eight lines apart.

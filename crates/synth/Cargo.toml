@@ -1,0 +1,9 @@
+[package]
+name = "apteronotus-synth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
+fundsp = { version = "0.23.0", default-features = false, features = ["std"] }

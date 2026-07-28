@@ -1,0 +1,8 @@
+[package]
+name = "apteronotus-pattern"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pattern algebra and mini-notation. No audio, no I/O, no dependencies."
+
+[dependencies]

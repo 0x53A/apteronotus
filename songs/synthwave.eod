@@ -1,0 +1,138 @@
+-- synthwave.eod — 1984, but the DeLorean has a modem.
+--
+-- Stresses: polyphony, sends, sidechain, chords into arps, curve automation
+-- across many bars, and gated reverb.
+
+tempo(104)
+key("f#", "minor")
+
+---------------------------------------------------------------------- rack
+
+-- Seven detuned saws, one ladder filter, one envelope. The whole genre.
+supersaw = voice {
+  params = {
+    cutoff = { 200, 12000, 2400, "hz" },
+    res    = { 0, 1, 0.35 },
+    detune = { 0, 0.03, 0.011 },
+    wet    = { 0, 1, 1 },
+  },
+  graph = function(n)
+    local osc = zero()
+    for i = -3, 3 do
+      osc = osc + saw(n.hz * (1 + n.detune * i)) * 0.13
+    end
+    -- The filter opens four octaves and settles back over the note.
+    local sweep = n.cutoff * (1 + 4 * adsr(0.012, 0.9, 0.30, 0.55))
+    local wet   = (osc | sweep | dc(n.res)) >> moog()
+    return mix(osc, wet, n.wet)
+        >> shape("tanh", 1.6)          -- a little tape drive
+        >> pan(n.pan)
+  end,
+}
+
+-- One saw, ladder, hard decay. Anything more and it stops being a bass.
+bass = voice {
+  params = { cutoff = { 80, 4000, 520, "hz" }, drive = { 1, 8, 2.2 } },
+  graph = function(n)
+    local env = adsr(0.004, 0.16, 0.55, 0.10)
+    return (saw(n.hz) | n.cutoff * (1 + 2.5 * env) | dc(0.72)) >> moog()
+        >> mul(env * n.vel)
+        >> shape("tanh", n.drive)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+-- Synthesized, not sampled: a sine whose pitch falls 120 Hz -> 45 Hz.
+kick = voice {
+  graph = function(n)
+    local pitch = 45 + 75 * decay(ms(26))
+    local body  = (pitch >> sine()) * decay(ms(110))
+    local click = noise() * decay(ms(2.5)) * 0.35
+    return (body + click) >> shape("tanh", 1.4) >> dcblock() >> pan(0)
+  end,
+}
+
+-- Noise plus a tuned body, then the decade's actual instrument: a huge
+-- reverb with the tail cut off mid-swell.
+snare = voice {
+  params = { gate = { 0.02, 0.6, 0.19, "s" } },
+  graph = function(n)
+    local crack = (noise() | dc(1900) | dc(1.4)) >> bandpass()
+    local body  = sine(185) * 0.5 + sine(330) * 0.3
+    local hit   = (crack + body) * decay(ms(38))
+    local tail  = hit >> reverb(24, 2.4)
+    return hit * 0.7 + tail * window(0, n.gate) * 0.8
+  end,
+}
+
+hat = voice {
+  params = { tone = { 2000, 14000, 8200, "hz" }, decay = { 0.01, 0.4, 0.045, "s" } },
+  graph = function(n)
+    return (noise() | dc(n.tone) | dc(1.1)) >> highpass()
+        >> mul(decay(n.decay) * n.vel)
+        >> pan(n.pan)
+  end,
+}
+
+pad = voice {
+  params = { cutoff = { 200, 6000, 1500, "hz" } },
+  graph = function(n)
+    local osc = soft_saw(n.hz) + soft_saw(n.hz * 1.004) + pulse(n.hz * 0.5, 0.32) * 0.4
+    local sway = 1 + 0.35 * sine(0.22)
+    return (osc * 0.3 | n.cutoff * sway | dc(0.3)) >> lowpass()
+        >> mul(adsr(1.4, 0.8, 0.85, 2.2))
+        >> chorus(0, 0.015, 0.005, 0.5)
+  end,
+}
+
+---------------------------------------------------------------------- sends
+
+verb = send { graph = reverb(38, 3.6, 0.7), level = 0.30 }
+tape = send { graph = delay(beats(0.75)) >> lowpass(3200) >> feedback(0.42),
+              level = 0.26 }                       -- dotted eighth, of course
+
+---------------------------------------------------------------------- shape
+
+-- i - VI - III - VII, one chord per bar.
+chords = "<[f#2 a2 c#3] [d2 f#2 a2] [a2 c#3 e3] [e2 g#2 b2]>"
+
+-- The arrangement, as one curve reused by everything that has to swell.
+intro  = window(bars(0),  bars(16))
+build  = line(0, 1, bars(8)) >> shift(bars(16))
+main   = step(bars(16))
+outro  = 1 - line(0, 1, bars(8)) >> shift(bars(56))
+
+---------------------------------------------------------------------- score
+
+play(kick,  "bd ~ ~ bd ~ ~ bd ~" >> gain(0.95 * main))
+play(snare, "~ ~ x ~"            >> gain(0.80 * main))
+play(hat,   "x*8" >> gain("0.5 0.25 0.35 0.25" * main)
+                  >> pan("-0.2 0.2")
+                  >> degrade(0.1))
+
+play(bass, "f#1*2 ~ f#1 [~ c#2]"
+      >> every(4, rev)
+      >> cutoff(scale(380, 1600, sine(0.125)))
+      >> gain(main)
+      >> duck("1 0 0 0", 0.5))
+
+play(pad, chords
+      >> slow(4)
+      >> gain(0.22 * (intro + main))
+      >> cutoff(scale(600, 3000, build))
+      >> to(verb, 0.5)
+      >> duck("1 0 0 0", 0.35))
+
+play(supersaw, chords
+      >> arp("up")
+      >> fast(4)
+      >> gain(0.5 * (main - outro))
+      >> wet(build)                                -- filter fades in over 8 bars
+      >> cutoff("2200 3400 1800 4200")
+      >> pan("-0.35 0.35")
+      >> sometimes(0.15, off(beats(0.25), gain(0.4)))
+      >> to(tape, 0.6)
+      >> to(verb, 0.3))
+
+master(limiter(0.003, 0.15) >> gain(0.85))

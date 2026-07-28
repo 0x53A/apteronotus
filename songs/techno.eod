@@ -1,0 +1,109 @@
+-- techno.eod — the other mode.
+--
+-- Stresses: a rigid grid, automation that has to stay coherent across a
+-- 32-bar riser, euclidean rhythms, and ducking deep enough to be part of the
+-- composition rather than a mixing fix.
+
+tempo(146)
+
+---------------------------------------------------------------------- rack
+
+kick = voice {
+  graph = function(n)
+    local pitch = 42 + 90 * decay(ms(18))
+    local body  = (pitch >> sine()) * decay(ms(190))
+    local click = (noise() | dc(3200) | dc(0.8)) >> highpass()
+    return (body + click * decay(ms(1.8)) * 0.5)
+        >> shape("tanh", 2.0) >> dcblock() >> pan(0)
+  end,
+}
+
+-- 303-shaped: one saw, ladder, envelope on the cutoff, accent on velocity.
+acid = voice {
+  params = {
+    cutoff = { 120, 6000, 400, "hz" },
+    res    = { 0, 1, 0.86 },
+    drive  = { 1, 12, 4.5 },
+    glide  = { 0, 0.2, 0.02, "s" },
+  },
+  graph = function(n)
+    local env = adsr(0.002, 0.12, 0.20, 0.06)
+    local hz  = slew(n.hz, n.glide)                -- portamento between notes
+    return (saw(hz) | n.cutoff * (1 + 6 * env * n.vel) | dc(n.res)) >> moog()
+        >> mul(env)
+        >> shape("tanh", n.drive)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+clap = voice {
+  graph = function(n)
+    -- Four bursts a few milliseconds apart is what makes it a clap and not
+    -- a snare.
+    local burst = curve { {0, 1}, {ms(9), 1}, {ms(10), 0.5}, {ms(19), 0.5},
+                          {ms(20), 0.7}, {ms(29), 0.7}, {ms(30), 1} }
+    local noiz  = (noise() | dc(1450) | dc(1.9)) >> bandpass()
+    return noiz * (burst * decay(ms(12)) + decay(ms(190)) * 0.25)
+        >> mul(n.vel) >> pan(0.1) >> to(plate, 0.5)
+  end,
+}
+
+hat = voice {
+  params = { tone = { 3000, 16000, 9000, "hz" }, decay = { 0.01, 0.5, 0.038, "s" } },
+  graph = function(n)
+    return (noise() | dc(n.tone) | dc(1.2)) >> highpass()
+        >> mul(decay(n.decay) * n.vel)
+        >> pan(n.pan)
+  end,
+}
+
+stab = voice {
+  graph = function(n)
+    local osc = pulse(n.hz, 0.28) + pulse(n.hz * 1.005, 0.34) * 0.6
+    return (osc * 0.4 | 800 + 5000 * decay(ms(70)) | dc(0.5)) >> lowpass()
+        >> mul(decay(ms(140)) * n.vel)
+        >> pan(n.pan) >> to(plate, 0.7)
+  end,
+}
+
+---------------------------------------------------------------------- sends
+
+plate = send { graph = reverb(28, 2.2, 0.6), level = 0.24 }
+
+---------------------------------------------------------------------- shape
+
+-- One 32-bar riser, reused by everything that has to climb together.
+riser = line(0, 1, bars(32))
+drop  = step(bars(32))
+sidechain = "1 0 0 0"
+
+---------------------------------------------------------------------- score
+
+play(kick, "bd*4" >> gain(1.0))
+
+play(clap, "~ x ~ x" >> gain(0.7))
+
+play(hat, "x(11,16)"
+      >> gain("0.42 0.22 0.3 0.22")
+      >> pan("-0.3 0.3")
+      >> tone(scale(6000, 13000, riser))
+      >> every(8, fast(2)))
+
+play(acid, "a1 [~ a2] c2 [a1 ~] ~ g1 [a1 ~] a1"
+      >> fast(2)
+      >> every(4, rev)
+      >> every(16, fast(2))
+      >> cutoff(scale(220, 3400, riser))
+      >> res(scale(0.7, 0.93, riser))
+      >> gain("1 0.7 0.7 1")                       -- accents drive the filter
+      >> duck(sidechain, 0.55))
+
+play(stab, "~ ~ ~ [a3,c4,e4]"
+      >> slow(2)
+      >> gain(0.5 * drop)
+      >> pan("-0.4 0.4")
+      >> sometimes(0.2, off(beats(0.5), gain(0.35)))
+      >> duck(sidechain, 0.4))
+
+master(limiter(0.002, 0.09) >> gain(0.9))

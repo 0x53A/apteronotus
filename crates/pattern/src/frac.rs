@@ -1,0 +1,268 @@
+//! Exact cycle time.
+//!
+//! Cycle positions are rationals, not floats, and deliberately so. A triplet
+//! divides a cycle into thirds and a quintuplet into fifths; in `f64` those
+//! boundaries stop meeting after a few operations, and events that should abut
+//! start overlapping or leaving gaps. Every span boundary in this crate is a
+//! `Frac`, and `f64` appears only at the very edge, where the scheduler
+//! converts cycles into seconds.
+
+use core::cmp::Ordering;
+use core::fmt;
+use core::ops::{Add, Div, Mul, Neg, Sub};
+
+/// A rational, always normalised: `den > 0` and `gcd(|num|, den) == 1`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Frac {
+    n: i64,
+    d: i64,
+}
+
+impl Frac {
+    pub const ZERO: Frac = Frac { n: 0, d: 1 };
+    pub const ONE: Frac = Frac { n: 1, d: 1 };
+
+    /// Construct and normalise.
+    ///
+    /// Goes through [`reduce`], so `i64::MIN` in either position — which would
+    /// overflow a naive `abs()` or negation — is handled rather than wrapped.
+    pub fn new(n: i64, d: i64) -> Frac {
+        reduce(n as i128, d as i128)
+    }
+
+    pub const fn int(n: i64) -> Frac {
+        Frac { n, d: 1 }
+    }
+
+    pub fn num(self) -> i64 {
+        self.n
+    }
+
+    pub fn den(self) -> i64 {
+        self.d
+    }
+
+    pub fn to_f64(self) -> f64 {
+        self.n as f64 / self.d as f64
+    }
+
+    /// Nearest rational to `x` with denominator at most `limit`.
+    pub fn approx(x: f64, limit: i64) -> Frac {
+        let mut best = Frac::int(x.round() as i64);
+        let mut best_err = (best.to_f64() - x).abs();
+        for d in 1..=limit {
+            let n = (x * d as f64).round() as i64;
+            let err = (n as f64 / d as f64 - x).abs();
+            if err < best_err {
+                best = Frac::new(n, d);
+                best_err = err;
+            }
+        }
+        best
+    }
+
+    /// Largest integer not greater than `self`. Tidal calls this the *sam*.
+    pub fn floor(self) -> i64 {
+        self.n.div_euclid(self.d)
+    }
+
+    /// The start of the cycle containing `self`.
+    pub fn sam(self) -> Frac {
+        Frac::int(self.floor())
+    }
+
+    /// Position within the cycle, in `[0, 1)`.
+    pub fn cycle_pos(self) -> Frac {
+        self - self.sam()
+    }
+
+    pub fn min(self, other: Frac) -> Frac {
+        if self <= other { self } else { other }
+    }
+
+    pub fn max(self, other: Frac) -> Frac {
+        if self >= other { self } else { other }
+    }
+
+    pub fn recip(self) -> Frac {
+        Frac::new(self.d, self.n)
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.n == 0
+    }
+
+    pub fn is_negative(self) -> bool {
+        self.n < 0
+    }
+}
+
+impl Ord for Frac {
+    fn cmp(&self, other: &Frac) -> Ordering {
+        // i128 so that comparing two long-denominator fractions cannot wrap.
+        (self.n as i128 * other.d as i128).cmp(&(other.n as i128 * self.d as i128))
+    }
+}
+
+impl PartialOrd for Frac {
+    fn partial_cmp(&self, other: &Frac) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Reduce a 128-bit ratio back into a `Frac`.
+///
+/// Every operation on `Frac` funnels through here, in `i128`, so nothing can
+/// silently wrap: a result too large for a 64-bit rational is a panic with a
+/// message rather than a quietly wrong cycle position.
+///
+/// That panic is an internal invariant, not an input check. `Frac` is total
+/// over musically sized values, and it is the *parser's* job to keep user text
+/// inside them — see the limits in [`crate::mini`]. Nothing a person can type
+/// may reach this assertion.
+fn reduce(n: i128, d: i128) -> Frac {
+    assert!(d != 0, "Frac with zero denominator");
+    let (n, d) = if d < 0 { (-n, -d) } else { (n, d) };
+    let mut a = n.abs();
+    let mut b = d;
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    let g = if a == 0 { 1 } else { a };
+    let (n, d) = (n / g, d / g);
+    assert!(
+        n >= i64::MIN as i128 && n <= i64::MAX as i128 && d <= i64::MAX as i128,
+        "cycle time overflowed a 64-bit rational: {n}/{d}"
+    );
+    Frac {
+        n: n as i64,
+        d: d as i64,
+    }
+}
+
+impl Add for Frac {
+    type Output = Frac;
+    fn add(self, o: Frac) -> Frac {
+        reduce(
+            self.n as i128 * o.d as i128 + o.n as i128 * self.d as i128,
+            self.d as i128 * o.d as i128,
+        )
+    }
+}
+
+impl Sub for Frac {
+    type Output = Frac;
+    fn sub(self, o: Frac) -> Frac {
+        reduce(
+            self.n as i128 * o.d as i128 - o.n as i128 * self.d as i128,
+            self.d as i128 * o.d as i128,
+        )
+    }
+}
+
+impl Mul for Frac {
+    type Output = Frac;
+    fn mul(self, o: Frac) -> Frac {
+        reduce(self.n as i128 * o.n as i128, self.d as i128 * o.d as i128)
+    }
+}
+
+impl Div for Frac {
+    type Output = Frac;
+    fn div(self, o: Frac) -> Frac {
+        assert!(!o.is_zero(), "division by zero cycle time");
+        reduce(self.n as i128 * o.d as i128, self.d as i128 * o.n as i128)
+    }
+}
+
+impl Neg for Frac {
+    type Output = Frac;
+    fn neg(self) -> Frac {
+        // Through `reduce` rather than `-self.n`, which overflows at i64::MIN.
+        reduce(-(self.n as i128), self.d as i128)
+    }
+}
+
+impl From<i64> for Frac {
+    fn from(n: i64) -> Frac {
+        Frac::int(n)
+    }
+}
+
+impl fmt::Debug for Frac {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.d == 1 {
+            write!(f, "{}", self.n)
+        } else {
+            write!(f, "{}/{}", self.n, self.d)
+        }
+    }
+}
+
+impl fmt::Display for Frac {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thirds_are_exact() {
+        let third = Frac::new(1, 3);
+        assert_eq!(third + third + third, Frac::ONE);
+    }
+
+    #[test]
+    fn normalises() {
+        assert_eq!(Frac::new(2, 4), Frac::new(1, 2));
+        assert_eq!(Frac::new(1, -2), Frac::new(-1, 2));
+        assert_eq!(Frac::new(0, 7), Frac::ZERO);
+    }
+
+    #[test]
+    fn floor_is_euclidean() {
+        assert_eq!(Frac::new(3, 2).floor(), 1);
+        assert_eq!(Frac::new(-1, 2).floor(), -1);
+        assert_eq!(Frac::int(-2).floor(), -2);
+        assert_eq!(Frac::new(-1, 2).cycle_pos(), Frac::new(1, 2));
+    }
+
+    #[test]
+    fn ordering_survives_large_denominators() {
+        let a = Frac::new(1, 3_000_000_000);
+        let b = Frac::new(1, 3_000_000_001);
+        assert!(a > b);
+    }
+
+    #[test]
+    fn survives_the_extremes() {
+        // i64::MIN has no positive counterpart, so a naive abs() or negation
+        // in normalisation would overflow.
+        assert_eq!(Frac::int(i64::MIN).num(), i64::MIN);
+        assert_eq!(Frac::new(i64::MIN, 2), Frac::int(i64::MIN / 2));
+        assert_eq!(Frac::new(i64::MIN, i64::MIN), Frac::ONE);
+        assert_eq!(Frac::new(0, i64::MIN), Frac::ZERO);
+        assert_eq!(-Frac::int(i64::MAX), Frac::int(-i64::MAX));
+        assert_eq!(Frac::int(i64::MIN).floor(), i64::MIN);
+    }
+
+    #[test]
+    #[should_panic(expected = "overflowed")]
+    fn a_result_too_large_to_represent_is_loud() {
+        // The documented invariant: `Frac` is total over musically sized
+        // values and says so rather than wrapping. The parser's limits are
+        // what keep user text from ever reaching this.
+        let _ = Frac::new(1, i64::MIN);
+    }
+
+    #[test]
+    fn approx_finds_simple_ratios() {
+        assert_eq!(Frac::approx(0.333_333_333, 16), Frac::new(1, 3));
+        assert_eq!(Frac::approx(0.75, 16), Frac::new(3, 4));
+    }
+}

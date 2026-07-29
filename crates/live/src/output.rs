@@ -17,12 +17,35 @@ use cpal::{
     Stream, StreamConfig, SupportedBufferSize, U24,
 };
 use fundsp::net::Net;
-use fundsp::prelude32::{AudioUnit, BufferVec, MAX_BUFFER_SIZE, ReplayMode, Sequencer, zero};
+use fundsp::prelude32::{
+    AudioUnit, BufferVec, MAX_BUFFER_SIZE, ReplayMode, Sequencer, Shared, follow, pass, shared,
+    var, zero,
+};
 
-/// About 10.7 ms at 48 kHz: enough headroom for a desktop UI without turning
-/// note input into an obviously sluggish instrument later.
+/// About 43 ms at 48 kHz.
+///
+/// The earlier 512 (10.7 ms) assumed the callback thread would be scheduled
+/// promptly, and on a desktop that is running a full-core `cargo build` it is
+/// not: cpal's ALSA worker is an ordinary `SCHED_OTHER` thread, so a compile
+/// starves it past the deadline and ALSA reports an underrun. Real-time
+/// scheduling is the proper fix, but cpal only promotes for direct `hw:`
+/// devices — it deliberately refuses for the PipeWire ioplug that is `default`
+/// on most current systems — so latency is the lever that works everywhere.
+///
+/// 43 ms is still under the threshold where a fader move or a Run command
+/// feels detached. Live *note* input, if it ever arrives, wants the real-time
+/// thread rather than a smaller number here.
 #[cfg(not(target_arch = "wasm32"))]
-const TARGET_BUFFER_FRAMES: u32 = 512;
+const TARGET_BUFFER_FRAMES: u32 = 2_048;
+
+/// Halfway response time of the master fader's smoother, in seconds.
+///
+/// A `Shared` read straight into a multiplier steps once per block, and a step
+/// in gain is a click — audible on any fader move, and worst at exactly the
+/// moment somebody reaches for the master because something is too loud. 10 ms
+/// is below the threshold at which a fader feels laggy and far above the one at
+/// which a gain change is heard as an edge.
+const MASTER_RESPONSE_SECONDS: f32 = 0.010;
 
 pub struct AudioOutput {
     sequencer: Sequencer,
@@ -31,6 +54,80 @@ pub struct AudioOutput {
     device_channels: usize,
     input_stream: Option<Stream>,
     input_binding: InputBinding,
+    master: MasterGain,
+}
+
+/// The master fader: one smoothed gain stage between the engine and the device.
+///
+/// It is deliberately *not* an Apteronotus `control` the score declares and the
+/// host drives. `master(...)` may be declared only once, so a score that
+/// already has one — which is every interesting score — cannot be given a gain
+/// stage from outside, and a master volume that stops working the moment a real
+/// song is pasted in is not a master volume. This sits downstream of everything
+/// the language can express, so it works on any program and asks nothing of it.
+///
+/// The handle is cheap to clone and independent of any one stream: it is a
+/// reference to the atomic the running graph already reads. Moving it stores a
+/// float. Nothing is re-evaluated, re-lowered or restarted, and a host may hold
+/// one across a hard reset — see [`AudioOutput::master`].
+#[derive(Clone)]
+pub struct MasterGain {
+    level: Shared,
+}
+
+impl MasterGain {
+    /// The bottom of the fader, in decibels. Anything at or below it is exact
+    /// silence rather than a very small number, so the fader has a real off.
+    pub const MIN_DECIBELS: f32 = -60.0;
+
+    /// The top of the fader, in decibels.
+    ///
+    /// Unity, and no higher. A master that can boost turns "it is too quiet"
+    /// into clipping at the one point in the signal path with no headroom left
+    /// and no meter on it. Gain belongs in the score, where it is written down
+    /// and can be seen; this control exists to take gain away.
+    pub const MAX_DECIBELS: f32 = 0.0;
+
+    /// A fader at unity — the level a host that never offers the control gets.
+    pub fn unity() -> MasterGain {
+        MasterGain { level: shared(1.0) }
+    }
+
+    /// The linear amplitude the graph is currently multiplying by.
+    pub fn amplitude(&self) -> f32 {
+        self.level.value()
+    }
+
+    /// Where the fader sits, in decibels; [`Self::MIN_DECIBELS`] when silent.
+    pub fn decibels(&self) -> f32 {
+        let amplitude = self.level.value();
+        if amplitude <= 0.0 {
+            return Self::MIN_DECIBELS;
+        }
+        (20.0 * amplitude.log10()).clamp(Self::MIN_DECIBELS, Self::MAX_DECIBELS)
+    }
+
+    /// Move the fader. Clamped to `[MIN_DECIBELS, MAX_DECIBELS]`; the bottom of
+    /// that range is silence, not −60 dB of residual signal.
+    pub fn set_decibels(&self, decibels: f32) {
+        let amplitude = if decibels <= Self::MIN_DECIBELS || decibels.is_nan() {
+            0.0
+        } else {
+            10.0f32.powf(decibels.min(Self::MAX_DECIBELS) / 20.0)
+        };
+        self.level.set(amplitude);
+    }
+
+    /// One channel of the gain stage: pass-through scaled by the smoothed level.
+    fn stage(&self) -> Box<dyn AudioUnit> {
+        Box::new(pass() * (var(&self.level) >> follow(MASTER_RESPONSE_SECONDS)))
+    }
+}
+
+impl Default for MasterGain {
+    fn default() -> Self {
+        MasterGain::unity()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -156,31 +253,41 @@ impl AudioOutput {
         sequencer.set_sample_rate(sample_rate);
         sequencer.allocate();
         let backend = sequencer.backend();
-        let renderer: Box<dyn AudioUnit> = match processor {
-            Some(processor) => {
-                let mut net = Net::new(0, synth_channels);
-                let voices = net.push(Box::new(backend));
-                let persistent = net.push(processor);
-                for channel in 0..sequencer_channels {
-                    net.connect(voices, channel, persistent, channel);
-                }
-                if let Some(capture) = capture {
-                    let capture = net.push(Box::new(capture));
-                    for channel in 0..external_channels {
-                        net.connect(capture, channel, persistent, sequencer_channels + channel);
+        // The master fader is the last thing before the device on every route,
+        // including the one with no persistent processor, so there is always a
+        // net here even when the sequencer backend alone would have rendered.
+        // One multiply per sample per channel; at unity it changes nothing.
+        let master = MasterGain::unity();
+        let renderer: Box<dyn AudioUnit> = {
+            let mut net = Net::new(0, synth_channels);
+            let source = match processor {
+                Some(processor) => {
+                    let voices = net.push(Box::new(backend));
+                    let persistent = net.push(processor);
+                    for channel in 0..sequencer_channels {
+                        net.connect(voices, channel, persistent, channel);
                     }
-                } else {
-                    for channel in 0..external_channels {
-                        let fallback = net.push(Box::new(zero()));
-                        net.connect(fallback, 0, persistent, sequencer_channels + channel);
+                    if let Some(capture) = capture {
+                        let capture = net.push(Box::new(capture));
+                        for channel in 0..external_channels {
+                            net.connect(capture, channel, persistent, sequencer_channels + channel);
+                        }
+                    } else {
+                        for channel in 0..external_channels {
+                            let fallback = net.push(Box::new(zero()));
+                            net.connect(fallback, 0, persistent, sequencer_channels + channel);
+                        }
                     }
+                    persistent
                 }
-                for channel in 0..synth_channels {
-                    net.connect_output(persistent, channel, channel);
-                }
-                Box::new(net)
+                None => net.push(Box::new(backend)),
+            };
+            for channel in 0..synth_channels {
+                let trim = net.push(master.stage());
+                net.connect(source, channel, trim, 0);
+                net.connect_output(trim, 0, channel);
             }
-            None => Box::new(backend),
+            Box::new(net)
         };
         let stream = match sample_format {
             SampleFormat::I8 => build_stream::<i8>(&device, config, renderer, synth_channels),
@@ -206,7 +313,19 @@ impl AudioOutput {
             device_channels,
             input_stream,
             input_binding,
+            master,
         })
+    }
+
+    /// This stream's master fader, at unity until a host moves it.
+    ///
+    /// The handle belongs to the stream, so it does not outlive one: a host
+    /// that keeps a level across a hard reset holds the *number* and reapplies
+    /// it to the new output before calling [`play`](Self::play), which is also
+    /// what stops a replacement stream from ever rendering a block at the wrong
+    /// gain. Clone this only to move the fader from elsewhere.
+    pub fn master(&self) -> &MasterGain {
+        &self.master
     }
 
     pub fn sequencer_mut(&mut self) -> &mut Sequencer {
@@ -578,16 +697,23 @@ mod tests {
         assert_eq!(
             preferred_buffer_size(&SupportedBufferSize::Range {
                 min: 64,
-                max: 2_048
+                max: 4_096
             }),
-            BufferSize::Fixed(512)
+            BufferSize::Fixed(2_048)
         );
         assert_eq!(
             preferred_buffer_size(&SupportedBufferSize::Range {
-                min: 1_024,
-                max: 4_096
+                min: 64,
+                max: 1_024
             }),
             BufferSize::Fixed(1_024)
+        );
+        assert_eq!(
+            preferred_buffer_size(&SupportedBufferSize::Range {
+                min: 4_096,
+                max: 8_192
+            }),
+            BufferSize::Fixed(4_096)
         );
         assert_eq!(
             preferred_buffer_size(&SupportedBufferSize::Unknown),
@@ -608,5 +734,52 @@ mod tests {
         let mut mono = [0.0f32; 1];
         write_buffer_frame(&mut mono, &synth, 3);
         assert_eq!(mono, [0.5]);
+    }
+
+    #[test]
+    fn the_master_fader_starts_at_unity_and_round_trips_decibels() {
+        let master = MasterGain::unity();
+        assert_eq!(master.amplitude(), 1.0);
+        assert_eq!(master.decibels(), 0.0);
+
+        for decibels in [-0.5, -6.0, -12.0, -35.25, -59.9] {
+            master.set_decibels(decibels);
+            assert!(
+                (master.decibels() - decibels).abs() < 1e-3,
+                "{decibels} dB did not survive the round trip"
+            );
+        }
+
+        // −6 dB is half the amplitude, which is the one figure a reader will
+        // check by hand.
+        master.set_decibels(-6.020_6);
+        assert!((master.amplitude() - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_bottom_of_the_fader_is_silence_not_a_small_number() {
+        let master = MasterGain::unity();
+        master.set_decibels(MasterGain::MIN_DECIBELS);
+        assert_eq!(master.amplitude(), 0.0);
+        master.set_decibels(-400.0);
+        assert_eq!(master.amplitude(), 0.0);
+        // Reading back a silent fader reports the bottom, not −inf.
+        assert_eq!(master.decibels(), MasterGain::MIN_DECIBELS);
+    }
+
+    /// The master attenuates. Boost belongs in the score, where it is written
+    /// down; here it would only clip the one point with no headroom left.
+    #[test]
+    fn the_fader_refuses_to_boost() {
+        let master = MasterGain::unity();
+        master.set_decibels(12.0);
+        assert_eq!(master.amplitude(), 1.0);
+    }
+
+    #[test]
+    fn a_nan_level_is_treated_as_silence_rather_than_poisoning_the_graph() {
+        let master = MasterGain::unity();
+        master.set_decibels(f32::NAN);
+        assert_eq!(master.amplitude(), 0.0);
     }
 }

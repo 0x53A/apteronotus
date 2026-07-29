@@ -8,7 +8,7 @@
 local tone = voice {
   graph = function(n)
     local env = adsr(ms(5), ms(80), 0.6, ms(180))
-    return (sine(n.hz) * env * n.velocity * 0.12) >> pan(n.pan)
+    return (sine(n.hz) * env * n.velocity * 0.8) >> pan(n.pan)
   end,
 }
 

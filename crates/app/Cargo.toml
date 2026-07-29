@@ -15,8 +15,12 @@ crate-type = ["cdylib", "rlib"]
 apteronotus-live = { version = "0.1.0", path = "../live" }
 apteronotus-lua = { version = "0.1.0", path = "../lua" }
 apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
+apteronotus-render = { version = "0.1.0", path = "../render" }
 apteronotus-synth = { version = "0.1.0", path = "../synth" }
 web-time = "1.1.0"
+
+[dev-dependencies]
+apteronotus-songs = { version = "0.1.0", path = "../songs" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.35.0", default-features = false, features = [

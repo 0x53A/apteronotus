@@ -1,8 +1,8 @@
 # The songs are the specification
 
-Written before the runtime, on purpose. These are the target: the
-implementation is finished when they play, and any feature not needed by one of
-them is not needed yet.
+The first seven were written before the runtime, on purpose. Those are the
+target: the implementation is finished when they play, and any feature not
+needed by one of them is not needed yet.
 
 | song | what it is there to stress |
 |---|---|
@@ -13,6 +13,8 @@ them is not needed yet.
 | `neon.eod` | finite through-composed time, tempo changes and off-grid entrances, extended voicings, two-layer raw subtractive synthesis, per-voice drift, note-relative gestures, a persistent mono lead, a large modulated reverb |
 | `jamming.eod` | live audio as a graph source, the audio → control crossing, `patch` as a persistent rack, the pattern algebra driving effects rather than notes, and a piece that is not reproducible until its input is recorded |
 | `supersaws.eod` | an external Strudel port: stereo topology generation, weighted and polymetric event structure, per-event filter envelopes, channel-wise distortion, and probabilistic ratchets |
+| `drift.eod` | written *after* the engine: a stationary loop with no arrangement, variation derived from mutually prime transport periods, a stateless persistent noise floor, and live controls over it |
+| `outbound.eod` | also after the engine: polymetric loop lengths and offsets *as* the form, a fast pulse against a low event count, and pentatonic cells that stay consonant wherever the 8-bar harmony has got to |
 
 The first four are cyclic and fix every parameter at onset. `neon.eod` and
 `jamming.eod` exist because that turned out to be a property of the author
@@ -20,6 +22,27 @@ rather than of music — see session 3 in
 `../_Tasks/000-architecture/LOG.md`. `supersaws.eod` is the first port selected
 by an external author, and exists to challenge the vocabulary with habits that
 the preceding six could still share.
+
+`drift.eod` and `outbound.eod` are written in the other direction — against a
+working backend rather than ahead of one — against a working
+backend rather than ahead of one — and so they specify nothing. They are here
+because the corpus is the only place the songs live, and because between them
+they test one thing the seven do not: all seven have an arrangement, and a
+curve over 64 bars is a thing that runs out. A piece meant to be left on has
+to get its variation from periods that do not divide the loop. `drift.eod`
+does that with parameters and `outbound.eod` does it with whole layers, and
+both are the same derive-from-coordinates rule the pattern algebra is built
+on, applied to form instead of to a query.
+
+## These files are the only copy
+
+`crates/songs` embeds them with `include_str!`, so any application that wants
+the corpus — the editor, the study app in `~/src/idiosepius`, a renderer —
+links `apteronotus-songs` rather than copying a `.eod` into its own assets.
+Editing a file here changes every consumer at the next build, which is the
+point. `crates/app/src/corpus.rs` then asserts that every one of them still
+evaluates, lowers and opens a stereo output, so a song cannot quietly stop
+being a specification the engine meets.
 
 ## Vocabulary the seven songs use
 
@@ -300,7 +323,9 @@ identity splits: a derived `event_seed` for anything reproducible, a
 `waves.eod` is specified as giving the same nine minutes every time it is
 opened; this is what that costs. Pattern provenance now derives the event seed,
 the scheduler binds it into `Note`, and
-`init_random(stream, min, max)` deterministically consumes it.
+`init_random(stream, min, max)` deterministically consumes it. Stateful
+`noise()` and `pink()` nodes derive distinct structural streams from the same
+seed instead of replaying one identical burst at every onset.
 
 ## Rules these songs are written to
 

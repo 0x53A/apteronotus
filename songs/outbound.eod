@@ -1,0 +1,339 @@
+-- outbound.eod — the same road as `drift.eod`, forty miles an hour faster.
+--
+-- Upbeat without being busy, which are two different axes and get confused
+-- constantly. `techno.eod` is busy because sixteen things happen per bar;
+-- `synthwave.eod` is busy because its arpeggio runs at sixteenths under a
+-- lead. This piece runs at 140 with a straight eighth-note bass and an
+-- offbeat hat — a fast *pulse* — while the harmony still moves once every two
+-- bars and the melody is four notes in seven. Pulse is what makes it drive.
+-- Event count per bar is what makes it tiring. Only the first is wanted here.
+--
+-- The feel is half-time: the backbeat lands every two beats rather than every
+-- one, so 140 is counted as 70 by anyone tapping along. That is the trick the
+-- genre uses to be quick and unhurried at once.
+--
+---------------------------------------------------------------------- form
+--
+-- Nothing here is arranged and nothing fades in. Instead each layer is a loop
+-- of its own length, so the *combination* is what varies:
+--
+--   harmony (stab, bass)    8 bars      the spine — these two stay locked
+--   kick, backbeat          4 bars
+--   hats                    3 bars rhythm, 7 bars of tone over it
+--   arp                     5 bars, offset 2
+--   ride                    5 bars, offset 2
+--   lead                    7 bars
+--   perc accent             7 bars, offset 3
+--   filter sweeps          11 bars
+--   level and drive        13 bars
+--
+-- lcm(8, 4, 3, 5, 7, 11) = 9240 bars, which at this tempo is four and a half
+-- hours before the *notes* come round again; the two 13-bar parameter sweeps
+-- push the point where the whole state repeats out to 120120 bars, or a bit
+-- under sixty hours. Every bar of that is deterministic and identical on
+-- every replay: the pattern algebra derives from cycle position, so a loop of
+-- length 5 queried at cycle 4619 answers directly, without anything having
+-- had to count its way there.
+--
+-- One layer has to stay still or the result is soup rather than form, and
+-- here that is the four-bar drum loop. Everything is heard as early or late
+-- against something.
+--
+-- The one real constraint this imposes is harmonic. A 5-bar melodic cell
+-- against an 8-bar chord loop means every note lands over a different chord
+-- each pass, so the cell has to be consonant with all four. Both cells are
+-- drawn from the C# minor pentatonic (c# e f# g# b), which contains no note
+-- that is a semitone from a chord tone of C#m, A, E or B. That is also the
+-- musical payoff rather than merely the safety condition: the same six notes
+-- arrive as a ninth, then a sixth, then a root, and the ear hears three
+-- melodies where one was written.
+
+tempo(140)
+
+---------------------------------------------------------------------- space
+
+-- Big and bright, unlike `drift.eod`'s. This one is supposed to be the size
+-- of the windscreen.
+hall = send { graph = reverb(52, secs(3.4), 0.42) >> highpass(180), level = 0.26 }
+
+-- A quarter-note delay rather than the dotted eighth. At 140 the dotted
+-- eighth fills every gap there is, which is precisely the busyness being
+-- avoided; the quarter lands on the beat and reinforces the pulse instead of
+-- crowding it.
+echo = send {
+  graph = delay(beats(1))
+       >> lowpass(2600)
+       >> feedback(0.34),
+  level = 0.2,
+}
+
+---------------------------------------------------------------------- rack
+
+-- Six saws over a ladder. The genre's one instrument, but the filter tracks
+-- an envelope that closes in 400 ms, so it is a stab rather than a chord — a
+-- pad that sustained here would smear the pulse into mush.
+stab = voice {
+  params = {
+    cutoff = { 300, 9000, 2600, "hz" },
+    detune = { 0, 0.02, 0.008 },
+  },
+  graph = function(n)
+    local osc = zero()
+    for i = -2, 3 do
+      osc = osc + saw(n.hz * (1 + n.detune * (i - 0.5))) * 0.12
+    end
+    local env = adsr(ms(14), ms(400), 0.34, secs(1.1))
+    return (osc | n.cutoff * (1 + 2.2 * env) | dc(0.42)) >> moog()
+        >> mul(env * n.velocity)
+        >> shape("tanh", 1.3)
+        >> chorus(0, 0.014, 0.006, 0.34)
+  end,
+}
+
+-- The engine. A saw, a narrow square beside it, a sine for the fundamental,
+-- a ladder, and a decay short enough that consecutive eighths separate
+-- instead of running together. Everything upbeat here is in this one voice.
+--
+-- Nothing in it plays below the written note. A square an octave down put
+-- fundamentals at 35 Hz, which is inaudible, expensive in headroom, and most
+-- of why the first mix measured 10 dB heavy against the reference.
+drive = voice {
+  params = {
+    cutoff = { 120, 3000, 620, "hz" },
+    bite = { 1, 6, 2.4 },
+  },
+  graph = function(n)
+    local env = adsr(ms(6), ms(150), 0.22, ms(90))
+    local osc = saw(n.hz) * 0.75
+              + pulse(n.hz, 0.42) * 0.3
+              + sine(n.hz) * 0.28
+    return (osc | n.cutoff * (1 + 3 * env) | dc(0.6)) >> moog()
+        >> mul(env * n.velocity * 0.26)
+        >> shape("tanh", n.bite)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+-- A plucked bell for the arp: a short saw through a fast filter envelope,
+-- hard-panned wide. Two of these an octave apart would be an arpeggiator;
+-- one, panned, is a texture.
+pluckt = voice {
+  params = { cutoff = { 400, 9000, 2200, "hz" }, ring = { 0.08, 1.2, 0.34, "s" } },
+  graph = function(n)
+    local env = decay(n.ring) * (1 - decay(ms(3)))
+    local tone = saw(n.hz) * 0.5 + pulse(n.hz * 2.002, 0.42) * 0.2
+    return (tone | n.cutoff * (0.35 + 2 * env) | dc(0.5)) >> lowpass()
+        >> mul(env * n.velocity * 0.55)
+        >> pan(n.pan)
+  end,
+}
+
+-- The lead sings rather than plucks: slow attack, real vibrato, and the only
+-- part in the piece allowed to hold a note across a bar line.
+sing = voice {
+  params = { bright = { 800, 6000, 2400, "hz" } },
+  graph = function(n)
+    local vibrato = 1 + 0.005 * sine(5.2) * window(secs(0.35), secs(12))
+    local hz = n.hz * vibrato
+    local osc = saw(hz) * 0.45
+              + saw(hz * 1.006) * 0.4
+              + sine(hz * 2) * 0.12
+    local env = adsr(ms(120), secs(0.8), 0.72, secs(1.4))
+    return (osc | n.bright * (1 + 1.4 * env) | dc(0.4)) >> lowpass()
+        >> mul(env * n.velocity * 0.4)
+        >> shape("soft", 1.15)
+        >> chorus(1, 0.026, 0.011, 0.24)
+        >> pan(n.pan)
+  end,
+}
+
+-- Analogue kick: a pitch drop into a body, with the click left in this time.
+-- `drift.eod` removed the transient because a transient interrupts; here the
+-- transient is the beat, and 12 ms of noise is what makes it audible on a
+-- laptop at all.
+kick = voice {
+  graph = function(n)
+    local pitch = 55 + 85 * decay(ms(30))
+    local body = (pitch >> sine()) * decay(ms(120)) * (1 - decay(ms(2)))
+    local click = ((noise() | dc(2200) | dc(1.4)) >> bandpass())
+                * decay(ms(10)) * 0.22
+    return (body + click)
+        >> mul(n.velocity * 0.6)
+        >> shape("tanh", 1.5)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+-- Gated snare, which in 1984 meant a huge plate with the tail chopped off
+-- mid-swell. The gate is a `window`, so the length is a parameter of the
+-- event rather than a property of the sound.
+snare = voice {
+  params = { gate = { 0.04, 0.5, 0.16, "s" } },
+  graph = function(n)
+    local crack = (noise() | dc(1800) | dc(1.1)) >> bandpass()
+    local body = sine(190) * 0.4 + sine(315) * 0.24
+    local hit = (crack + body) * decay(ms(60)) * (1 - decay(ms(2)))
+    local tail = hit >> reverb(30, secs(1.9), 0.3)
+    return (hit * 0.8 + tail * window(0, n.gate) * 0.9)
+        >> mul(n.velocity * 0.5)
+  end,
+}
+
+-- Band-passed rather than high-passed. A high-pass has no upper limit, so
+-- every hat in the piece was contributing full-scale energy at 13 kHz, which
+-- is most of what "harsh" means and none of what "bright" means.
+hat = voice {
+  params = { tone = { 2000, 10000, 5200, "hz" }, ring = { 0.01, 0.3, 0.05, "s" } },
+  graph = function(n)
+    return (noise() | dc(n.tone) | dc(0.9)) >> bandpass()
+        >> mul(decay(n.ring) * (1 - decay(ms(1.5))) * n.velocity * 0.5)
+        >> pan(n.pan)
+  end,
+}
+
+-- Struck metal rather than filtered noise, so the 5-bar ride reads as a
+-- different instrument from the 3-bar hat instead of as the same one out of
+-- phase. Three partials with no integer relation is what a cymbal is.
+ride = voice {
+  graph = function(n)
+    local modes = {
+      ring(2270, secs(0.9)) * 0.5,
+      ring(3410, secs(0.7)) * 0.35,
+      ring(5180, secs(0.5)) * 0.2,
+    }
+    return impulse() >> mix(modes)
+        >> mul(n.velocity * 0.28)
+        >> dcblock()
+        >> pan(n.pan)
+  end,
+}
+
+-- The 7-bar accent. A tuned tom is the one percussion voice whose entrances
+-- you notice, which is exactly what a layer at a prime length is for.
+tom = voice {
+  graph = function(n)
+    local pitch = n.hz * (1 + 1.1 * decay(ms(70)))
+    return (pitch >> sine()) * decay(ms(320)) * (1 - decay(ms(3)))
+        >> mul(n.velocity * 0.5)
+        >> shape("tanh", 1.2)
+        >> dcblock()
+        >> pan(n.pan)
+  end,
+}
+
+---------------------------------------------------------------------- shape
+
+-- i - VI - III - VII in C# minor as C#m9, Amaj9, E6, B7sus-ish, two bars
+-- each. The top three voices barely move; only the bottom one walks.
+chords = pattern("<[c#3,g#3,b3,d#4] [a2,g#3,b3,c#4] [e3,g#3,b3,c#4] [b2,f#3,a3,c#4]>")
+      >> slow(2)
+
+-- Roots, straight eighths, for the whole eight bars. This is the pulse and it
+-- does not vary, because a pulse that varies is a fill.
+roots = pattern("<c#2*8 a1*8 e2*8 b1*8>") >> slow(2)
+
+-- The 5-bar arp cell and the 7-bar lead cell, both C# minor pentatonic, so
+-- both stay consonant wherever the 8-bar harmony has got to. Neither is
+-- written against a particular chord — that is the point of the technique.
+arp_cell = pattern([[<
+  [c#4 ~ g#4 ~ b4 ~ g#4 ~]
+  [~ f#4 ~ c#5 ~ b4 ~ ~]
+  [e4 ~ b4 ~ c#5 ~ b4 ~]
+  [~ ~ g#4 ~ f#4 ~ e4 ~]
+  [c#5 ~ b4 ~ g#4 ~ ~ ~]
+>]])
+
+lead_cell = pattern([[<
+  [~ ~ e5 ~]
+  [~ ~ ~ ~]
+  [c#5 ~ ~ b4]
+  [~ ~ ~ ~]
+  [~ g#4 ~ ~]
+  [~ ~ ~ ~]
+  [f#4 ~ e4 ~]
+>]])
+
+-- The slow movements, in bars. 11 and 13 divide neither the 8-bar harmony nor
+-- any loop length above, so no parameter ever lines up with any phrase.
+sweep  = scale(850, 2500, sine(1 / 11))
+grit   = scale(1.9, 3.4, sine(1 / 13))
+weight = scale(0.9, 1.0, sine(1 / 13))
+
+---------------------------------------------------------------------- score
+
+------------------------------------------------------ 8 bars: the spine
+play(drive, roots
+      >> velocity(0.66 * weight)
+      >> drive.cutoff(scale(460, 1500, sine(1 / 11)))
+      >> drive.bite(grit)
+      >> duck("1 0 1 0", 0.18))
+
+play(stab, chords
+      >> velocity(0.62 * weight)
+      >> stab.cutoff(sweep)
+      >> pan("-0.4 0.4")
+      >> to(hall, 0.5)
+      >> duck("1 0 1 0", 0.13))
+
+------------------------------------------------------ 4 bars: the beat
+play(kick, pattern("<[bd ~ ~ ~ bd ~ ~ ~] [bd ~ ~ ~ bd ~ ~ ~] [bd ~ ~ ~ bd ~ ~ ~] [bd ~ ~ bd bd ~ ~ [~ bd]]>")
+      >> velocity(0.78 * weight))
+
+play(snare, pattern("<[~ ~ x ~] [~ ~ x ~] [~ ~ x ~] [~ ~ x [~ x]]>")
+      >> velocity(0.85)
+      >> snare.gate("0.14 0.22")
+      >> to(hall, 0.3))
+
+------------------------------------------------------ 3 bars: the offbeat
+-- Offbeat only. Eighths on the beat would double the kick and the bass and
+-- turn a pulse into a wall.
+play(hat, pattern("<[~ x ~ x ~ x ~ x] [~ x ~ x ~ x ~ [x x]] [~ x ~ x ~ [x x] ~ x]>")
+      >> velocity("0.4 0.27")
+      >> hat.tone(scale(3000, 4800, sine(1 / 7)))
+      >> hat.ring("0.04 0.03 0.05 0.03")
+      >> pan("-0.3 0.35"))
+
+------------------------------------------------------ 5 bars, offset 2
+play(pluckt, arp_cell
+      >> shift(bars(2))
+      >> velocity(0.46 * weight)
+      >> pluckt.cutoff(sweep)
+      >> pluckt.ring("0.3 0.22 0.42 0.26")
+      >> pan("-0.55 0.5 -0.35 0.6")
+      >> to(echo, 0.55)
+      >> to(hall, 0.35))
+
+play(ride, pattern("<[~ ~ x ~ ~ ~ x ~] [~ ~ x ~ ~ ~ ~ ~] [~ ~ x ~ ~ x ~ ~] ~ [~ ~ x ~ ~ ~ x [x ~]]>")
+      >> shift(bars(2))
+      >> velocity(0.4)
+      >> pan("0.45 -0.4"))
+
+------------------------------------------------------ 7 bars
+play(sing, lead_cell
+      >> velocity(0.66 * weight)
+      >> sing.bright(scale(1300, 2900, sine(1 / 11)))
+      >> pan(scale(-0.25, 0.25, sine(1 / 13)))
+      >> to(echo, 0.4)
+      >> to(hall, 0.7))
+
+play(tom, pattern("<~ [~ ~ ~ [g#2 ~]] ~ [~ ~ c#3 ~] ~ ~ [~ [g#2 c#3] ~ ~]>")
+      >> shift(bars(3))
+      >> velocity(0.55)
+      >> pan("-0.4 0.4")
+      >> to(hall, 0.45))
+
+-- Slightly hot into a fast limiter, which is what the decade sounded like.
+-- `width` is well above unity because the reference for this piece measures
+-- about 6 dB of side against mid and the parts alone come nowhere near —
+-- hard-panned material is wide, but a mix whose loudest two elements are a
+-- mono bass and a mono kick is not, and those two set the denominator.
+master(
+    highpass(46)
+    >> width(3.2)
+    >> lowpass(9000, 0.5)
+    >> shape("soft", 1.06)
+    >> limiter(0.004, 0.18)
+    >> mul(1.35)
+)

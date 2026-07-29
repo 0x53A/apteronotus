@@ -6,16 +6,33 @@ members = [
     "crates/lua",
     "crates/music",
     "crates/pattern",
+    "crates/render",
+    "crates/songs",
     "crates/synth",
     "crates/transport",
 ]
-# `live` is excluded: it is the only crate that links the host audio stack.
-# Its scheduler tests are offline, but the lower crates need no cpal/alsa build
-# environment at all.
+# `cargo run` with no arguments launches the application, and `cargo test` with
+# no arguments covers the tree rather than an audio-free subset of it.
+#
+# The rule that keeps the first half of that true: **exactly one default member
+# may carry a binary**, because cargo has no way to break a tie and refuses to
+# guess. `crates/app` is that member. A new crate belongs in this list, unless
+# it has a `[[bin]]` — `crates/render` does, so it is a member but not a default
+# one, and is reached with `cargo run -p apteronotus-render`.
+#
+# The audio-free subset is still reachable, and still worth reaching for: only
+# `live`, `app` and `render` link the host audio stack, so
+# `cargo test -p apteronotus-pattern -p apteronotus-music -p apteronotus-synth`
+# needs no cpal/alsa/GL build environment at all. That was the reason this list
+# used to be short; making it a `-p` selection rather than the default keeps the
+# property without making the normal development command fail.
 default-members = [
+    "crates/app",
+    "crates/live",
     "crates/lua",
     "crates/music",
     "crates/pattern",
+    "crates/songs",
     "crates/synth",
     "crates/transport",
 ]

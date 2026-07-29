@@ -1,0 +1,329 @@
+-- drift.eod — twenty hours of it, and nothing ever arrives.
+--
+-- `synthwave.eod` is the same decade earlier in the evening: seven saws, an
+-- arpeggio at sixteenths, and an arrangement that goes somewhere. This is the
+-- other thing that genre is for — the one you leave running while you work.
+-- It uses the same i - VI - III - VII skeleton on purpose, so the difference
+-- is audibly arrangement and voicing rather than harmony.
+--
+-- Everything that makes a piece ask for attention has been removed on
+-- purpose:
+--
+--   * nothing plays faster than an eighth and the harmony moves every two
+--     bars, so there is no rate for the ear to lock onto;
+--   * nothing is bright and nothing has a hard front. Every struck voice
+--     fades in over a few milliseconds instead of starting at full scale, the
+--     kick has no click, the backbeat is a brush rather than a snare, the
+--     shaker is a broad band-pass around 3 kHz rather than the usual
+--     high-passed noise, and the pad's filter never opens past 2 kHz;
+--   * the melody is thinned by `degrade` rather than written out, so a phrase
+--     you noticed once is not there the next time round.
+--
+-- The last constraint is the structural one. A loop meant to run all night
+-- cannot be arranged as a curve over 64 bars, because the curve runs out —
+-- `synthwave.eod`'s `intro`/`build`/`main`/`outro` are exactly what is not
+-- available here. So the variation is derived instead: every parameter that
+-- moves is a slow function of transport position, at periods of 3, 7, 11 and
+-- 13 bars, none of which divides the 8-bar loop. The whole state repeats when
+-- all five periods do, at 8 x 3 x 7 x 11 x 13 = 24024 bars, which at this
+-- tempo is a little under twenty-two hours. The title is not a figure of
+-- speech.
+--
+-- Same rule as everything else in the system: derive from coordinates, retain
+-- only real history. Nothing here is a random draw, so the twenty-two hours
+-- are the same twenty-two hours on every replay.
+
+tempo(74)
+
+---------------------------------------------------------------------- space
+
+-- One long, dark reverb doing the work a mix would otherwise do with volume.
+-- Damping at 0.72 is high: the tail loses its top very quickly, which is what
+-- keeps a large space from being a bright one.
+air = send { graph = reverb(46, secs(5.2), 0.72) >> lowpass(2600), level = 0.34 }
+
+-- The dotted-eighth delay is the genre's signature and also a large part of
+-- what makes it busy, so it returns at about half the level `synthwave.eod`
+-- gives it and is filtered down to a smear rather than a repeat you can
+-- count.
+haze = send {
+  graph = delay(beats(0.75))
+       >> lowpass(1600)
+       >> feedback(0.46),
+  level = 0.14,
+}
+
+---------------------------------------------------------------------- rack
+
+-- How much record this is played off. Both are `control`s rather than
+-- constants because the right amount is a room-and-mood decision rather than
+-- a compositional one, and a program-scope control is a live fader: the host
+-- draws one per declaration and writes it while the program runs. Turn
+-- `crackle` to zero and this is a clean synth mix.
+hiss_level    = control { name = "hiss",    range = { 0, 2 }, default = 0.7 }
+crackle_level = control { name = "crackle", range = { 0, 2 }, default = 0.5 }
+
+-- The tape floor. It is a `patch` rather than a voice because it has no onset
+-- and never stops: one persistent graph instance for the length of the
+-- program, which is the correct lifetime for a noise floor and the wrong one
+-- for a note. It also has no score, which is what `run` with no span is for —
+-- and it is what makes the faders above meaningful, since a per-note voice
+-- would rebuild its nodes and there would be nothing durable to write to.
+dust = patch {
+  graph = function()
+    -- Two separately written hiss sources rather than one aimed at both
+    -- speakers. Identity comes from the binding, so writing `pink()` twice is
+    -- two nodes and the floor is genuinely stereo; binding it once and
+    -- referring to it twice would have been one node and mono.
+    local hiss_left  = (pink() | dc(3200) | dc(0.5)) >> lowpass()
+    local hiss_right = (pink() | dc(3200) | dc(0.5)) >> lowpass()
+
+    -- Crackle, in two steps and with no state anywhere in it. Noise
+    -- low-passed to 120 Hz is a slowly wandering signal; its ninth power is
+    -- almost always about zero and occasionally not, which is a sparse
+    -- trigger with no counter, no buffer and no history behind it. `tanh`
+    -- flattens whatever survives so the pops arrive at roughly one size
+    -- instead of spread over 40 dB, and the final noise multiply gives each
+    -- one a body to be heard through.
+    --
+    -- The drive into the power is what sets the *rate*: a pop happens
+    -- whenever the wandering signal is near its extreme, and the curve is
+    -- steep. 6 is about one pop a second, 7 is four, 8 is nine and 9 is a
+    -- broken record. The fader below sets the level, not the density; they
+    -- are genuinely different knobs, and only the level one can move while
+    -- the program is up, because density is topology.
+    local wander = ((noise() | dc(120) | dc(0.6)) >> lowpass()) * 7
+    local pops = (wander ^ 9) >> shape("tanh", 6)
+    local crackle = ((pops * noise()) | dc(2000) | dc(1.2)) >> bandpass()
+
+    return (hiss_left * 0.011 * hiss_level >> pan(-0.75))
+         + (hiss_right * 0.011 * hiss_level >> pan(0.75))
+         + (crackle * 0.13 * crackle_level >> pan(0.1))
+  end,
+}
+
+-- Five soft saws barely apart, a filter that stays shut, and an envelope
+-- measured in seconds. The whole point of the voice is that you cannot hear
+-- it start.
+pad = voice {
+  params = {
+    cutoff = { 200, 4000, 1150, "hz" },
+    spread = { 0, 0.02, 0.006 },
+  },
+  graph = function(n)
+    local osc = zero()
+    for i = -2, 2 do
+      osc = osc + soft_saw(n.hz * (1 + n.spread * i)) * 0.13
+    end
+
+    -- Breathing, not sweeping. It is a note-clock LFO, so it is per voice and
+    -- each held chord drifts on its own nine-second period rather than the
+    -- whole pad moving as one block.
+    local sway = 1 + 0.3 * sine(0.11)
+    return (osc | n.cutoff * sway | dc(0.8)) >> lowpass()
+        >> mul(adsr(secs(2.2), secs(1.6), 0.78, secs(3.4)) * n.velocity)
+        >> chorus(0, 0.019, 0.008, 0.21)
+  end,
+}
+
+-- An electric piano, additively: a body that decays like a string, and a tine
+-- six and a half times above it that is gone in under a fifth of a second.
+-- The tine is the entire reason this reads as a keyboard rather than as a
+-- sine, and it is also the only bright thing in the piece — which is why it
+-- is measured in milliseconds.
+keys = voice {
+  params = { tine = { 0, 1, 0.45 }, bell = { 3, 12, 6.5 } },
+  graph = function(n)
+    local body = sine(n.hz) * decay(secs(2.6))
+               + sine(n.hz * 2.01) * decay(secs(1.1)) * 0.28
+               + sine(n.hz * 3.02) * decay(secs(0.5)) * 0.15
+    local tine = sine(n.hz * n.bell)
+               * decay(ms(180)) * (1 - decay(ms(4)))
+               * n.tine * 0.42
+
+    return (body + tine)
+        >> mul(n.velocity * 0.34)
+        >> (dc(n.hz * 2.6) | dc(1.6)) >> peak()      -- one soft formant
+        >> shape("soft", 1.1)
+        >> pan(n.pan)
+  end,
+}
+
+-- A sub you feel, plus an octave you can actually hear. These roots sit
+-- between 44 and 65 Hz; a bass that is only its fundamental disappears
+-- completely on the speakers this will be played through, and then the
+-- harmony has no floor at all. The octave layer is what carries the note, and
+-- the filter is left open enough to pass a harmonic or two of it.
+bass = voice {
+  params = { cutoff = { 60, 1200, 480, "hz" } },
+  graph = function(n)
+    local env = adsr(ms(35), secs(0.9), 0.42, secs(0.6))
+    local osc = sine(n.hz) * 0.55
+              + sine(n.hz * 2) * 0.30
+              + soft_saw(n.hz * 2) * 0.34
+    return (osc | n.cutoff * (1 + 0.8 * env) | dc(0.7)) >> lowpass()
+        >> mul(env * n.velocity * 0.30)
+        >> shape("tanh", 1.15)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+-- The lead is deliberately the least synthetic thing here: a triangle-ish
+-- stack with a slow vibrato that does not arrive until the note has been held
+-- for most of a second, and an attack you can watch happen.
+lead = voice {
+  params = { air = { 0, 0.06, 0.02 } },
+  graph = function(n)
+    local vibrato = 1 + 0.004 * sine(4.6) * window(secs(0.9), secs(9))
+    local hz = n.hz * vibrato
+    local osc = sine(hz)
+              + sine(hz * 3) * 0.17
+              + sine(hz * 5) * 0.035
+              + noise() * n.air
+
+    return (osc | dc(2300) | dc(0.5)) >> lowpass()
+        >> mul(adsr(secs(0.55), secs(1.2), 0.62, secs(2.6)) * n.velocity * 0.95)
+        >> chorus(1, 0.024, 0.010, 0.17)
+        >> pan(n.pan)
+  end,
+}
+
+-- A kick with the click taken out: the transient is what makes a drum
+-- interrupt you, and there is nothing else in a kick that does. What is left
+-- is the pitch drop, shallower and slower than `synthwave.eod`'s — 42 Hz over
+-- 48 ms rather than 75 over 26 — and a body that takes 180 ms to go instead
+-- of 110.
+kick = voice {
+  graph = function(n)
+    local pitch = 46 + 42 * decay(ms(48))
+    -- `decay` starts at one, so using it bare is a step from silence — a
+    -- click, by definition. The complementary term is a 4 ms fade that costs
+    -- nothing audible and removes it. Everything struck in this piece does
+    -- this; it is most of the difference between a soft kit and a sharp one.
+    local body = (pitch >> sine()) * decay(ms(180)) * (1 - decay(ms(4)))
+    return body
+        >> mul(n.velocity)
+        >> shape("tanh", 1.25)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+-- Not a snare. A brush: band-passed noise low enough to be wood, with a
+-- 40 ms swell in front of it so it arrives rather than cracks.
+brush = voice {
+  graph = function(n)
+    local air = (noise() | dc(1150) | dc(0.9)) >> bandpass()
+    local skin = sine(215) * 0.22
+    local env = decay(ms(120)) * (1 - decay(ms(40)))
+    return (air + skin)
+        >> mul(env * n.velocity * 2.6)
+        >> (dc(320) | dc(0.7)) >> highpass()
+        >> pan(-0.12)
+  end,
+}
+
+-- Broad rather than narrow, and long enough to be a shake rather than a tick:
+-- at 55 ms with a hard front this reads as a click, which is the one thing a
+-- background piece cannot have.
+shaker = voice {
+  params = { tone = { 1500, 7000, 3400, "hz" } },
+  graph = function(n)
+    local env = decay(ms(120)) * (1 - decay(ms(12)))
+    return (noise() | dc(n.tone) | dc(0.8)) >> bandpass()
+        >> mul(env * n.velocity * 1.5)
+        >> pan(n.pan)
+  end,
+}
+
+---------------------------------------------------------------------- shape
+
+-- i - VI - III - VII in A minor, one chord every two bars: Am9, Fmaj7,
+-- Cmaj7, G(add9). The three upper voices never move more than a whole tone
+-- between chords and mostly do not move at all — only the bottom note walks.
+-- The progression is supposed to be something you stop noticing.
+chords = pattern("<[a2,e3,g3,b3] [f2,e3,a3,c4] [c3,e3,g3,b3] [g2,d3,a3,b3]>")
+      >> slow(2)
+
+-- The root of each chord, restated once a bar so the pulse survives without
+-- anything having to hit hard.
+roots = pattern("<a1*2 f1*2 c2*2 g1*2>") >> slow(2)
+
+-- Eight bars of melody with four bars of nothing in it. `degrade` then takes
+-- about a third of what is left, and because the seed derives from position
+-- rather than being drawn from a generator, it takes a *different* third on
+-- every pass of the loop while still giving the same night on every replay.
+-- A fixed amount is all that is needed for that: the cycle index is already
+-- in the coordinate being hashed.
+melody = pattern("<[~ ~ e4 ~] ~ [a4 ~ ~ g4] ~ [~ e4 ~ ~] ~ [d4 ~ ~ e4] ~>")
+
+-- The slow movements, in bars. None of these periods divides eight, which is
+-- the whole reason the loop does not announce itself.
+breathing = scale(0.86, 1.0, sine(1 / 13))    -- the whole mix, gently
+opening   = scale(1050, 2000, sine(1 / 11))    -- the pad filter
+tilt      = scale(-0.25, 0.25, sine(1 / 7))   -- where the keys sit
+weather   = scale(0.3, 1.0, perlin(1 / 3))    -- how present the melody is
+
+---------------------------------------------------------------------- score
+
+run(dust)
+
+play(kick, "bd ~ [~ bd] ~"
+      >> velocity(0.70 * breathing)
+      >> degrade(0.04))
+
+play(brush, "~ ~ x ~"
+      >> velocity(0.55)
+      >> every(4, off(beats(0.5), velocity(0.16))))
+
+play(shaker, "x*4"
+      >> velocity("0.30 0.18 0.24 0.18")
+      >> shaker.tone(scale(2400, 3800, sine(1 / 7)))
+      >> pan("-0.25 0.3")
+      >> degrade(0.12))
+
+play(bass, roots
+      >> velocity(0.72 * breathing)
+      >> bass.cutoff(scale(380, 700, sine(1 / 11)))
+      >> duck("1 0 0 0", 0.22))
+
+play(pad, chords
+      >> velocity(0.62 * breathing)
+      >> pad.cutoff(opening)
+      >> pan("-0.3 0.3")
+      >> to(air, 0.62)
+      >> duck("1 0 0 0", 0.18))
+
+-- The keys unfold the chord instead of striking it: `arp` with a beat of
+-- spacing spreads four notes over four beats of a two-bar chord and leaves
+-- the other four beats empty. That is the rate difference from
+-- `synthwave.eod`'s `arp("up") >> fast(4)` in one line.
+play(keys, chords
+      >> arp("up", beats(1))
+      >> every(2, off(beats(4), velocity(0.15)))
+      >> velocity(0.34 * breathing)
+      >> keys.tine(scale(0.3, 0.62, sine(1 / 11)))
+      >> pan(tilt)
+      >> sometimes(0.12, velocity(0.18))
+      >> to(air, 0.4)
+      >> to(haze, 0.5))
+
+play(lead, melody
+      >> degrade(0.35)
+      >> velocity(0.62 * breathing * weather)
+      >> lead.air(scale(0.01, 0.04, sine(1 / 13)))
+      >> pan(scale(-0.2, 0.2, sine(1 / 3)))
+      >> to(air, 0.8)
+      >> to(haze, 0.35))
+
+-- Gentle everywhere. The limiter is slow enough that it never audibly grabs,
+-- and the low-pass is the last thing standing between this and a mix you
+-- would notice at four in the morning.
+master(
+    highpass(40)
+    >> lowpass(7200, 0.7)
+    >> shape("soft", 1.03)
+    >> limiter(0.02, 0.6)
+    >> mul(1.25)
+)

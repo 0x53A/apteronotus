@@ -4,7 +4,7 @@
 -- 32-bar riser, euclidean rhythms, and ducking deep enough to be part of the
 -- composition rather than a mixing fix.
 
-tempo(146)
+tempo(136)
 
 ---------------------------------------------------------------------- sends
 
@@ -27,13 +27,13 @@ acid = voice {
   params = {
     cutoff = { 120, 6000, 400, "hz" },
     res    = { 0, 1, 0.86 },
-    drive  = { 1, 12, 4.5 },
+    drive  = { 1, 12, 3.2 },
     glide  = { 0, 0.2, 0.02, "s" },
   },
   graph = function(n)
     local env = adsr(0.002, 0.12, 0.20, 0.06)
     local hz  = slew(n.hz, n.glide)                -- portamento between notes
-    return (saw(hz) | n.cutoff * (1 + 6 * env * n.velocity) | dc(n.res)) >> moog()
+    return (saw(hz) | n.cutoff * (1 + 1.25 * env * n.velocity) | dc(n.res)) >> moog()
         >> mul(env)
         >> shape("tanh", n.drive)
         >> dcblock()
@@ -54,7 +54,7 @@ clap = voice {
 }
 
 hat = voice {
-  params = { tone = { 3000, 16000, 9000, "hz" }, decay = { 0.01, 0.5, 0.038, "s" } },
+  params = { tone = { 3000, 16000, 8000, "hz" }, decay = { 0.01, 0.5, 0.038, "s" } },
   graph = function(n)
     return (noise() | dc(n.tone) | dc(1.2)) >> highpass()
         >> mul(decay(n.decay) * n.velocity)
@@ -87,15 +87,12 @@ play(clap, "~ x ~ x" >> velocity(0.7))
 play(hat, "x(11,16)"
       >> velocity("0.42 0.22 0.3 0.22")
       >> pan("-0.3 0.3")
-      >> hat.tone(scale(6000, 13000, riser))
-      >> every(8, fast(2)))
+      >> hat.tone(scale(5000, 9000, riser)))
 
 play(acid, "a1 [~ a2] c2 [a1 ~] ~ g1 [a1 ~] a1"
-      >> fast(2)
       >> every(4, rev)
-      >> every(16, fast(2))
-      >> acid.cutoff(scale(220, 3400, riser))
-      >> acid.res(scale(0.7, 0.93, riser))
+      >> acid.cutoff(scale(220, 1400, riser))
+      >> acid.res(scale(0.55, 0.72, riser))
       >> velocity("1 0.7 0.7 1")                   -- accents drive the filter
       >> duck(sidechain, 0.55))
 

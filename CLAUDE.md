@@ -29,9 +29,10 @@ roughly a kilohertz.
 - `crates/live` — a monotonic-frontier pitch scheduler over transport clocks,
   routed voice stems, the first persistent run/control executor,
   transactional generation activation, external-trigger recording, native
-  default-device input through a bounded capture ring, and cpal output over
-  `fundsp::Sequencer::backend()`. Browser input attachment, native input
-  selection, MIDI binding and persistent replacement remain.
+  default-device input through a bounded capture ring, a smoothed `MasterGain`
+  at the device edge, and cpal output over `fundsp::Sequencer::backend()`.
+  Browser input attachment, native input selection, MIDI binding and persistent
+  replacement remain.
 - `crates/lua` — a fresh, sandboxed Piccolo VM per evaluation, producing only
   owned pattern/graph/program data. The same crate builds natively and for
   `wasm32-unknown-unknown`. Typed graph operators, voices, persistent patches,
@@ -39,10 +40,28 @@ roughly a kilohertz.
   attribution for notation/random transforms are connected. Tempo maps and
   finite timeline placement are owned `Program` data; graph-expression spans
   and the wider score API remain.
+- `crates/songs` — the specification corpus from `songs/`, embedded as static
+  strings for other applications to consume. No dependencies, no evaluator, no
+  audio; the crate is a delivery mechanism, and it exists because
+  `~/src/idiosepius` had started keeping its own copies.
+- `crates/render` — the device-free half of a Run, and offline rendering to a
+  WAV file. It owns the `Program` → scheduler/arena binding (`playable_channels`,
+  `persistent_runtime`, `scheduled_tracks`, `scheduled_runs`) that the GUI
+  player and the corpus test also use, so a rendered file cannot disagree with
+  what the device would have played. With no deadline there is no lookahead:
+  the whole window is scheduled before the first block, and `Sequencer` is
+  driven directly instead of split frontend/backend. Renders are reproducible
+  sample for sample, which is what lets a render be measured against a
+  reference recording. `--stems` emits the routed bus layout rather than the
+  main channels, because a per-bus comparison is a real error signal where
+  mix-against-mix confounds every part at once.
 - `crates/app` — the first native and wasm user paths: a lexically highlighted
   Lua editor, explicit Run/Stop commands, activation diagnostics, persistent
-  patch/bus execution and live control faders over the production evaluator,
-  scheduler and cpal output. Native uses a control-thread player; the custom
+  patch/bus execution, a permanent master fader and live control faders over
+  the production evaluator, scheduler and cpal output. It is also where the
+  corpus is pinned against the backend: `src/corpus.rs` asserts that all seven
+  songs still evaluate, lower and open a stereo output. Native uses a
+  control-thread player; the custom
   web component evaluates explicitly and advances lookahead on the browser
   event loop, with wasm-pack packaging and GitHub Pages deployment.
   Compatible persistent edits retain the live arena and control values at the
@@ -234,12 +253,32 @@ processors remain deferred because their input-retention semantics differ.
 Replacement, host input selection/browser attachment and clocked patch
 automation remain separate concerns, not hidden inside this lifetime slice.
 
+**The master volume is a gain between the engine and the device, not part of
+the score.** The obvious alternative was a `control` the score declares and the
+host drives, which is exactly how live faders work — but `master(...)` may be
+declared only once, so a score that already has one cannot be given a gain stage
+from outside, and every interesting score has one. A master volume that stops
+working the moment a real song is pasted in is not a master volume. `MasterGain`
+is therefore a `fundsp` node `crates/live` inserts downstream of everything the
+language can express, on every route including the one with no persistent
+processor, so it works on any program and asks nothing of it.
+
+Three consequences worth keeping. It is smoothed — a `Shared` read straight into
+a multiplier steps once per block, and a step in gain is a click, worst at
+exactly the moment somebody reaches for the master. It attenuates only, because
+boost at the one point with no headroom left and no meter on it is just
+clipping; gain belongs in the score where it is written down. And the handle
+belongs to a stream while the *level* belongs to the host, which reapplies it
+before `play` — a fader that reset with the transport would be one the user has
+to find again after every incompatible edit.
+
 **Per-voice randomness derives from event provenance.** Pattern events hash
 their construction origin, exact occurrence span, and group-member identity.
 Recorded events additionally carry their captured ordinal. The scheduler binds
-that seed into `Note`, and `init_random(stream, min, max)` is the only graph
-operation that consumes it. Runtime voice handles remain addressing tokens and
-must never seed sound.
+that seed into `Note`. `init_random(stream, min, max)` derives init-rate values
+from it, while `noise()` and `pink()` derive one backend stream per structural
+node so separate onsets do not restart the same short waveform. Runtime voice
+handles remain addressing tokens and must never seed sound.
 
 **Voice lifetime has two coordinates.** `gate_tail` is response duration after
 scheduled release; `absolute_horizon` is a finite activity time measured from
@@ -418,8 +457,9 @@ Kept as doors, not built:
 - **Portable graph serialization.** `GraphTemplate` is data-only from its first
   line, so this stays possible — but playing a serialized graph without the
   language is explicitly not a v1 goal, and rendering to an audio file covers
-  the same need. Do not design a versioned interchange format before hearing
-  anything.
+  the same need. `crates/render` now does, which removes the last practical
+  argument for an interchange format. Do not design a versioned one before
+  hearing anything.
 - **Runtime-loadable DSP.** Three routes, cheapest first: fundsp `Net`/`realnet`
   (dynamic graphs with a realtime-safe swap), a patch matrix, plain core wasm
   modules through the host's *real* engine (`WebAssembly.instantiate` JITs;
@@ -450,14 +490,33 @@ Kept as doors, not built:
 that cpal and eframe dlopen at runtime; `crates/pattern` needs none of it and
 builds anywhere.
 
+`cargo run` with no arguments launches the application. Keeping that true has
+one rule: exactly one default member may carry a binary, because cargo has no
+way to break a tie. A new crate belongs in `default-members`, unless it has a
+`[[bin]]`. The audio-free subset is still reachable by `-p` selection, which is
+the only reason the default list was ever short.
+
 ```
+cargo run
 cargo test --workspace
 cargo check -p apteronotus-lua --target wasm32-unknown-unknown
 cargo clippy -p apteronotus-pattern -p apteronotus-music \
   -p apteronotus-synth -p apteronotus-live -p apteronotus-lua \
+  -p apteronotus-songs -p apteronotus-render -p apteronotus-app \
   --all-targets --no-deps -- -D warnings
 cargo fmt
 ```
+
+Hearing a change is `cargo run`; *looking* at one is
+
+```
+cargo run -p apteronotus-render -- songs/techno.eod --seconds 8 -o /tmp/techno.wav
+```
+
+which reports voice count and peak level, and defaults to 32-bit float so an
+overloaded mix arrives diagnosable rather than already flattened. Renders are
+reproducible, so two of them are directly comparable — that is the intended
+use, not export.
 
 Piccolo is a pinned upstream snapshot and is intentionally not subjected to
 the first-party warnings-as-errors Clippy gate.

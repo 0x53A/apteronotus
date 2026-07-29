@@ -15,7 +15,7 @@ pub mod trigger;
 pub use apteronotus_transport::{
     CycleTime, TempoMap, TempoMapError, TempoPoint, Transport, TransportError,
 };
-pub use output::{AudioOutput, InputBinding, OutputError};
+pub use output::{AudioOutput, InputBinding, MasterGain, OutputError};
 pub use persistent::{PersistentError, PersistentRuntime};
 pub use revision::{Generation, Revision, RevisionSlot, SubmitError};
 pub use scheduler::{

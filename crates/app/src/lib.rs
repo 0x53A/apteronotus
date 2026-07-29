@@ -1,13 +1,35 @@
+#[cfg(test)]
+mod corpus;
 mod examples;
 mod highlight;
 mod player;
 mod style;
 
+use apteronotus_live::MasterGain;
 use eframe::egui;
 use player::{Command, ControlView, PlayerEvent, PlayerWorker};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 use style::Edge;
+
+/// The master fader's travel, taken from the engine so the two cannot disagree.
+///
+/// The slider is linear in decibels rather than in amplitude, which is what
+/// gives it a usable taper: a linear-amplitude fader does its whole audible job
+/// in the bottom fifth of its travel and spends the rest of it moving between
+/// levels that all sound about the same.
+const MIN_VOLUME_DECIBELS: f64 = MasterGain::MIN_DECIBELS as f64;
+const MAX_VOLUME_DECIBELS: f64 = MasterGain::MAX_DECIBELS as f64;
+
+/// The fader's readout. The bottom of the travel is silence, so it says so
+/// rather than claiming −60 dB.
+fn format_decibels(decibels: f64) -> String {
+    if decibels <= MIN_VOLUME_DECIBELS {
+        "−∞ dB".into()
+    } else {
+        format!("{decibels:.1} dB")
+    }
+}
 
 /// Launch the native desktop application.
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,6 +71,10 @@ struct ApteronotusApp {
     sounding: bool,
     /// Taken from the editor's previous frame, only to light the gutter.
     cursor_line: usize,
+    /// The master fader's position. Held here as well as in the player because
+    /// the widget is the source of truth for where it is drawn, and the player
+    /// owns whether the device has heard about it yet.
+    volume_decibels: f64,
 }
 
 enum Status {
@@ -106,6 +132,7 @@ impl ApteronotusApp {
             controls: Vec::new(),
             sounding: false,
             cursor_line: 0,
+            volume_decibels: MAX_VOLUME_DECIBELS,
         }
     }
 
@@ -398,17 +425,52 @@ impl ApteronotusApp {
             });
     }
 
+    /// The right-hand rack: the master fader, then whatever faders the program
+    /// declared.
+    ///
+    /// The panel is unconditional, because the master is. A volume control that
+    /// appears only once a score happens to declare a control is not a volume
+    /// control, and one that moves down the panel as controls come and go is a
+    /// control you have to look for. It sits above the divider, always in the
+    /// same place, and the heading says whose it is.
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
-        if self.controls.is_empty() {
-            return;
-        }
         let mut updates = Vec::new();
+        let mut volume_moved = false;
         egui::Panel::right("controls")
             .frame(style::chrome(Edge::Left))
             .resizable(true)
             .default_size(232.0)
             .min_size(180.0)
             .show(ui, |ui| {
+                style::section_heading(ui, "OUTPUT");
+                ui.add_space(style::UNIT);
+                ui.horizontal(|ui| {
+                    style::field_label(ui, "master");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format_decibels(self.volume_decibels))
+                                .text_style(egui::TextStyle::Small)
+                                .color(style::DISCHARGE),
+                        );
+                    });
+                });
+                let fader = style::fader(
+                    ui,
+                    &mut self.volume_decibels,
+                    MIN_VOLUME_DECIBELS..=MAX_VOLUME_DECIBELS,
+                )
+                .on_hover_text(
+                    "A gain stage between the engine and the device. It is not part of \
+                     the score, so it works on any document and survives a reset",
+                );
+                if fader.changed() {
+                    volume_moved = true;
+                }
+
+                if self.controls.is_empty() {
+                    return;
+                }
+                ui.add_space(style::UNIT * 2.0);
                 style::section_heading(ui, "CONTROLS");
                 ui.add_space(style::UNIT);
                 for control in &mut self.controls {
@@ -429,6 +491,11 @@ impl ApteronotusApp {
                     ui.add_space(style::UNIT * 1.5);
                 }
             });
+        if volume_moved {
+            self.send(Command::SetVolume {
+                decibels: self.volume_decibels as f32,
+            });
+        }
         for (name, value) in updates {
             self.send(Command::SetControl { name, value });
         }

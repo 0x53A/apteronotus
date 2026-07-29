@@ -90,6 +90,35 @@ fn fixed_frequency_voices_accept_nonpitch_trigger_labels() {
 }
 
 #[test]
+fn four_repetitions_at_120_bpm_land_on_quarter_note_beats() {
+    let pattern = mini::parse("x*4").unwrap();
+    let mut graph = GraphBuilder::new();
+    let impulse = graph.impulse();
+    let voice = graph.out_mono(impulse).unwrap();
+    let transport = Transport::new(120.0).unwrap();
+    let mut scheduler = PitchScheduler::default();
+    let mut sequencer = PitchScheduler::sequencer(&voice);
+    sequencer.set_sample_rate(SR);
+
+    let report = scheduler
+        .fill_to(Frac::ONE, &pattern, &voice, transport, &mut sequencer)
+        .unwrap();
+    assert_eq!(report.voices, 4);
+
+    let audio = render(&mut sequencer, SR, 2.0);
+    let audible: Vec<usize> = audio[0]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| (sample.abs() > 0.5).then_some(index))
+        .collect();
+    assert_eq!(
+        audible,
+        vec![0, 24_000, 48_000, 72_000],
+        "`x*4` must mean four quarter-note onsets in one 4/4 cycle"
+    );
+}
+
+#[test]
 fn pattern_through_scheduler_and_synth_makes_first_sound() {
     let pattern = mini::parse("c4").unwrap();
     let voice = voice();

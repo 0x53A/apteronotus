@@ -8,24 +8,27 @@ key("f#", "minor")
 
 ---------------------------------------------------------------------- rack
 
--- Seven detuned saws, one ladder filter, one envelope. The whole genre.
+-- Five detuned saws, one ladder filter, one envelope. The whole genre.
 supersaw = voice {
   params = {
     cutoff = { 200, 12000, 2400, "hz" },
-    res    = { 0, 1, 0.35 },
+    res    = { 0, 1, 0.18 },
     detune = { 0, 0.03, 0.011 },
     wet    = { 0, 1, 1 },
   },
   graph = function(n)
     local osc = zero()
-    for i = -3, 3 do
-      osc = osc + saw(n.hz * (1 + n.detune * i)) * 0.13
+    for i = -2, 2 do
+      osc = osc + saw(n.hz * (1 + n.detune * i)) * 0.17
     end
-    -- The filter opens four octaves and settles back over the note.
-    local sweep = n.cutoff * (1 + 4 * adsr(0.012, 0.9, 0.30, 0.55))
+    -- Keep the opening below the brittle top octave even at the highest
+    -- patterned cutoff.
+    local sweep = n.cutoff * (1 + 0.35 * adsr(0.012, 0.9, 0.30, 0.55))
     local wet   = (osc | sweep | dc(n.res)) >> moog()
     return mix(osc, wet, n.wet)
         >> shape("tanh", 1.6)          -- a little tape drive
+        >> dcblock()
+        >> mul(n.velocity)
         >> pan(n.pan)
   end,
 }
@@ -35,7 +38,7 @@ bass = voice {
   params = { cutoff = { 80, 4000, 520, "hz" }, drive = { 1, 8, 2.2 } },
   graph = function(n)
     local env = adsr(0.004, 0.16, 0.55, 0.10)
-    return (saw(n.hz) | n.cutoff * (1 + 2.5 * env) | dc(0.72)) >> moog()
+    return (saw(n.hz) | n.cutoff * (1 + 0.55 * env) | dc(0.38)) >> moog()
         >> mul(env * n.velocity)
         >> shape("tanh", n.drive)
         >> dcblock()
@@ -49,7 +52,8 @@ kick = voice {
     local pitch = 45 + 75 * decay(ms(26))
     local body  = (pitch >> sine()) * decay(ms(110))
     local click = noise() * decay(ms(2.5)) * 0.35
-    return (body + click) >> shape("tanh", 1.4) >> dcblock() >> pan(0)
+    return (body + click) >> shape("tanh", 1.4) >> dcblock()
+        >> mul(n.velocity) >> pan(0)
   end,
 }
 
@@ -62,12 +66,12 @@ snare = voice {
     local body  = sine(185) * 0.5 + sine(330) * 0.3
     local hit   = (crack + body) * decay(ms(38))
     local tail  = hit >> reverb(24, 2.4)
-    return hit * 0.7 + tail * window(0, n.gate) * 0.8
+    return (hit * 0.7 + tail * window(0, n.gate) * 0.8) * n.velocity
   end,
 }
 
 hat = voice {
-  params = { tone = { 2000, 14000, 8200, "hz" }, decay = { 0.01, 0.4, 0.045, "s" } },
+  params = { tone = { 2000, 14000, 6800, "hz" }, decay = { 0.01, 0.4, 0.045, "s" } },
   graph = function(n)
     return (noise() | dc(n.tone) | dc(1.1)) >> highpass()
         >> mul(decay(n.decay) * n.velocity)
@@ -81,7 +85,7 @@ pad = voice {
     local osc = soft_saw(n.hz) + soft_saw(n.hz * 1.004) + pulse(n.hz * 0.5, 0.32) * 0.4
     local sway = 1 + 0.35 * sine(0.22)
     return (osc * 0.3 | n.cutoff * sway | dc(0.3)) >> lowpass()
-        >> mul(adsr(1.4, 0.8, 0.85, 2.2))
+        >> mul(adsr(1.4, 0.8, 0.85, 2.2) * n.velocity)
         >> chorus(0, 0.015, 0.005, 0.5)
   end,
 }
@@ -89,8 +93,8 @@ pad = voice {
 ---------------------------------------------------------------------- sends
 
 verb = send { graph = reverb(38, 3.6, 0.7), level = 0.30 }
-tape = send { graph = delay(beats(0.75)) >> lowpass(3200) >> feedback(0.42),
-              level = 0.26 }                       -- dotted eighth, of course
+tape = send { graph = delay(beats(0.75)) >> lowpass(2800) >> feedback(0.32),
+              level = 0.20 }                       -- dotted eighth, of course
 
 ---------------------------------------------------------------------- shape
 
@@ -107,7 +111,7 @@ outro  = 1 - line(0, 1, bars(8)) >> shift(bars(56))
 
 play(kick,  "bd ~ ~ bd ~ ~ bd ~" >> velocity(0.95 * main))
 play(snare, "~ ~ x ~"            >> velocity(0.80 * main))
-play(hat,   "x*8" >> velocity("0.5 0.25 0.35 0.25" * main)
+play(hat,   "x*4" >> velocity("0.5 0.25 0.35 0.25" * main)
                   >> pan("-0.2 0.2")
                   >> degrade(0.1))
 
@@ -126,13 +130,13 @@ play(pad, chords
 
 play(supersaw, chords
       >> arp("up")
-      >> fast(4)
+      >> fast(2)
       >> velocity(0.5 * (main - outro))
       >> supersaw.wet(build)                       -- filter fades in over 8 bars
-      >> supersaw.cutoff("2200 3400 1800 4200")
+      >> supersaw.cutoff("1400 2000 1200 2400")
       >> pan("-0.35 0.35")
-      >> sometimes(0.15, off(beats(0.25), velocity(0.4)))
-      >> to(tape, 0.6)
-      >> to(verb, 0.3))
+      >> sometimes(0.08, off(beats(0.5), velocity(0.4)))
+      >> to(tape, 0.35)
+      >> to(verb, 0.2))
 
 master(limiter(0.003, 0.15) >> mul(0.85))

@@ -1,9 +1,16 @@
 use apteronotus_live::{
-    AudioOutput, ExternalOnset, InputBinding, PersistentRuntime, PitchScheduler, ProgramScheduler,
-    RevisionSlot, RoutedRuntime, ScheduledRun, ScheduledTrack, schedule_external_routed,
+    AudioOutput, ExternalOnset, InputBinding, MasterGain, PersistentRuntime, PitchScheduler,
+    ProgramScheduler, RevisionSlot, RoutedRuntime, schedule_external_routed,
 };
 use apteronotus_lua::{Evaluator, Program, Track};
 use apteronotus_pattern::{ControlValue, Frac, Span, Value};
+// The device-free half of a Run — what the program is, and whether it reaches
+// audio at all — is shared with the offline renderer. Two copies of this would
+// mean the file a render is measured from could disagree with the sound.
+pub(crate) use apteronotus_render::{
+    needs_persistent_runtime, persistent_runtime, playable_channels, scheduled_runs,
+    scheduled_tracks,
+};
 use apteronotus_synth::{ParamId, ParamValue};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -22,9 +29,20 @@ const MIN_EXTERNAL_LATENCY_SECONDS: f64 = 0.03;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 pub enum Command {
-    Run { request: u64, source: String },
+    Run {
+        request: u64,
+        source: String,
+    },
     Stop,
-    SetControl { name: String, value: f64 },
+    SetControl {
+        name: String,
+        value: f64,
+    },
+    /// Move the master fader, in decibels. Unlike `SetControl` this is valid
+    /// with nothing playing: the level is the player's, not the program's.
+    SetVolume {
+        decibels: f32,
+    },
     Shutdown,
 }
 
@@ -154,6 +172,10 @@ impl PlayerWorker {
                         continue;
                     }
                 }
+                Command::SetVolume { decibels } => {
+                    self.player.set_volume(decibels);
+                    continue;
+                }
                 Command::Shutdown => break,
             };
             if self.event_tx.send(event).is_err() {
@@ -181,6 +203,11 @@ struct Player {
     external_levels: Vec<bool>,
     external_ordinal: u64,
     activation_generation: u64,
+    /// Where the master fader sits. The *number* is the player's, because the
+    /// fader itself belongs to a stream and a hard reset opens a new one; a
+    /// level that reset with the transport would be a fader the user has to
+    /// find again after every incompatible edit.
+    volume_decibels: f32,
 }
 
 impl Player {
@@ -197,6 +224,38 @@ impl Player {
             external_levels: Vec::new(),
             external_ordinal: 0,
             activation_generation: 0,
+            volume_decibels: MasterGain::MAX_DECIBELS,
+        }
+    }
+
+    /// Open a stream at the player's current level.
+    ///
+    /// Every open goes through here. A stream is built paused, so applying the
+    /// level before anyone can call `play` is what stops a replacement from
+    /// rendering its first block at unity — and routing both open sites through
+    /// one function is what stops the next one from forgetting to.
+    fn open_output(
+        &self,
+        candidate: &Program,
+        channels: usize,
+        persistent: Option<&mut PersistentRuntime>,
+    ) -> Result<AudioOutput, String> {
+        let output = match persistent {
+            Some(runtime) => open_persistent_output(candidate, runtime),
+            None => AudioOutput::open(channels),
+        }
+        .map_err(|error| error.to_string())?;
+        output.master().set_decibels(self.volume_decibels);
+        Ok(output)
+    }
+
+    /// Move the master fader. An atomic store into a node the running graph
+    /// already holds; nothing is re-evaluated, re-lowered or restarted, and it
+    /// is equally valid with the device closed.
+    fn set_volume(&mut self, decibels: f32) {
+        self.volume_decibels = decibels.clamp(MasterGain::MIN_DECIBELS, MasterGain::MAX_DECIBELS);
+        if let Some(output) = &self.output {
+            output.master().set_decibels(self.volume_decibels);
         }
     }
 
@@ -287,13 +346,7 @@ impl Player {
         };
 
         if self.output.is_none() {
-            self.output = Some(
-                match &mut persistent {
-                    Some(runtime) => open_persistent_output(&candidate, runtime),
-                    None => AudioOutput::open(channels),
-                }
-                .map_err(|error| error.to_string())?,
-            );
+            self.output = Some(self.open_output(&candidate, channels, persistent.as_mut())?);
             self.output_channels = Some(channels);
         }
 
@@ -386,11 +439,7 @@ impl Player {
         // Construct the complete replacement stream while the old stream is
         // still playing. Only a fully lowered, filled, and opened candidate is
         // allowed to interrupt the active program.
-        let mut output = match &mut persistent {
-            Some(runtime) => open_persistent_output(&candidate, runtime),
-            None => AudioOutput::open(channels),
-        }
-        .map_err(|error| error.to_string())?;
+        let mut output = self.open_output(&candidate, channels, persistent.as_mut())?;
         let mut scheduler = ProgramScheduler::default();
         let tracks = scheduled_tracks(&candidate)?;
         let runs = scheduled_runs(&candidate)?;
@@ -681,53 +730,6 @@ impl Player {
     }
 }
 
-pub(crate) fn playable_channels(program: &Program) -> Result<usize, String> {
-    let persistent = needs_persistent_runtime(program);
-    if program.tracks.is_empty() && program.runs.is_empty() {
-        return Err("the program has no playable tracks or persistent runs".into());
-    }
-
-    let mut channels = persistent.then(|| program.buses.main_channels());
-    for (index, track) in program.tracks.iter().enumerate() {
-        let graph = program
-            .voice(track.voice)
-            .ok_or_else(|| format!("track {index} refers to a missing voice"))?;
-        if graph.inputs != 0 {
-            return Err(format!(
-                "track {index} has an input graph; live input racks are not connected in the first GUI player yet"
-            ));
-        }
-        if graph.channels() == 0 {
-            return Err(format!("track {index} has no audio outputs"));
-        }
-        match channels {
-            // Routed lowering deliberately broadcasts a mono voice across the
-            // persistent main layout. Keep the player preflight aligned with
-            // that production rule; main-only scheduling still requires every
-            // track to have the same width because its Sequencer is created
-            // from the first voice template.
-            Some(expected)
-                if graph.channels() != expected && !(persistent && graph.channels() == 1) =>
-            {
-                return Err(format!(
-                    "track {index} outputs {} channels, but earlier tracks output {expected}",
-                    graph.channels()
-                ));
-            }
-            None => channels = Some(graph.channels()),
-            Some(_) => {}
-        }
-    }
-    Ok(channels.expect("a playable program has a track or persistent main layout"))
-}
-
-pub(crate) fn needs_persistent_runtime(program: &Program) -> bool {
-    !program.runs.is_empty()
-        || !program.controls.specs().is_empty()
-        || program.buses.total_channels() != program.buses.main_channels()
-        || program.voices.iter().any(|voice| !voice.sends.is_empty())
-}
-
 fn needs_hard_reset(
     output_open: bool,
     active_persistent: bool,
@@ -742,27 +744,6 @@ fn needs_hard_reset(
             || active_channels != Some(candidate_channels)
             || active_persistent != candidate_persistent
             || (active_persistent && candidate_persistent && !reuse_persistent))
-}
-
-pub(crate) fn persistent_runtime(program: &Program) -> Result<PersistentRuntime, String> {
-    let patches = program
-        .runs
-        .iter()
-        .filter(|run| run.span.is_none())
-        .enumerate()
-        .map(|(index, run)| {
-            program
-                .patch(run.patch)
-                .ok_or_else(|| format!("run {index} refers to a missing patch"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    PersistentRuntime::with_audio_inputs(
-        &program.buses,
-        &program.controls,
-        &program.audio_inputs,
-        patches,
-    )
-    .map_err(|error| error.to_string())
 }
 
 fn open_persistent_output(
@@ -781,22 +762,6 @@ fn open_persistent_output(
         runtime.external_channels(),
         requested_channels,
     )
-}
-
-fn scheduled_runs(program: &Program) -> Result<Vec<ScheduledRun<'_>>, String> {
-    program
-        .runs
-        .iter()
-        .enumerate()
-        .filter_map(|(index, run)| {
-            run.span.map(|span| {
-                program
-                    .patch(run.patch)
-                    .map(|patch| ScheduledRun::with_routing(patch, span, &run.routing))
-                    .ok_or_else(|| format!("run {index} refers to a missing patch"))
-            })
-        })
-        .collect()
 }
 
 fn control_views(program: &Program, persistent: Option<&PersistentRuntime>) -> Vec<ControlView> {
@@ -864,25 +829,6 @@ fn external_event_passes(track: &Track, event_seed: u64) -> bool {
     })
 }
 
-fn scheduled_tracks(program: &Program) -> Result<Vec<ScheduledTrack<'_>>, String> {
-    program
-        .tracks
-        .iter()
-        .enumerate()
-        .map(|(index, track)| {
-            let template = program
-                .voice(track.voice)
-                .ok_or_else(|| format!("track {index} refers to a missing voice"))?;
-            Ok(ScheduledTrack::with_routing_and_bindings(
-                &track.pattern,
-                template,
-                &track.routing,
-                &track.onset_bindings,
-            ))
-        })
-        .collect()
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
     let mut player = Player::new();
@@ -937,6 +883,7 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
                     break;
                 }
             }
+            Ok(Command::SetVolume { decibels }) => player.set_volume(decibels),
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -981,11 +928,35 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        control_views, external_event_bindings, external_event_passes, external_event_seed,
-        needs_hard_reset, persistent_runtime, playable_channels,
+        MasterGain, Player, control_views, external_event_bindings, external_event_passes,
+        external_event_seed, needs_hard_reset, persistent_runtime, playable_channels,
     };
     use apteronotus_lua::evaluate;
     use apteronotus_pattern::Frac;
+
+    /// The fader belongs to the player, not to a stream and not to a program.
+    /// Setting it with the device closed has to be legal, because that is the
+    /// state the app starts in and the state `stop` returns to.
+    #[test]
+    fn the_master_level_is_settable_before_and_after_any_audio_exists() {
+        let mut player = Player::new();
+        assert_eq!(player.volume_decibels, MasterGain::MAX_DECIBELS);
+        assert!(player.output.is_none());
+
+        player.set_volume(-18.0);
+        assert_eq!(player.volume_decibels, -18.0);
+
+        // Stop clears the transport, the arena and the stream. The level is
+        // none of those: a fader that reset with the transport is one the user
+        // has to find again after every incompatible edit.
+        player.stop().expect("stopping without a stream succeeds");
+        assert_eq!(player.volume_decibels, -18.0);
+
+        player.set_volume(40.0);
+        assert_eq!(player.volume_decibels, MasterGain::MAX_DECIBELS);
+        player.set_volume(-400.0);
+        assert_eq!(player.volume_decibels, MasterGain::MIN_DECIBELS);
+    }
 
     #[test]
     fn player_accepts_the_starter_program_shape() {

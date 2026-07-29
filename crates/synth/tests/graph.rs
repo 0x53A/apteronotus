@@ -57,6 +57,26 @@ fn one_template_instantiates_many_voices() {
 }
 
 #[test]
+fn per_voice_noise_derives_from_event_provenance() {
+    let mut graph = GraphBuilder::new();
+    let noise = graph.noise();
+    let voice = graph.out_mono(noise).unwrap();
+
+    let first = play(&voice, &Note::new(440.0).seed(0x1234), 0.01);
+    let repeated = play(&voice, &Note::new(440.0).seed(0x1234), 0.01);
+    let other = play(&voice, &Note::new(440.0).seed(0x5678), 0.01);
+
+    assert_eq!(
+        first, repeated,
+        "one event provenance must reproduce sample for sample"
+    );
+    assert_ne!(
+        first, other,
+        "different events must not restart the same noise waveform"
+    );
+}
+
+#[test]
 fn arithmetic_on_a_symbolic_input_stages_as_nodes() {
     // `n.hz * 2` cannot be computed at build time — there is no number yet —
     // so it must have become a graph node.

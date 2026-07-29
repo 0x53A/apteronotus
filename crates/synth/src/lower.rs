@@ -391,8 +391,8 @@ fn instantiate_to_lanes(
     // history, but it does not make an arbitrary Net cycle well-defined;
     // feedback needs an explicit graph representation before it is legal.)
     let mut nodes: Vec<FundspNode> = Vec::with_capacity(template.nodes.len());
-    for node in &template.nodes {
-        nodes.push(net.push(unit_for(&node.op, note, template, controls)?));
+    for (node_index, node) in template.nodes.iter().enumerate() {
+        nodes.push(net.push(unit_for(&node.op, node_index, note, template, controls)?));
     }
 
     // Lifted scalars, keyed by bit pattern. A voice typically reuses `0`, `1`
@@ -706,6 +706,7 @@ fn constant_node(x: f64, net: &mut Net, constants: &mut HashMap<u64, FundspNode>
 
 fn unit_for(
     op: &Op,
+    node_index: usize,
     note: &Note,
     template: &GraphTemplate,
     controls: Option<&ControlStore>,
@@ -715,8 +716,16 @@ fn unit_for(
         Op::Cosine => Box::new(sine().phase(0.25)),
         Op::Saw => Box::new(saw()),
         Op::Pulse => Box::new(pulse()),
-        Op::Noise => Box::new(noise()),
-        Op::Pink => Box::new(pink()),
+        Op::Noise => {
+            let mut unit = noise();
+            unit.set(Setting::seed(node_seed(note.seed, node_index, 0)));
+            Box::new(unit)
+        }
+        Op::Pink => {
+            let mut unit = pink();
+            unit.set(Setting::seed(node_seed(note.seed, node_index, 1)).left());
+            Box::new(unit)
+        }
         Op::Impulse => Box::new(impulse::<U1>()),
         Op::InitRandom { stream, min, max } => {
             let unit = seed_unit(note.seed ^ stream);
@@ -1097,11 +1106,24 @@ fn breakpoint_value(time: f64, times: &[f64], values: &[f64]) -> f64 {
         .expect("validated breakpoint curve has values")
 }
 
-fn seed_unit(mut seed: u64) -> f32 {
+fn node_seed(event_seed: u64, node_index: usize, stream: u64) -> u64 {
+    seed_hash(
+        event_seed
+            ^ (node_index as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93)
+            ^ stream.wrapping_mul(0xA076_1D64_78BD_642F),
+    )
+}
+
+fn seed_hash(mut seed: u64) -> u64 {
     seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     seed = (seed ^ (seed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     seed = (seed ^ (seed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     seed ^= seed >> 31;
+    seed
+}
+
+fn seed_unit(seed: u64) -> f32 {
+    let seed = seed_hash(seed);
     ((seed >> 40) as f32) / ((1u32 << 24) as f32)
 }
 

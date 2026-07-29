@@ -1,0 +1,132 @@
+-- supersaws.eod — port of "just a bunch of supersaws" by lofi.scifi.
+--
+-- Original: Strudel 1.1.
+--
+-- Stresses: a stereo topology-generating stdlib voice, a filter envelope
+-- carried per event, weighted event structure, polymetric control sampling,
+-- channel-wise distortion, and probabilistic per-event ratchets.
+--
+-- Strudel's default clock is 0.5 cycles/second. With Apteronotus's default
+-- four quarter-note beats per cycle, that is 120 BPM.
+
+tempo(120)
+
+--------------------------------------------------------------------- sends
+
+-- Strudel's `room(.3)` is a post-effect send into one orbit-wide reverb. A
+-- persistent Apteronotus send is the corresponding lifetime: the reverb keeps
+-- its history across every noise hit.
+strudel_room = send {
+  graph = reverb(24, secs(2), 0.65),
+  level = 1,
+}
+
+---------------------------------------------------------------------- rack
+
+-- Strudel 1.1's supersaw defaults to five voices, 0.18 semitones of total
+-- frequency spread and 0.6 stereo spread. `detune` below is the equivalent
+-- half-spread expressed as a frequency ratio.
+local function stereo_supersaw(n)
+  local offsets = { -1, -0.5, 0, 0.5, 1 }
+  local pans    = { -0.6, 0.6, -0.3, 0.3, 0 }
+  local bank = {}
+
+  for i = 1, #offsets do
+    bank[i] = (mul(1 + offsets[i] * n.detune) >> saw() >> pan(pans[i]))
+  end
+
+  return n.hz >> mix(bank)
+end
+
+supersaws = voice {
+  params = {
+    detune  = { 0, 0.03, 0.0052, "ratio" },
+    cutoff  = { 20, 20000, 20000, "hz" },
+    lpenv   = { 0, 80, 0, "octaves" },
+    filtered = { 0, 1, 0 },
+    postgain = { 0, 1, 0.1 },
+  },
+  graph = function(n)
+    -- These are the amplitude-envelope defaults of Strudel 1.1's supersaw.
+    -- 0.24 is its 0.3 oscillator gain times the default 0.8 event gain.
+    local amp = adsr(ms(1), ms(50), 0.6, ms(10))
+        * n.velocity * (0.24 / math.sqrt(5))
+    local source = stereo_supersaw(n) >> (mul(amp) | mul(amp))
+
+    -- Strudel's filter envelope is exponential in octaves and defaults to
+    -- 5 ms attack, 140 ms decay, zero sustain and 100 ms release. In
+    -- particular, lpenv=4 means cutoff * 16, not cutoff * 4.
+    local filter_env = adsr(ms(5), ms(140), 0, ms(100))
+    local cutoff = clamp(
+      n.cutoff * (2 ^ (n.lpenv * filter_env)),
+      20,
+      20000
+    )
+
+    -- Topology stays fixed. "No filter" is the dry side of a mix rather than
+    -- a different graph built for those events.
+    local function filter_channel()
+      return mul(1 - n.filtered) + lowpass(cutoff, 1) * n.filtered
+    end
+    local tone = source >> (filter_channel() | filter_channel())
+
+    -- Strudel 1.1 distort(3) is a unity-normalised rational soft clip. The
+    -- named softsign is the closest current Apteronotus transfer curve; the
+    -- small coefficient difference is recorded as a remaining fidelity gap.
+    -- The second tuple member is a linear postgain.
+    local function distort_channel()
+      return shape("soft", math.exp(3)) >> mul(n.postgain)
+    end
+    return tone >> (distort_channel() | distort_channel())
+  end,
+}
+
+noise_hat = voice {
+  params = {
+    decay = { 0.01, 0.5, 0.08, "s" },
+  },
+  graph = function(n)
+    local amp = decay(n.decay) * n.velocity * 0.1
+    local filter_env = adsr(ms(5), ms(140), 0, ms(100))
+    local cutoff = clamp(1000 * (2 ^ (5 * filter_env)), 20, 20000)
+    local hit = (noise() * amp | cutoff | dc(1)) >> lowpass()
+
+    return hit
+        >> shape("soft", math.exp(4))
+        >> mul(0.25)
+        >> pan(n.pan)
+        >> to(strudel_room, 0.3)
+  end,
+}
+
+---------------------------------------------------------------------- score
+
+-- The source wrote these as d4 transposed by -18, -6 and +6 semitones.
+-- Spelling the results makes the query-time score independent of a musical
+-- transpose node: they are G-sharp in three octaves.
+play(supersaws, "g#2!8")
+
+-- Strudel's `set.out` takes its onset structure from the control pattern. The
+-- weighted note pattern below is that structure written directly, so ordinary
+-- Apteronotus onset sampling attaches the same cutoff and lpenv values.
+local cutoff_shape = "200@3 200@2 300!4 1000@2 200"
+play(supersaws, "g#2@3 g#2@2 g#2!4 g#2@2 g#2"
+      >> supersaws.filtered(1)
+      >> supersaws.cutoff(cutoff_shape)
+      >> supersaws.lpenv("4 8 80"))
+
+play(supersaws, "g#3!4")
+play(supersaws, "g#4!16")
+
+-- `{0.08!2 0.14}%16` is the polymeter
+-- `<0.08 0.08 0.14>*16`. Written with exact mini-notation speed factors, it
+-- still advances its three-step phase across cycle boundaries while providing
+-- sixteen noise hits per cycle.
+local decay_shape = "[0.08 0.08 0.14]*16/3"
+play(noise_hat, "x!16"
+      >> noise_hat.decay(decay_shape)
+      >> sometimes(0.1, ply("2 | 6")))
+
+-- The two disabled source layers, retained for live editing:
+-- play(supersaws, "g#1!8")
+-- play(supersaws, "g#1!8" >> supersaws.postgain(0.2))

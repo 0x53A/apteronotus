@@ -27,7 +27,7 @@ glass = voice {
   params = { bright = { 0.1, 0.99, 0.86 } },
   graph = function(n)
     return impulse() >> pluck(n.hz, 0.5, n.bright)
-        >> mul(n.vel)
+        >> mul(n.velocity)
         >> (dc(n.hz * 2.7) | dc(140)) >> peak()      -- one formant, gently
         >> pan(rand(-0.4, 0.4))
         >> to(deep, 0.8)

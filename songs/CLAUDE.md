@@ -12,17 +12,46 @@ them is not needed yet.
 | `poles.eod` | δ at audio rate, percussion as pole placement, the stdlib-vs-primitive split, voices whose entire parameter set is two numbers |
 | `neon.eod` | finite through-composed time, tempo changes and off-grid entrances, extended voicings, two-layer raw subtractive synthesis, per-voice drift, note-relative gestures, a persistent mono lead, a large modulated reverb |
 | `jamming.eod` | live audio as a graph source, the audio → control crossing, `patch` as a persistent rack, the pattern algebra driving effects rather than notes, and a piece that is not reproducible until its input is recorded |
+| `supersaws.eod` | an external Strudel port: stereo topology generation, weighted and polymetric event structure, per-event filter envelopes, channel-wise distortion, and probabilistic ratchets |
 
-The first four are cyclic and fix every parameter at onset. The last two exist
-because that turned out to be a property of the author rather than of music —
-see session 3 in `../_Tasks/000-architecture/LOG.md`.
+The first four are cyclic and fix every parameter at onset. `neon.eod` and
+`jamming.eod` exist because that turned out to be a property of the author
+rather than of music — see session 3 in
+`../_Tasks/000-architecture/LOG.md`. `supersaws.eod` is the first port selected
+by an external author, and exists to challenge the vocabulary with habits that
+the preceding six could still share.
 
-## Vocabulary the six songs use
+## Vocabulary the seven songs use
 
 This is the target vocabulary inventory, not a claim that every word is already
 bound. The current executable Lua subset is tracked in
 `../crates/lua/README.md`; engine status and unresolved shapes are tracked in
 `../_Tasks/000-architecture/README.md`.
+
+### Executable checkpoint
+
+The current Lua/runtime path can play multiple polyphonic tracks with
+mini-notation; `fast`, `slow`, `shift`/`late`, `early`, `rev`, `every`, `off`,
+`sometimes`, `degrade`, `segment`, and `range`; scalar or note-clock curve
+event controls; staged graph arithmetic and filters; and persistent patches,
+controls, buses, and graph sends. Those features reach both measured offline
+audio and the native player.
+
+No complete song in this directory runs yet. The dominant remaining seams are
+tempo/timeline and transport-signal bindings; key/music theory and `arp`;
+score-level sends and `duck`; typed non-pitch trigger events; symbolic graph
+curve arguments; feedback/reverb and the rest of the DSP/stdlib vocabulary;
+and live external inputs. The native player currently uses 120 BPM, and a
+persistent/layout edit performs an explicit cycle-zero hard reset unless its
+persistent data is compatible with the live arena. Compatible edits retain that
+arena and activate at the ordinary frontier; changed persistent topology still
+needs replacement crossfade.
+
+`supersaws.eod` adds two independent pattern gaps at its final hat line:
+`ply(...)` event repetition and mini-notation `|` random-choice alternation.
+Implementing one does not make the other implicit. Its three weighted and
+polymetric notation strings are already parse-guarded in
+`crates/pattern/tests/mini.rs`.
 
 **Top level** — `tempo`, `play`, `voice`, `send`, `master`, and from session 3
 `patch` (persistent lifetime), `run` (activate an autonomous rack), `timeline`
@@ -44,10 +73,12 @@ and absolute are different things and guessing is the classic sequencer bug.
 parameter**. `cutoff(...)` exists because `supersaw` declares `cutoff`; that is
 the whole payoff of `params` being data.
 
-**Signals and curves are one type.** `sine(0.22)` is an LFO inside a graph and
-automation inside a score, with no conversion. Constructors: `sine` `cosine`
-`perlin` `rand` `scale`, and the declarative basis `step` `line` `decay`
-`window` `curve`. They take arithmetic (`0.95 * main`, `1 - outro`) and `shift`.
+**Signals and curves share arithmetic, not placement semantics.** A transport
+signal merged through a setter is sampled at the note onset. A
+`ControlValue::Curve` is carried whole into the voice and runs on its explicit
+`NoteSeconds` or `NotePhase` clock. A persistent bus control remains continuous.
+Pattern merge and `at_onset` are explicit signal-to-init boundaries at
+different layers.
 
 **Graph algebra** — `>>` `|` `&` `~` `+` `*` `-`, plus `mul` `mix` `zero` `dc`.
 
@@ -73,14 +104,14 @@ contract, and recording one turns it into an ordinary finite `timeline`.
 
 Ordered by how much it costs to be wrong.
 
-**1. Events must carry a parameter map.** `>> gain(0.8) >> pan("-0.2 0.2")`
-needs a control map per event; `crates/pattern` currently carries a single
-`Value`. This is the next thing to build: `Value::Map`, a `Named` node lifting
-bare values into a one-key map, and a `Merge` node taking structure from the
-left. Everything else in the score notation is blocked on it.
+**1. Events carry a named parameter map. Implemented.**
+`ControlValue` has scalar and curve leaves; `ControlMap` is sorted and unique,
+with `"value"` reserved for the primary note. `Named` creates a map-producing
+control pattern and `Merge` preserves left timing, spans and provenance.
+Nested maps and ordered `List` values remain deliberately absent.
 
-**2. The merge sampling rule is a deliberate deviation from Tidal. Settled,
-not yet implemented because structured event controls do not exist.** Tidal
+**2. The merge sampling rule is a deliberate deviation from Tidal.
+Implemented.** Tidal
 emits one output event per right-hand event, which multiplies when the right
 side is faster. Rule: sample the right side with a **zero-width query at
 the left event's onset** and take the first value. One voice per note, no
@@ -108,7 +139,8 @@ Inside a graph (`glass`, `cowbell`) it is a fixed patch; in a score
 graph send taps internal graph channels and its level may itself be a signal;
 an event send copies the completed voice channels with a scalar bound at the
 onset. Both resolve a lexical bus binding to an opaque `BusId`, and routed
-lowering sums them into the same program-wide stem layout.
+lowering sums them into the same program-wide stem layout. Graph sends are
+bound in Lua; the score-level event-send constructor remains to be connected.
 
 **6. `arp("up")` needs chords to survive as chords. Initial identity slice
 implemented.** `[a3,c4,e4]` now becomes a `Group`, not a plain `Stack`, and its
@@ -145,10 +177,12 @@ sources, which have no inputs either, so its arity always matched.)
 define it — scale-degree notation resolving against it — or delete the line.
 Leaving it as decoration is the worst option.
 
-**11. An event must be able to carry a signal, not just a number.** `n.pressure`
-and `n.bend` in `neon.eod` are control-rate for the note's whole life, and
-`ControlMap` currently holds scalars. This is the same blocker as #1 and lands
-in the same decision — `Value` needs a `Curve` case with its clock attached.
+**11. An event must be able to carry a note-clock curve, not just a number.
+Implemented.** `n.pressure` and `n.bend` in `neon.eod` are control-rate for the
+note's whole life. `ControlValue::Curve` now carries the pattern-owned basis sum
+with an explicit `NoteSeconds` or `NotePhase` clock, and synth instantiation
+lowers it without onset-sampling. Transport-clock signals remain a distinct
+placement: a setter samples them at onset once that Lua binding exists.
 
 **11a. But that is not enough for polyphonic expression, and no merge ever will
 be.** The merge rule samples at the *left event's onset*, and a struck chord's
@@ -191,23 +225,26 @@ thing to write. The rule is that the *binding* carries the identity: bound once
 and referenced twice is one node, written twice is two. No earlier song shared a
 stateful signal, which is why this took five songs to surface.
 
-**15. `at_onset` cannot be implicit.** The same tracked pitch feeds the rack
+**15. `at_onset` cannot be implicit at the graph/live-signal boundary.** The same tracked pitch feeds the rack
 live and the bells frozen-at-strike, eight lines apart in one file. A struck
 resonator that kept tracking would slide for its whole ring. It is a typed rate
 boundary, `Signal<T> → Init<T>`, and the only legal collapse from signal to
-init — enforced by the rate checker, not by documentation.
+init — enforced by the rate checker, not by documentation. Pattern `Merge` is
+the separate pattern-layer signal-to-init boundary: a setter explicitly asks
+for its RHS to be sampled at each left onset.
 
 **16. Anything a voice seeds from must be derived, never counted. Implemented
 through the first graph initializer.**
 `neon.eod`'s `init_rand(n.id, …)` reproduces analogue component tolerance as
 deterministic per-voice drift. A runtime counter for `n.id` would change with
-query chunking, with offline versus live scheduling, and — worst — with the
-order a `Stack`'s members come back in, which #6 says is unspecified. So the
-implicit contract's voice identity splits: a derived `event_seed` for anything
-reproducible, a `voice_handle` counter for addressing a sounding voice and
-nothing else. `waves.eod` is specified as giving the same nine minutes every
-time it is opened; this is what that costs. Pattern provenance now derives the
-event seed, the scheduler binds it into `Note`, and
+query chunking, offline versus live scheduling, and structural edits that
+insert an unrelated earlier event. Stable structural query order is a sampling
+contract, not semantic event identity. So the implicit contract's voice
+identity splits: a derived `event_seed` for anything reproducible, a
+`voice_handle` counter for addressing a sounding voice and nothing else.
+`waves.eod` is specified as giving the same nine minutes every time it is
+opened; this is what that costs. Pattern provenance now derives the event seed,
+the scheduler binds it into `Note`, and
 `init_random(stream, min, max)` deterministically consumes it.
 
 ## Rules these songs are written to

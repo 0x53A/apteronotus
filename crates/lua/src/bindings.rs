@@ -1,8 +1,10 @@
 use crate::{Limits, Program, Track, VoiceId};
-use apteronotus_pattern::{Pattern, mini};
+use apteronotus_pattern::{
+    Basis, ControlValue, Curve, CurveClock, Frac, Pattern, Value as PatternValue, mini,
+};
 use apteronotus_synth::{
-    Adsr, Basis, BusId, ControlId, ControlSpec, Curve, DelayRange, GraphBuilder, ParamSpec,
-    PatchTemplate, ShapeKind, Source, n, stdlib,
+    Adsr, BusId, ControlId, ControlSpec, DelayRange, GraphBuilder, Implicit, Note, ParamId,
+    ParamSpec, ParamValue, PatchTemplate, ShapeKind, Source, n, stdlib,
 };
 use piccolo::{
     Callback, CallbackReturn, Context, Error, IntoValue, MetaMethod, Table, UserData, Value,
@@ -67,9 +69,6 @@ function table.sort(t, before)
     t[j] = value
   end
 end
-
-function secs(value) return value end
-function ms(value) return value / 1000 end
 
 local function checked_table(value, name)
   if type(value) ~= "table" then
@@ -202,7 +201,91 @@ enum FilterKind {
 }
 
 #[derive(Clone, Debug)]
-struct LuaPattern(Pattern);
+struct LuaPattern {
+    pattern: Pattern,
+    controls: Vec<PatternControl>,
+}
+
+/// An evaluation-only structural pattern transformation.
+///
+/// This is data, not a Lua callback: applying it immediately builds ordinary
+/// pattern AST nodes, so no host-language closure reaches pattern queries.
+#[derive(Clone, Debug)]
+enum PatternTransform {
+    Fast(Frac),
+    Slow(Frac),
+    Shift(Frac),
+    Rev,
+    Degrade {
+        amount: f64,
+        seed: u64,
+    },
+    Segment(i64),
+    Range {
+        min: f64,
+        max: f64,
+    },
+    Every {
+        cycles: i64,
+        transform: Box<PatternTransform>,
+    },
+    Off {
+        by: Frac,
+        transform: Box<PatternTransform>,
+    },
+    Sometimes {
+        amount: f64,
+        seed: u64,
+        transform: Box<PatternTransform>,
+    },
+}
+
+impl PatternTransform {
+    fn apply(&self, pattern: Pattern) -> Pattern {
+        match self {
+            Self::Fast(factor) => pattern.fast(*factor),
+            Self::Slow(factor) => pattern.slow(*factor),
+            Self::Shift(by) => pattern.late(*by),
+            Self::Rev => pattern.rev(),
+            Self::Degrade { amount, seed } => pattern.degrade_by(*amount, *seed),
+            Self::Segment(steps) => pattern.segment(*steps),
+            Self::Range { min, max } => pattern.range(*min, *max),
+            Self::Every { cycles, transform } => {
+                pattern.every(*cycles, |branch| transform.apply(branch))
+            }
+            Self::Off { by, transform } => pattern.off(*by, |branch| transform.apply(branch)),
+            Self::Sometimes {
+                amount,
+                seed,
+                transform,
+            } => pattern.sometimes_by(*amount, *seed, |branch| transform.apply(branch)),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LuaPatternTransform(PatternTransform);
+
+#[derive(Clone, Debug)]
+struct PatternControl {
+    name: String,
+    value: ControlValue,
+}
+
+#[derive(Clone, Debug)]
+struct LuaCurve(Curve);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimeUnit {
+    Seconds,
+    Cycles,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LuaDuration {
+    value: f64,
+    unit: TimeUnit,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct LuaVoice(usize);
@@ -262,6 +345,9 @@ impl BuildState {
         ctx: Context<'gc>,
         pattern: &Pattern,
     ) -> Result<(), Error<'gc>> {
+        pattern
+            .validate_value_limits(self.limits.pattern_values)
+            .map_err(|error| binding_error(ctx, error.to_string()))?;
         self.pattern_nodes = self.pattern_nodes.saturating_add(pattern_nodes(pattern));
         if self.pattern_nodes > self.limits.pattern_nodes {
             return Err(binding_error(
@@ -290,10 +376,29 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "control", state.clone(), control)?;
     set_callback(ctx, "bus", state.clone(), bus)?;
     set_callback(ctx, "run", state.clone(), run)?;
+    set_callback(ctx, "secs", state.clone(), seconds)?;
+    set_callback(ctx, "ms", state.clone(), milliseconds)?;
+    set_callback(ctx, "bars", state.clone(), bars)?;
     set_callback(ctx, "pattern", state.clone(), pattern)?;
     set_callback(ctx, "__pattern_at", state.clone(), pattern_at)?;
     set_callback(ctx, "play", state.clone(), play)?;
     set_callback(ctx, "__play_at", state.clone(), play_at)?;
+    set_callback(ctx, "fast", state.clone(), fast_pattern)?;
+    set_callback(ctx, "slow", state.clone(), slow_pattern)?;
+    set_callback(ctx, "shift", state.clone(), shift_pattern)?;
+    set_callback(ctx, "late", state.clone(), shift_pattern)?;
+    set_callback(ctx, "early", state.clone(), early_pattern)?;
+    set_callback(ctx, "segment", state.clone(), segment_pattern)?;
+    set_callback(ctx, "range", state.clone(), range_pattern)?;
+    set_callback(ctx, "degrade", state.clone(), degrade_pattern)?;
+    set_callback(ctx, "__degrade_at", state.clone(), degrade_pattern_at)?;
+    set_callback(ctx, "every", state.clone(), every_pattern)?;
+    set_callback(ctx, "off", state.clone(), off_pattern)?;
+    set_callback(ctx, "sometimes", state.clone(), sometimes_pattern)?;
+    set_callback(ctx, "__sometimes_at", state.clone(), sometimes_pattern_at)?;
+    set_callback(ctx, "curve", state.clone(), event_curve)?;
+    set_callback(ctx, "note", state.clone(), note_pattern)?;
+    set_callback(ctx, "velocity", state.clone(), velocity)?;
 
     set_callback(ctx, "sine", state.clone(), sine)?;
     set_callback(ctx, "dc", state.clone(), dc)?;
@@ -396,8 +501,26 @@ pub(crate) fn install<'gc>(
         state.clone(),
         processor_branch,
     )?;
-    set_operator(ctx, processor_meta, MetaMethod::Shr, state, pipe)?;
+    set_operator(ctx, processor_meta, MetaMethod::Shr, state.clone(), pipe)?;
     ctx.set_global("__apteronotus_processor_meta", processor_meta);
+
+    let pattern_meta = Table::new(&ctx);
+    set_operator(
+        ctx,
+        pattern_meta,
+        MetaMethod::Shr,
+        state.clone(),
+        merge_patterns,
+    )?;
+    ctx.set_global("__apteronotus_pattern_meta", pattern_meta);
+    ctx.set_global(
+        "rev",
+        UserData::new_static(&ctx, LuaPatternTransform(PatternTransform::Rev)),
+    );
+
+    let voice_meta = Table::new(&ctx);
+    set_operator(ctx, voice_meta, MetaMethod::Index, state, voice_index)?;
+    ctx.set_global("__apteronotus_voice_meta", voice_meta);
 
     Ok(())
 }
@@ -498,10 +621,13 @@ fn begin_voice<'gc>(
         // Lua deliberately does not promise map iteration order. Parameter
         // indices do need to be reproducible, so derive them from names.
         specs.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, (min, max, default, unit)) in specs {
-            let mut spec = ParamSpec::new(&name, min, max, default);
-            if let Some(unit) = unit {
+        for (name, parsed) in specs {
+            let mut spec = ParamSpec::new(&name, parsed.min, parsed.max, parsed.default);
+            if let Some(unit) = parsed.unit {
                 spec = spec.with_unit(&unit);
+            }
+            if let Some(seconds) = parsed.max_curve_seconds {
+                spec = spec.with_curve_horizon(seconds);
             }
             let source = graph.param(spec);
             note.set(ctx, name, lua_source(ctx, generation, [source])?)?;
@@ -555,7 +681,7 @@ fn finish_voice<'gc>(
         .map_err(|error| binding_error(ctx, error.to_string()))?;
     let id = state.program.voices.len();
     state.program.voices.push(template);
-    stack.replace(ctx, UserData::new_static(&ctx, LuaVoice(id)));
+    stack.replace(ctx, lua_voice(ctx, id)?);
     Ok(CallbackReturn::Return)
 }
 
@@ -618,7 +744,7 @@ fn begin_patch<'gc>(
             specs.push((name, read_param_spec(ctx, value)?));
         }
         specs.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, (min, max, default, unit)) in specs {
+        for (name, parsed) in specs {
             if state.program.controls.specs().len() >= state.limits.controls {
                 return Err(binding_error(
                     ctx,
@@ -630,8 +756,8 @@ fn begin_patch<'gc>(
             // provisional display name only; arena identity and cross-edit
             // reconciliation must never derive from it.
             let qualified = format!("patch{}.{}", state.program.patches.len() + 1, name);
-            let mut spec = ControlSpec::new(&qualified, min, max, default);
-            if let Some(unit) = unit {
+            let mut spec = ControlSpec::new(&qualified, parsed.min, parsed.max, parsed.default);
+            if let Some(unit) = parsed.unit {
                 spec = spec.with_unit(&unit);
             }
             let id = state
@@ -806,6 +932,63 @@ fn run<'gc>(
     Ok(CallbackReturn::Return)
 }
 
+fn seconds<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let value = read_number(ctx, stack.get(0), "seconds")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaDuration {
+                value,
+                unit: TimeUnit::Seconds,
+            },
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn milliseconds<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let value = read_number(ctx, stack.get(0), "milliseconds")? / 1_000.0;
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaDuration {
+                value,
+                unit: TimeUnit::Seconds,
+            },
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn bars<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let value = read_number(ctx, stack.get(0), "bars")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaDuration {
+                value,
+                unit: TimeUnit::Cycles,
+            },
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
 fn pattern<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
@@ -834,7 +1017,16 @@ fn parse_pattern<'gc>(
     let pattern =
         mini::parse_at(&source, binding).map_err(|error| binding_error(ctx, error.to_string()))?;
     state.borrow_mut().spend_pattern(ctx, &pattern)?;
-    stack.replace(ctx, UserData::new_static(&ctx, LuaPattern(pattern)));
+    stack.replace(
+        ctx,
+        lua_pattern(
+            ctx,
+            LuaPattern {
+                pattern,
+                controls: Vec::new(),
+            },
+        )?,
+    );
     Ok(CallbackReturn::Return)
 }
 
@@ -880,7 +1072,7 @@ fn play_bound<'gc>(
         Value::UserData(data) => data
             .downcast_static::<LuaPattern>()
             .map_err(|_| binding_error(ctx, "play pattern must come from pattern()"))?
-            .0
+            .pattern
             .clone(),
         _ => return Err(binding_error(ctx, "play expects a pattern or string")),
     };
@@ -898,6 +1090,14 @@ fn play_bound<'gc>(
             format!("track limit of {} exceeded", state.limits.tracks),
         ));
     }
+    if let Value::UserData(data) = stack.get(argument_offset + 1)
+        && let Ok(lua_pattern) = data.downcast_static::<LuaPattern>()
+    {
+        let template = &state.program.voices[voice];
+        for control in &lua_pattern.controls {
+            validate_voice_control(ctx, template, &control.name, &control.value)?;
+        }
+    }
     state.spend_pattern(ctx, &pattern)?;
     state.program.tracks.push(Track {
         voice: VoiceId(voice),
@@ -905,6 +1105,592 @@ fn play_bound<'gc>(
     });
     stack.clear();
     Ok(CallbackReturn::Return)
+}
+
+fn merge_patterns<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let left = read_lua_pattern(ctx, stack.get(0))?;
+    let right = stack.get(1);
+    let (pattern, controls) = if let Value::UserData(data) = right
+        && let Ok(transform) = data.downcast_static::<LuaPatternTransform>()
+    {
+        (
+            transform.0.apply(left.pattern.clone()),
+            left.controls.clone(),
+        )
+    } else {
+        let right = read_lua_pattern(ctx, right)?;
+        let pattern = left
+            .pattern
+            .clone()
+            .merge(right.pattern.clone())
+            .map_err(|error| binding_error(ctx, error.to_string()))?;
+        let mut controls = left.controls.clone();
+        controls.extend(right.controls.clone());
+        (pattern, controls)
+    };
+    state.borrow_mut().spend_pattern(ctx, &pattern)?;
+    stack.replace(ctx, lua_pattern(ctx, LuaPattern { pattern, controls })?);
+    Ok(CallbackReturn::Return)
+}
+
+fn fast_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let factor = read_pattern_ratio(ctx, stack.get(0), "fast factor")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(&ctx, LuaPatternTransform(PatternTransform::Fast(factor))),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn slow_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let factor = read_pattern_ratio(ctx, stack.get(0), "slow factor")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(&ctx, LuaPatternTransform(PatternTransform::Slow(factor))),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn shift_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let by = read_pattern_time(ctx, stack.get(0), "shift amount")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(&ctx, LuaPatternTransform(PatternTransform::Shift(by))),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn early_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let by = read_pattern_time(ctx, stack.get(0), "early amount")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(&ctx, LuaPatternTransform(PatternTransform::Shift(-by))),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn segment_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let steps = read_positive_i64(ctx, stack.get(0), "segment step count")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(&ctx, LuaPatternTransform(PatternTransform::Segment(steps))),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn range_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let min = read_number(ctx, stack.get(0), "range minimum")?;
+    let max = read_number(ctx, stack.get(1), "range maximum")?;
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaPatternTransform(PatternTransform::Range { min, max }),
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn degrade_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    make_degrade_transform(ctx, &mut stack, 0, 0)
+}
+
+fn degrade_pattern_at<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let call_site = read_call_site(ctx, stack.get(0))?;
+    make_degrade_transform(ctx, &mut stack, 1, call_site)
+}
+
+fn make_degrade_transform<'gc>(
+    ctx: Context<'gc>,
+    stack: &mut piccolo::Stack<'gc, '_>,
+    amount_index: usize,
+    call_site: u64,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let amount = read_probability(ctx, stack.get(amount_index), "degrade amount")?;
+    let seed = source_seed(call_site);
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaPatternTransform(PatternTransform::Degrade { amount, seed }),
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn read_probability<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    what: &str,
+) -> Result<f64, Error<'gc>> {
+    let amount = read_number(ctx, value, what)?;
+    if !(0.0..=1.0).contains(&amount) {
+        return Err(binding_error(
+            ctx,
+            format!("{what} must be between zero and one"),
+        ));
+    }
+    Ok(amount)
+}
+
+fn source_seed(call_site: u64) -> u64 {
+    // The byte offset is already a stable identity within this evaluation.
+    // Mix it once so nearby calls do not feed nearby raw seeds to the pattern
+    // hash even though its finalizer would also decorrelate them.
+    call_site
+        .wrapping_add(0x9e37_79b9_7f4a_7c15)
+        .wrapping_mul(0xbf58_476d_1ce4_e5b9)
+}
+
+fn every_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let cycles = read_positive_i64(ctx, stack.get(0), "every cycle count")?;
+    let transform = read_pattern_transform(ctx, stack.get(1))?.0.clone();
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaPatternTransform(PatternTransform::Every {
+                cycles,
+                transform: Box::new(transform),
+            }),
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn off_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let by = read_pattern_time(ctx, stack.get(0), "off shift")?;
+    let transform = read_pattern_transform(ctx, stack.get(1))?.0.clone();
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaPatternTransform(PatternTransform::Off {
+                by,
+                transform: Box::new(transform),
+            }),
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn sometimes_pattern<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    make_sometimes_transform(ctx, &mut stack, 0, 0)
+}
+
+fn sometimes_pattern_at<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let call_site = read_call_site(ctx, stack.get(0))?;
+    make_sometimes_transform(ctx, &mut stack, 1, call_site)
+}
+
+fn make_sometimes_transform<'gc>(
+    ctx: Context<'gc>,
+    stack: &mut piccolo::Stack<'gc, '_>,
+    argument_offset: usize,
+    call_site: u64,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let amount = read_probability(ctx, stack.get(argument_offset), "sometimes probability")?;
+    let transform = read_pattern_transform(ctx, stack.get(argument_offset + 1))?
+        .0
+        .clone();
+    let seed = source_seed(call_site);
+    stack.replace(
+        ctx,
+        UserData::new_static(
+            &ctx,
+            LuaPatternTransform(PatternTransform::Sometimes {
+                amount,
+                seed,
+                transform: Box::new(transform),
+            }),
+        ),
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn voice_index<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let Value::UserData(data) = stack.get(0) else {
+        return Err(binding_error(ctx, "parameter setter requires a voice"));
+    };
+    let voice = data
+        .downcast_static::<LuaVoice>()
+        .map_err(|_| binding_error(ctx, "parameter setter requires a voice"))?
+        .0;
+    let name = read_string(ctx, stack.get(1), "voice parameter name")?;
+    {
+        let state = state.borrow();
+        let template = state
+            .program
+            .voices
+            .get(voice)
+            .ok_or_else(|| binding_error(ctx, "voice handle does not belong to this edit"))?;
+        control_param_id(ctx, template, &name)?;
+    }
+
+    let state = state.clone();
+    let callback_name = name.clone();
+    let callback = Callback::from_fn(&ctx, move |ctx, _, mut stack| {
+        let value = read_control_value(ctx, stack.get(0))?;
+        {
+            let state = state.borrow();
+            let template =
+                state.program.voices.get(voice).ok_or_else(|| {
+                    binding_error(ctx, "voice handle does not belong to this edit")
+                })?;
+            validate_voice_control(ctx, template, &callback_name, &value)?;
+        }
+        replace_with_named_control(ctx, &state, &mut stack, &callback_name, value)
+    });
+    stack.replace(ctx, callback);
+    Ok(CallbackReturn::Return)
+}
+
+fn velocity<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let value = read_control_value(ctx, stack.get(0))?;
+    replace_with_named_control(ctx, state, &mut stack, "velocity", value)
+}
+
+fn note_pattern<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let value = match stack.get(0) {
+        Value::String(value) => ControlValue::Text(
+            value
+                .to_str()
+                .map_err(|_| binding_error(ctx, "note name must be UTF-8"))?
+                .to_owned(),
+        ),
+        value if value.to_number().is_some() => {
+            ControlValue::Number(read_number(ctx, value, "MIDI note")?)
+        }
+        _ => {
+            return Err(binding_error(
+                ctx,
+                "note expects a note name or MIDI number",
+            ));
+        }
+    };
+    let pattern = Pattern::primary(value);
+    state.borrow_mut().spend_pattern(ctx, &pattern)?;
+    stack.replace(
+        ctx,
+        lua_pattern(
+            ctx,
+            LuaPattern {
+                pattern,
+                controls: Vec::new(),
+            },
+        )?,
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn event_curve<'gc>(
+    ctx: Context<'gc>,
+    _state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let Value::Table(table) = stack.get(0) else {
+        return Err(binding_error(ctx, "curve expects a table"));
+    };
+    let clock = match read_string(ctx, table.get_value(ctx, "clock"), "curve clock")?.as_str() {
+        "note_seconds" => CurveClock::NoteSeconds,
+        "note_phase" => CurveClock::NotePhase,
+        other => {
+            return Err(binding_error(
+                ctx,
+                format!("unknown curve clock {other:?}; use note_seconds or note_phase"),
+            ));
+        }
+    };
+    let offset = optional_number(ctx, table.get_value(ctx, "offset"), 0.0, "curve offset")?;
+    let term_table = match table.get_value(ctx, "terms") {
+        Value::Nil => table,
+        Value::Table(terms) => terms,
+        _ => return Err(binding_error(ctx, "curve.terms must be a table")),
+    };
+    let mut terms = Vec::new();
+    for (key, value) in term_table {
+        let index = match key {
+            Value::Integer(index) if index > 0 => index,
+            Value::Number(index) if index > 0.0 && index.fract() == 0.0 => index as i64,
+            _ => continue,
+        };
+        let Value::Table(term) = value else {
+            return Err(binding_error(
+                ctx,
+                format!("curve term {index} must be a table"),
+            ));
+        };
+        terms.push((index, read_curve_term(ctx, term, index)?));
+    }
+    terms.sort_by_key(|(index, _)| *index);
+    let curve = terms
+        .into_iter()
+        .fold(Curve::new(clock, offset), |curve, (_, term)| {
+            curve.term(term.basis, term.coefficient, term.delay, term.length)
+        });
+    curve
+        .validate()
+        .map_err(|error| binding_error(ctx, error.to_string()))?;
+    stack.replace(ctx, UserData::new_static(&ctx, LuaCurve(curve)));
+    Ok(CallbackReturn::Return)
+}
+
+fn read_curve_term<'gc>(
+    ctx: Context<'gc>,
+    term: Table<'gc>,
+    index: i64,
+) -> Result<apteronotus_pattern::CurveTerm, Error<'gc>> {
+    let field = |name, position| {
+        let named = term.get_value(ctx, name);
+        if named.is_nil() {
+            term.get_value(ctx, position)
+        } else {
+            named
+        }
+    };
+    let basis_name = read_string(ctx, field("basis", 1), "curve basis")?;
+    let basis = match basis_name.as_str() {
+        "step" => Basis::Step,
+        "ramp" | "line" => Basis::Ramp,
+        "decay" => Basis::Decay,
+        "sine" => Basis::Sine,
+        other => {
+            return Err(binding_error(
+                ctx,
+                format!("curve term {index} has unknown basis {other:?}"),
+            ));
+        }
+    };
+    Ok(apteronotus_pattern::CurveTerm {
+        basis,
+        coefficient: optional_number(ctx, field("coefficient", 2), 1.0, "curve coefficient")?,
+        delay: optional_number(ctx, field("delay", 3), 0.0, "curve delay")?,
+        length: optional_number(ctx, field("length", 4), 0.0, "curve length")?,
+    })
+}
+
+fn optional_number<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    default: f64,
+    what: &str,
+) -> Result<f64, Error<'gc>> {
+    if value.is_nil() {
+        Ok(default)
+    } else {
+        read_number(ctx, value, what)
+    }
+}
+
+fn replace_with_named_control<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    stack: &mut piccolo::Stack<'gc, '_>,
+    name: &str,
+    value: ControlValue,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let pattern = Pattern::pure(PatternValue::Leaf(value.clone()))
+        .named(name)
+        .map_err(|error| binding_error(ctx, error.to_string()))?;
+    state.borrow_mut().spend_pattern(ctx, &pattern)?;
+    stack.replace(
+        ctx,
+        lua_pattern(
+            ctx,
+            LuaPattern {
+                pattern,
+                controls: vec![PatternControl {
+                    name: name.to_owned(),
+                    value,
+                }],
+            },
+        )?,
+    );
+    Ok(CallbackReturn::Return)
+}
+
+fn read_control_value<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+) -> Result<ControlValue, Error<'gc>> {
+    if value.to_number().is_some() {
+        return read_number(ctx, value, "control value").map(ControlValue::Number);
+    }
+    match value {
+        Value::String(value) => value
+            .to_str()
+            .map(|value| ControlValue::Text(value.to_owned()))
+            .map_err(|_| binding_error(ctx, "control text must be UTF-8")),
+        Value::Boolean(value) => Ok(ControlValue::Bool(value)),
+        Value::UserData(data) => data
+            .downcast_static::<LuaCurve>()
+            .map(|curve| ControlValue::Curve(curve.0.clone()))
+            .map_err(|_| binding_error(ctx, "control value must be scalar or curve")),
+        _ => Err(binding_error(
+            ctx,
+            "control value must be a number, string, boolean or curve",
+        )),
+    }
+}
+
+fn control_param_id<'gc>(
+    ctx: Context<'gc>,
+    template: &apteronotus_synth::GraphTemplate,
+    name: &str,
+) -> Result<ParamId, Error<'gc>> {
+    match name {
+        "velocity" => Ok(ParamId::Implicit(Implicit::Velocity)),
+        "pan" => Ok(ParamId::Implicit(Implicit::Pan)),
+        "duration" => Err(binding_error(
+            ctx,
+            "duration is determined by the event span; a live gate is separate",
+        )),
+        "hz" => Err(binding_error(
+            ctx,
+            "hz is reserved until typed frequency controls are implemented",
+        )),
+        name => template
+            .params
+            .iter()
+            .position(|spec| spec.name == name)
+            .map(ParamId::Declared)
+            .ok_or_else(|| binding_error(ctx, format!("voice has no parameter named {name:?}"))),
+    }
+}
+
+fn validate_voice_control<'gc>(
+    ctx: Context<'gc>,
+    template: &apteronotus_synth::GraphTemplate,
+    name: &str,
+    value: &ControlValue,
+) -> Result<(), Error<'gc>> {
+    let id = control_param_id(ctx, template, name)?;
+    let param = match value {
+        ControlValue::Number(value) => {
+            let (min, max) = match id {
+                ParamId::Implicit(Implicit::Velocity) => (0.0, 1.0),
+                ParamId::Implicit(Implicit::Pan) => (-1.0, 1.0),
+                ParamId::Declared(index) => {
+                    let spec = &template.params[index];
+                    (spec.min, spec.max)
+                }
+                ParamId::Implicit(Implicit::Hz | Implicit::Duration) => unreachable!(),
+            };
+            if !(min..=max).contains(value) {
+                return Err(binding_error(
+                    ctx,
+                    format!("{name} value {value} is outside {min}..{max}"),
+                ));
+            }
+            ParamValue::Number(*value)
+        }
+        ControlValue::Curve(curve) => ParamValue::Curve(curve.clone()),
+        ControlValue::Text(_) | ControlValue::Bool(_) => {
+            return Err(binding_error(
+                ctx,
+                format!("{name} expects a number or curve"),
+            ));
+        }
+    };
+    Note::new(440.0)
+        .duration(1.0)
+        .bind(id, param)
+        .value(id, template)
+        .map(|_| ())
+        .map_err(|error| binding_error(ctx, error.to_string()))
+}
+
+fn read_lua_pattern<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+) -> Result<&'gc LuaPattern, Error<'gc>> {
+    let Value::UserData(data) = value else {
+        return Err(binding_error(
+            ctx,
+            "pattern operator expects a control pattern or pattern transform",
+        ));
+    };
+    data.downcast_static::<LuaPattern>().map_err(|_| {
+        binding_error(
+            ctx,
+            "pattern operator expects a control pattern or pattern transform",
+        )
+    })
+}
+
+fn read_pattern_transform<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+) -> Result<&'gc LuaPatternTransform, Error<'gc>> {
+    let Value::UserData(data) = value else {
+        return Err(binding_error(ctx, "expected a pattern transform"));
+    };
+    data.downcast_static::<LuaPatternTransform>()
+        .map_err(|_| binding_error(ctx, "expected a pattern transform"))
 }
 
 macro_rules! generator_one {
@@ -1237,10 +2023,10 @@ fn adsr<'gc>(
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
     let generation = current_generation(ctx, state)?;
     let envelope = Adsr::new(
-        read_number(ctx, stack.get(0), "ADSR attack")?,
-        read_number(ctx, stack.get(1), "ADSR decay")?,
+        read_seconds(ctx, stack.get(0), "ADSR attack")?,
+        read_seconds(ctx, stack.get(1), "ADSR decay")?,
         read_number(ctx, stack.get(2), "ADSR sustain")?,
-        read_number(ctx, stack.get(3), "ADSR release")?,
+        read_seconds(ctx, stack.get(3), "ADSR release")?,
     );
     let mut state = state.borrow_mut();
     state.spend_node(ctx)?;
@@ -1257,7 +2043,7 @@ fn step<'gc>(
     let delay = if stack.is_empty() {
         0.0
     } else {
-        read_number(ctx, stack.get(0), "step delay")?
+        read_seconds(ctx, stack.get(0), "step delay")?
     };
     curve_node(
         ctx,
@@ -1272,9 +2058,9 @@ fn ramp<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    let length = read_number(ctx, stack.get(0), "ramp length")?;
+    let length = read_seconds(ctx, stack.get(0), "ramp length")?;
     let delay = if stack.len() >= 2 {
-        read_number(ctx, stack.get(1), "ramp delay")?
+        read_seconds(ctx, stack.get(1), "ramp delay")?
     } else {
         0.0
     };
@@ -1291,8 +2077,13 @@ fn decay<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    let length = read_number(ctx, stack.get(0), "decay length")?;
-    curve_node(ctx, state, &mut stack, Curve::decay(length))
+    let length = read_seconds(ctx, stack.get(0), "decay length")?;
+    curve_node(
+        ctx,
+        state,
+        &mut stack,
+        Curve::decay(apteronotus_synth::CurveClock::NoteSeconds, length),
+    )
 }
 
 fn window<'gc>(
@@ -1300,9 +2091,14 @@ fn window<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    let begin = read_number(ctx, stack.get(0), "window beginning")?;
-    let end = read_number(ctx, stack.get(1), "window end")?;
-    curve_node(ctx, state, &mut stack, Curve::window(begin, end))
+    let begin = read_seconds(ctx, stack.get(0), "window beginning")?;
+    let end = read_seconds(ctx, stack.get(1), "window end")?;
+    curve_node(
+        ctx,
+        state,
+        &mut stack,
+        Curve::window(apteronotus_synth::CurveClock::NoteSeconds, begin, end),
+    )
 }
 
 fn curve_node<'gc>(
@@ -1353,6 +2149,10 @@ fn pan<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if state.borrow().active.is_none() {
+        let value = read_control_value(ctx, stack.get(0))?;
+        return replace_with_named_control(ctx, state, &mut stack, "pan", value);
+    }
     let generation = current_generation(ctx, state)?;
     if stack.len() == 1 {
         let position = read_mono(ctx, stack.get(0), generation)?;
@@ -1820,6 +2620,30 @@ fn current_generation<'gc>(
         .ok_or_else(|| binding_error(ctx, "graph primitive used outside voice.graph"))
 }
 
+fn lua_pattern<'gc>(ctx: Context<'gc>, pattern: LuaPattern) -> Result<UserData<'gc>, Error<'gc>> {
+    let Value::Table(metatable) = ctx.get_global_value("__apteronotus_pattern_meta") else {
+        return Err(binding_error(
+            ctx,
+            "internal pattern metatable is unavailable",
+        ));
+    };
+    let pattern = UserData::new_static(&ctx, pattern);
+    pattern.set_metatable(&ctx, Some(metatable));
+    Ok(pattern)
+}
+
+fn lua_voice<'gc>(ctx: Context<'gc>, voice: usize) -> Result<UserData<'gc>, Error<'gc>> {
+    let Value::Table(metatable) = ctx.get_global_value("__apteronotus_voice_meta") else {
+        return Err(binding_error(
+            ctx,
+            "internal voice metatable is unavailable",
+        ));
+    };
+    let voice = UserData::new_static(&ctx, LuaVoice(voice));
+    voice.set_metatable(&ctx, Some(metatable));
+    Ok(voice)
+}
+
 fn lua_source<'gc>(
     ctx: Context<'gc>,
     generation: u64,
@@ -1936,6 +2760,15 @@ fn read_pipe_inputs<'gc>(
             "a patch connection expects a signal or input bundle",
         ));
     };
+    if let Ok(duration) = data.downcast_static::<LuaDuration>() {
+        return match duration.unit {
+            TimeUnit::Seconds => Ok(vec![Source::Const(duration.value)]),
+            TimeUnit::Cycles => Err(binding_error(
+                ctx,
+                "a graph connection expects seconds, but bars are cycle time",
+            )),
+        };
+    }
     if let Ok(source) = data.downcast_static::<LuaSource>() {
         if source.generation != generation {
             return Err(binding_error(
@@ -1974,6 +2807,15 @@ fn read_mono<'gc>(
     let Value::UserData(data) = value else {
         return Err(binding_error(ctx, "expected a number or graph signal"));
     };
+    if let Ok(duration) = data.downcast_static::<LuaDuration>() {
+        return match duration.unit {
+            TimeUnit::Seconds => Ok(Source::Const(duration.value)),
+            TimeUnit::Cycles => Err(binding_error(
+                ctx,
+                "a graph value expects seconds, but bars are cycle time",
+            )),
+        };
+    }
     if let Ok(control) = data.downcast_static::<LuaControl>() {
         return Ok(Source::Control(control.0));
     }
@@ -2018,10 +2860,18 @@ fn read_channels<'gc>(
     Ok(source.channels.clone())
 }
 
+struct ParsedParamSpec {
+    min: f64,
+    max: f64,
+    default: f64,
+    unit: Option<String>,
+    max_curve_seconds: Option<f64>,
+}
+
 fn read_param_spec<'gc>(
     ctx: Context<'gc>,
     value: Value<'gc>,
-) -> Result<(f64, f64, f64, Option<String>), Error<'gc>> {
+) -> Result<ParsedParamSpec, Error<'gc>> {
     let Value::Table(table) = value else {
         return Err(binding_error(ctx, "voice parameter spec must be a table"));
     };
@@ -2044,6 +2894,21 @@ fn read_param_spec<'gc>(
             Some(read_string(ctx, unit, "parameter unit")?)
         }
     };
+    let max_curve_seconds = {
+        let value = field("max_curve_seconds", 5);
+        if value.is_nil() {
+            None
+        } else {
+            let seconds = read_seconds(ctx, value, "maximum curve horizon")?;
+            if seconds < 0.0 {
+                return Err(binding_error(
+                    ctx,
+                    "maximum curve horizon must be non-negative",
+                ));
+            }
+            Some(seconds)
+        }
+    };
     if min > max {
         return Err(binding_error(
             ctx,
@@ -2056,7 +2921,13 @@ fn read_param_spec<'gc>(
             "parameter default must lie inside its range",
         ));
     }
-    Ok((min, max, default, unit))
+    Ok(ParsedParamSpec {
+        min,
+        max,
+        default,
+        unit,
+        max_curve_seconds,
+    })
 }
 
 fn read_number<'gc>(ctx: Context<'gc>, value: Value<'gc>, what: &str) -> Result<f64, Error<'gc>> {
@@ -2064,6 +2935,65 @@ fn read_number<'gc>(ctx: Context<'gc>, value: Value<'gc>, what: &str) -> Result<
         .to_number()
         .filter(|number| number.is_finite())
         .ok_or_else(|| binding_error(ctx, format!("{what} must be a finite number")))
+}
+
+fn read_seconds<'gc>(ctx: Context<'gc>, value: Value<'gc>, what: &str) -> Result<f64, Error<'gc>> {
+    let Value::UserData(data) = value else {
+        return read_number(ctx, value, what);
+    };
+    let Ok(duration) = data.downcast_static::<LuaDuration>() else {
+        return read_number(ctx, value, what);
+    };
+    match duration.unit {
+        TimeUnit::Seconds => Ok(duration.value),
+        TimeUnit::Cycles => Err(binding_error(
+            ctx,
+            format!("{what} expects seconds, not bars/cycle time"),
+        )),
+    }
+}
+
+fn read_pattern_time<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    what: &str,
+) -> Result<Frac, Error<'gc>> {
+    let Value::UserData(data) = value else {
+        return Ok(Frac::approx(read_number(ctx, value, what)?, 1_000_000));
+    };
+    let Ok(duration) = data.downcast_static::<LuaDuration>() else {
+        return Ok(Frac::approx(read_number(ctx, value, what)?, 1_000_000));
+    };
+    match duration.unit {
+        TimeUnit::Cycles => Ok(Frac::approx(duration.value, 1_000_000)),
+        TimeUnit::Seconds => Err(binding_error(
+            ctx,
+            format!("{what} expects bars/cycle time, not seconds"),
+        )),
+    }
+}
+
+fn read_pattern_ratio<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    what: &str,
+) -> Result<Frac, Error<'gc>> {
+    Ok(Frac::approx(read_number(ctx, value, what)?, 1_000_000))
+}
+
+fn read_positive_i64<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    what: &str,
+) -> Result<i64, Error<'gc>> {
+    let number = read_number(ctx, value, what)?;
+    if number < 1.0 || number.fract() != 0.0 || number > i64::MAX as f64 {
+        return Err(binding_error(
+            ctx,
+            format!("{what} must be a positive integer"),
+        ));
+    }
+    Ok(number as i64)
 }
 
 fn read_count<'gc>(ctx: Context<'gc>, value: Value<'gc>, what: &str) -> Result<usize, Error<'gc>> {
@@ -2103,11 +3033,11 @@ fn read_delay_range<'gc>(
             }
         };
         DelayRange::new(
-            read_number(ctx, field("min", 1), "delay minimum")?,
-            read_number(ctx, field("max", 2), "delay maximum")?,
+            read_seconds(ctx, field("min", 1), "delay minimum")?,
+            read_seconds(ctx, field("max", 2), "delay maximum")?,
         )
     } else {
-        DelayRange::new(0.0, read_number(ctx, value, "delay maximum")?)
+        DelayRange::new(0.0, read_seconds(ctx, value, "delay maximum")?)
     };
     range.map_err(|error| binding_error(ctx, error.to_string()))
 }
@@ -2194,12 +3124,19 @@ fn pattern_nodes(pattern: &Pattern) -> usize {
         | Pattern::Rev(inner)
         | Pattern::Degrade { inner, .. }
         | Pattern::Segment { inner, .. }
-        | Pattern::Range { inner, .. } => 1usize.saturating_add(pattern_nodes(inner)),
+        | Pattern::Range { inner, .. }
+        | Pattern::Named { inner, .. } => 1usize.saturating_add(pattern_nodes(inner)),
         Pattern::When {
             then, otherwise, ..
         } => 1usize
             .saturating_add(pattern_nodes(then))
             .saturating_add(pattern_nodes(otherwise)),
+        Pattern::Merge {
+            structure,
+            controls,
+        } => 1usize
+            .saturating_add(pattern_nodes(structure))
+            .saturating_add(pattern_nodes(controls.as_pattern())),
         Pattern::Timeline(timeline) => 1usize.saturating_add(timeline.events().len()),
     }
 }

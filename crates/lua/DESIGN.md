@@ -83,13 +83,73 @@ form remains available.
 table of processors becomes a shared-input processor bank. This avoids a fake
 zero-input accumulator with the wrong arity.
 
+### Pattern transforms are construction-time data
+
+`fast`, `slow`, `shift`/`late`, `early`, `rev`, `degrade`, `segment`, and
+`range` return evaluation-only transform objects. `every`, `off`, and
+`sometimes` compose those objects. Applying one with `pattern >> transform`
+immediately constructs ordinary `Pattern` variants; it never stores or invokes
+a Lua function during query.
+
+`rev` is a transform value rather than a function, which is why
+`every(4, rev)` is the canonical spelling. `every` chooses its prebuilt branch
+by cycle. `off` overlays a shifted transformed copy. `sometimes` partitions
+events into transformed and untouched branches rather than duplicating them.
+
+Direct `degrade` and `sometimes` calls derive independent deterministic seeds
+from their source byte offsets. A probability must be finite and in `[0, 1]`.
+This site identity is stable only within one evaluation; cross-edit continuity
+does not depend on it.
+
+Pattern time remains exact rational cycle time. Lua numbers are approximated
+with a bounded rational denominator at the binding boundary. `bars(x)` currently
+means `x` cycles because the host's default meter is one bar per cycle. It
+returns a tagged cycle duration: pattern-time consumers accept it, while graph
+and note-clock consumers diagnose it instead of silently treating bars as
+seconds.
+`beats(x)` is deliberately unavailable until it can be resolved through the
+program's tempo/meter rather than masquerading as fixed seconds.
+
 ### Clocks, curves, and delay allocation
 
-`ms` and `secs` return ordinary seconds. `step`, `ramp`/`line`, `decay`, and
-`window` currently create note-clock `Curve` nodes and are therefore valid in a
-voice. `PatchTemplate` rejects them because persistent transport-clock
-automation has not been defined. The binding does not silently choose another
-clock.
+`ms` and `secs` return tagged absolute durations. Graph, delay and note-clock
+curve consumers unwrap them as seconds; pattern timing rejects them. Conversely,
+`bars` is accepted by pattern timing and rejected by graph consumers. Bare
+finite numbers remain context-dependent for compatibility with scalar graph
+code, so explicit units are the spelling that receives cross-domain checking.
+`fast` and `slow` accept only dimensionless numbers.
+
+`step`, `ramp`/`line`, `decay`, and `window` currently create note-clock
+`Curve` nodes and are therefore valid in a voice. `PatchTemplate` rejects them
+because persistent transport-clock automation has not been defined. The binding
+does not silently choose another clock.
+
+Score curves use an explicit constructor:
+
+```lua
+local rise = curve {
+  clock = "note_phase",
+  { basis = "ramp", coefficient = 1, delay = 0, length = 1 },
+}
+play(pad, pattern("c4") >> pad.pressure(rise))
+```
+
+`NotePhase` evaluates only on `[0, 1]`; a term beginning after 1 is an
+unreachable-expression diagnostic, while one beginning exactly at 1 is
+reachable. `NoteSeconds` event curves that terminate after the gate require the
+target `ParamSpec` to declare `max_curve_seconds`.
+
+Pattern `Merge` is an explicit transport-signal-to-init boundary: it queries
+its map-producing RHS at each left onset. The zero-width convention is
+left-closed, so an onset exactly on a control boundary selects the slot
+beginning there. The first simultaneous RHS event is chosen in stable
+structural query order; that order is deterministic but is not musical chord
+order.
+
+Curve ranges are never silently clamped. Step/ramp sums have exact
+piecewise-linear bounds; decay/sine terms receive sound enclosures. A range
+that is unsafe or cannot be proven safe rejects the candidate while the
+previous program keeps playing.
 
 A numeric delay without separate bounds gets a fixed allocation range. A
 symbolic delay time must provide explicit minimum/maximum allocation bounds.
@@ -114,19 +174,34 @@ opaque `ControlId` and `BusId` values belong to one evaluated program arena and
 cannot alias handles from another evaluation. `to(bus, level)` is a pass-through
 processor: it taps the current channels into a graph send and returns those same
 channels for continued processing. Its channel count must match the bus.
-Score/event sends remain separate and are blocked on the event control-map
-representation.
+Score/event sends remain a separate operation. The control-map representation
+now exists, but the Lua score constructor and live execution contract for
+per-event send levels are not connected yet.
 
 `run(patch)` records persistent activation intent as a `PatchId`; it does not
-instantiate DSP during evaluation.
+instantiate DSP during evaluation. In the first live executor, zero-input runs
+are autonomous sources mixed with routed voices. An input-bearing run must
+consume the complete flattened main/bus layout and processes that layout in
+declaration order. Exact arity is required; lanes are never folded modulo.
+The processor remains instantiated across scheduler windows. On a later Run,
+the native app compares the candidate's controls, buses and activated `run`
+patch graphs with the live persistent data while normalising arena-scoped
+handles. Inert patch declarations may change. A compatible candidate is rebound
+to the live arena, retains its DSP state and `ControlStore`, and publishes
+changed tracks/voices at the ordinary scheduling frontier.
+Introducing, removing or changing persistent topology still builds a complete
+replacement off to the side and hard-resets at cycle zero. A bounded crossfade
+remains the intended replacement semantics.
 
 ### Source identity and publication
 
 Direct `pattern(...)` and string-valued `play(...)` calls are transformed to
-carry their original Lua byte offset into `mini::parse_at`. Different sites
-therefore have distinct event provenance, while repeated execution of one site
-inside a loop keeps one identity. These IDs are meaningful only within one
-evaluation. Cross-edit continuity belongs to revision reconciliation.
+carry their original Lua byte offset into `mini::parse_at`. Direct `degrade`
+and `sometimes` calls carry the same identity into deterministic pattern
+randomness. Different sites therefore have distinct provenance/seeds, while
+repeated execution of one site inside a loop keeps one identity. These IDs are
+meaningful only within one evaluation. Cross-edit continuity belongs to
+revision reconciliation.
 
 The complete candidate is validated before `Evaluator` returns and again when
 submitted through `RevisionSlot`. The end-to-end acceptance test deliberately
@@ -150,8 +225,8 @@ These choices make the current path concrete but are not settled architecture:
   later lexical declaration identity may replace the display name.
 - `run(patch)` currently means the whole active program lifetime. The optional
   span used by `neon.eod` waits for finite-time integration.
-- The direct-call source transformer treats the host entry-point spellings
-  `pattern` and `play` as reserved when used in call position. Strings, comments,
+- The direct-call source transformer treats `pattern`, `play`, `degrade`, and
+  `sometimes` as reserved when used in call position. Strings, comments,
   method calls, and function declarations are skipped, but an authored local
   that shadows one of those names must not yet be called directly. An
   AST/scope-aware transform should remove this restriction.
@@ -162,8 +237,7 @@ These choices make the current path concrete but are not settled architecture:
 
 The binding does not invent representations for:
 
-- structured or ordered event values;
-- curve-valued event parameters and control-map merge semantics;
+- ordered/list event values or nested control maps;
 - select/join temporal alignment;
 - music-theory nodes that must survive to query time;
 - persistent transport-clock automation;

@@ -30,7 +30,7 @@ rim = voice {
   graph = function(n)
     return impulse() >> ring(1700, ms(28))
         >> (dc(400) | dc(0.7)) >> highpass()
-        >> mul(n.vel) >> dcblock() >> pan(-0.25)
+        >> mul(n.velocity) >> dcblock() >> pan(-0.25)
   end,
 }
 
@@ -44,7 +44,7 @@ bell = voice {
     for i, r in ipairs(partials) do
       modes[i] = ring(n.hz * r, n.ring / i) * (1.0 / i)
     end
-    return impulse() >> mix(modes) >> mul(n.vel * 0.4) >> dcblock() >> pan(n.pan)
+    return impulse() >> mix(modes) >> mul(n.velocity * 0.4) >> dcblock() >> pan(n.pan)
   end,
 }
 
@@ -54,7 +54,7 @@ tom = voice {
   graph = function(n)
     local swept = n.hz * (1 + n.bend * decay(ms(45)))
     return impulse() >> ring(swept, n.ring)
-        >> shape("tanh", 1.2) >> mul(n.vel) >> dcblock() >> pan(n.pan)
+        >> shape("tanh", 1.2) >> mul(n.velocity) >> dcblock() >> pan(n.pan)
   end,
 }
 
@@ -66,7 +66,7 @@ cymbal = voice {
       wash[i] = ring(hz, secs(1.6)) * 0.2
     end
     return noise() * decay(ms(4)) >> mix(wash)
-        >> mul(n.vel) >> dcblock() >> pan(n.pan) >> to(room, 0.5)
+        >> mul(n.velocity) >> dcblock() >> pan(n.pan) >> to(room, 0.5)
   end,
 }
 

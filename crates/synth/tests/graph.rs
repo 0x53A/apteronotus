@@ -7,8 +7,9 @@
 
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
 use apteronotus_synth::{
-    Adsr, Basis, Curve, DelayRange, DelayRangeError, GraphBuilder, GraphLimitError, GraphLimits,
-    GraphTemplate, Input, Note, Op, ParamSpec, ShapeKind, Source, TemplateError, instantiate, n,
+    Adsr, Basis, Curve, CurveClock, DelayRange, DelayRangeError, GraphBuilder, GraphLimitError,
+    GraphLimits, GraphTemplate, Input, Note, Op, ParamSpec, ShapeKind, Source, TemplateError,
+    instantiate, n,
 };
 
 const SR: f64 = 48_000.0;
@@ -154,25 +155,25 @@ fn adsr_release_starts_from_wherever_it_got_to() {
 fn curves_superpose() {
     // The whole argument for a basis sum over a breakpoint list: two curves
     // add. `window(a, b)` is literally step(a) - step(b).
-    let gate = Curve::window(1.0, 3.0);
-    assert_eq!(gate.at(0.5), 0.0);
-    assert_eq!(gate.at(2.0), 1.0);
-    assert_eq!(gate.at(4.0), 0.0);
+    let gate = Curve::window(CurveClock::NoteSeconds, 1.0, 3.0);
+    assert_eq!(gate.at(0.5, 1.0).unwrap(), 0.0);
+    assert_eq!(gate.at(2.0, 1.0).unwrap(), 1.0);
+    assert_eq!(gate.at(4.0, 1.0).unwrap(), 0.0);
 
-    let sum = Curve::window(0.0, 2.0).term(Basis::Step, 1.0, 1.0, 0.0);
-    assert_eq!(sum.at(0.5), 1.0);
-    assert_eq!(sum.at(1.5), 2.0);
-    assert_eq!(sum.at(2.5), 1.0);
+    let sum = Curve::window(CurveClock::NoteSeconds, 0.0, 2.0).term(Basis::Step, 1.0, 1.0, 0.0);
+    assert_eq!(sum.at(0.5, 1.0).unwrap(), 1.0);
+    assert_eq!(sum.at(1.5, 1.0).unwrap(), 2.0);
+    assert_eq!(sum.at(2.5, 1.0).unwrap(), 1.0);
 }
 
 #[test]
 fn a_curve_is_a_pure_function_of_its_clock() {
     // Nothing accumulates, so there is no phase to migrate across an edit.
-    let c = Curve::decay(0.5).term(Basis::Sine, 0.3, 0.0, 0.25);
+    let c = Curve::decay(CurveClock::NoteSeconds, 0.5).term(Basis::Sine, 0.3, 0.0, 0.25);
     for t in [0.0, 0.1, 0.37, 1.0, 9.0] {
-        assert_eq!(c.at(t), c.at(t));
+        assert_eq!(c.at(t, 1.0), c.at(t, 1.0));
     }
-    assert!(c.at(0.0) > c.at(2.0));
+    assert!(c.at(0.0, 1.0).unwrap() > c.at(2.0, 1.0).unwrap());
 }
 
 #[test]
@@ -510,4 +511,78 @@ fn tail_is_conservative() {
     let out = g.mul(osc, env);
     let voice = g.out_mono(out).unwrap();
     assert_eq!(voice.tail(), 2.5);
+}
+
+#[test]
+fn lifetime_keeps_gate_relative_and_absolute_components_separate() {
+    let mut g = GraphBuilder::new();
+    let noise = g.noise();
+    let envelope = g.curve(Curve::window(CurveClock::NoteSeconds, 0.0, 2.0));
+    let long_envelope_branch = g.mul(noise, envelope);
+    let delayed_gate_branch = g.delay(noise, 0.5, DelayRange::fixed(0.5).unwrap());
+    let output = g.add(long_envelope_branch, delayed_gate_branch);
+    let voice = g.out_mono(output).unwrap();
+
+    let lifetime = voice.lifetime();
+    assert_eq!(lifetime.gate_tail, 0.5);
+    assert_eq!(lifetime.absolute_horizon, 2.0);
+    assert_eq!(lifetime.end_after_onset(1.0), 2.0);
+}
+
+#[test]
+fn mul_uses_component_wise_maximum_for_safe_retention() {
+    let mut g = GraphBuilder::new();
+    let noise = g.noise();
+    let delayed = g.delay(noise, 2.0, DelayRange::fixed(2.0).unwrap());
+    let short = g.curve(Curve::decay(CurveClock::NoteSeconds, 0.05));
+    let output = g.mul(delayed, short);
+    let voice = g.out_mono(output).unwrap();
+
+    let lifetime = voice.lifetime();
+    assert_eq!(lifetime.gate_tail, 2.0);
+    assert_eq!(lifetime.absolute_horizon, 0.05);
+    assert_eq!(lifetime.end_after_onset(0.1), 2.1);
+}
+
+#[test]
+fn a_curve_on_a_filter_control_port_does_not_extend_audio() {
+    let mut g = GraphBuilder::new();
+    let noise = g.noise();
+    let cutoff = g.curve(Curve::window(CurveClock::NoteSeconds, 0.0, 8.0));
+    let filtered = g.lowpass(noise, cutoff, 0.7);
+    let voice = g.out_mono(filtered).unwrap();
+    assert_eq!(voice.lifetime().absolute_horizon, 0.0);
+}
+
+#[test]
+fn note_phase_parameter_curves_remain_live_for_the_held_note() {
+    let mut g = GraphBuilder::new();
+    let gain = g.param(ParamSpec::new("gain", 0.0, 1.0, 0.0));
+    let tone = g.sine(220.0);
+    let output = g.mul(tone, gain);
+    let voice = g.out_mono(output).unwrap();
+    let curve = Curve::new(CurveClock::NotePhase, 0.0).term(Basis::Ramp, 1.0, 0.0, 1.0);
+    let note = Note::new(220.0).duration(0.4).set_value(0, curve.into());
+    let mut unit = instantiate(&voice, &note).unwrap();
+    let audio = render(unit.as_mut(), SR, 0.4);
+    let quarter = audio[0].len() / 4;
+    let early = rms(&audio[0][..quarter]);
+    let late = rms(&audio[0][quarter * 3..]);
+    assert!(late > early * 2.0, "early {early}, late {late}");
+}
+
+#[test]
+fn note_seconds_parameter_horizons_are_declared_and_join_the_same_lifetime_walk() {
+    let mut g = GraphBuilder::new();
+    let gain = g.param(ParamSpec::new("gain", 0.0, 1.0, 0.0).with_curve_horizon(3.0));
+    let noise = g.noise();
+    let output = g.mul(noise, gain);
+    let voice = g.out_mono(output).unwrap();
+    assert_eq!(voice.cost().tail_seconds, 3.0);
+    let curve = Curve::window(CurveClock::NoteSeconds, 0.0, 2.0);
+    let note = Note::new(220.0).duration(0.1).set_value(0, curve.into());
+
+    let lifetime = voice.lifetime_for(&note).unwrap();
+    assert_eq!(lifetime.absolute_horizon, 2.0);
+    assert_eq!(lifetime.end_after_onset(note.duration), 2.0);
 }

@@ -392,8 +392,8 @@ impl Parser {
             Some(_) => {
                 let (text, span) = self.word(start)?;
                 let value = match text.parse::<f64>() {
-                    Ok(x) => Value::F(x),
-                    Err(_) => Value::S(text),
+                    Ok(x) => Value::number(x),
+                    Err(_) => Value::text(text),
                 };
                 Ok(Pattern::Pure {
                     value,

@@ -87,14 +87,14 @@ local function cs_channel(n, tune, pulse_mix, brightness)
   local hz = n.hz * semitones(n.bend) * tune * (1 + voice_drift)
 
   local slow_pwm = 0.07 * sine(0.13 + init_rand(n.id, "pwm", -0.01, 0.01))
-  local delayed_vibrato = 0.0035 * sine(5.15) * window(secs(0.7), n.gate)
+  local delayed_vibrato = 0.0035 * sine(5.15) * window(secs(0.7), n.duration)
 
   local source =
       saw(hz * (1 + delayed_vibrato)) * (1 - pulse_mix)
     + pulse(hz * (1 + delayed_vibrato), 0.38 + slow_pwm) * pulse_mix
     + noise() * 0.006
 
-  local filter_motion = cs_filter_envelope(n.gate)
+  local filter_motion = cs_filter_envelope(n.duration)
   local pressure_open = exp2(2.4 * n.pressure)
   local cutoff = brightness * filter_drift * pressure_open
                * (1 + 2.8 * filter_motion)
@@ -161,7 +161,7 @@ neon_pad = voice {
                 * scale(0.42, 1.0, n.pressure)
 
     return body
-        >> mul(amp * n.vel)
+        >> mul(amp * n.velocity)
         >> shape("soft", 1.12)
         >> chorus(0, 0.021, 0.007, 0.36)
         >> pan(n.pan)
@@ -223,7 +223,7 @@ breath_choir = voice {
                      + ((source | dc(2750) | dc(10.0)) >> bandpass()) * 0.18
 
     return mix(low_vowel, high_vowel, n.vowel)
-        >> mul(adsr(secs(2.8), secs(1.5), 0.88, secs(5.2)) * n.vel)
+        >> mul(adsr(secs(2.8), secs(1.5), 0.88, secs(5.2)) * n.velocity)
         >> ensemble {
              delays = { ms(13), ms(19), ms(27) },
              rates  = { 0.47, 0.71, 0.93 },
@@ -251,7 +251,7 @@ glass_keys = voice {
     local strike = impulse() + noise() * decay(ms(2.2)) * 0.06
     return strike
         >> mix(modes)
-        >> mul(decay(n.tine) * n.vel * 0.7)
+        >> mul(decay(n.tine) * n.velocity * 0.7)
         >> shape("soft", 1.18)
         >> tremolo(4.7, 0.12)
         >> pan(n.pan)
@@ -278,7 +278,7 @@ low_current = voice {
     local source = sine(n.hz) + pulse(n.hz, 0.46) * 0.16
     local motion = 0.78 + 0.22 * sine(0.09)
     return (source | dc(420 * motion) | dc(0.22)) >> lowpass()
-        >> mul(adsr(ms(18), secs(1.2), 0.72, secs(2.6)) * n.vel)
+        >> mul(adsr(ms(18), secs(1.2), 0.72, secs(2.6)) * n.velocity)
         >> shape("soft", 1.2)
         >> pan(0)
   end,

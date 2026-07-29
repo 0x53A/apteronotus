@@ -11,7 +11,10 @@
 //! ahead of the audio clock and the editor asks about the same instant again;
 //! both must get the same answer. Nothing in here may advance a cursor.
 
-use crate::event::{Event, EventOrigin, GroupNode, GroupProvenance, SrcSpan, Value};
+use crate::event::{
+    ControlMap, ControlMapError, Event, EventOrigin, GroupNode, GroupProvenance, SrcSpan, Value,
+    ValueLimitError, ValueLimits,
+};
 use crate::frac::Frac;
 use crate::rand;
 use crate::span::Span;
@@ -75,6 +78,12 @@ impl Signal {
 }
 
 /// A pattern of values in cycle time.
+///
+/// Query results have a stable **structural order**. Stack and group children
+/// are visited in stored order, and transforms preserve that order unless
+/// their documented semantics select or reflect branches. This order is
+/// deterministic but has no musical meaning: chord order comes from
+/// [`GroupProvenance`], never from a result vector index.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Pattern {
     Silence,
@@ -135,14 +144,81 @@ pub enum Pattern {
         hi: f64,
         inner: Box<Pattern>,
     },
+    /// Lift every bare value into one named control field. Values already
+    /// lifted into a map pass through unchanged.
+    Named {
+        name: String,
+        inner: Box<Pattern>,
+    },
+    /// Preserve the left event structure and merge one right map sampled at
+    /// each left event onset.
+    Merge {
+        structure: Box<Pattern>,
+        controls: ControlPattern,
+    },
     /// Finite, non-repeating material.
     Timeline(Timeline),
 }
 
+/// A pattern proven to emit maps whenever it emits an event.
+///
+/// The inner pattern is private so [`Pattern::Merge`] cannot contain a
+/// leaf-producing right side. Silence is vacuously valid, which lets ordinary
+/// transforms such as `degrade` and `every` retain their silent branches.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ControlPattern {
+    inner: Box<Pattern>,
+}
+
+impl ControlPattern {
+    pub fn as_pattern(&self) -> &Pattern {
+        &self.inner
+    }
+
+    pub fn into_pattern(self) -> Pattern {
+        *self.inner
+    }
+}
+
+impl TryFrom<Pattern> for ControlPattern {
+    type Error = ControlPatternError;
+
+    fn try_from(pattern: Pattern) -> Result<Self, Self::Error> {
+        if let Some(src) = first_leaf_producer(&pattern) {
+            return Err(ControlPatternError { src });
+        }
+        Ok(ControlPattern {
+            inner: Box::new(pattern),
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ControlPatternError {
+    src: Option<SrcSpan>,
+}
+
+impl ControlPatternError {
+    pub fn src(self) -> Option<SrcSpan> {
+        self.src
+    }
+}
+
+impl core::fmt::Display for ControlPatternError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "merge controls must be named fields; wrap the value in a control setter"
+        )
+    }
+}
+
+impl core::error::Error for ControlPatternError {}
+
 impl Pattern {
     // ---------------------------------------------------------------- query
 
-    /// Every event overlapping `span`.
+    /// Every event overlapping `span`, in stable structural order.
     pub fn query(&self, span: Span) -> Vec<Event> {
         if span.begin > span.end {
             return Vec::new();
@@ -328,7 +404,7 @@ impl Pattern {
                 out.push(Event {
                     whole: None,
                     part: span,
-                    value: Value::F(sig.at(span.midpoint())),
+                    value: Value::number(sig.at(span.midpoint())),
                     src: None,
                     origin: EventOrigin::ANONYMOUS,
                     group: None,
@@ -374,9 +450,50 @@ impl Pattern {
             Pattern::Range { lo, hi, inner } => {
                 for mut e in inner.query(span) {
                     if let Some(x) = e.value.as_f64() {
-                        e.value = Value::F(lo + x * (hi - lo));
+                        e.value = Value::number(lo + x * (hi - lo));
                     }
                     out.push(e);
+                }
+            }
+
+            Pattern::Named { name, inner } => {
+                for mut event in inner.query(span) {
+                    if let Value::Leaf(value) = event.value {
+                        let map = ControlMap::named(name.clone(), value, event.src)
+                            .expect("Named field names are validated by the builder");
+                        event.value = Value::Map(map);
+                    }
+                    out.push(event);
+                }
+            }
+
+            Pattern::Merge {
+                structure,
+                controls,
+            } => {
+                for mut event in structure.query(span) {
+                    let onset = event
+                        .whole
+                        .map(|whole| whole.begin)
+                        .unwrap_or(event.part.begin);
+                    let sampled = controls
+                        .as_pattern()
+                        .query(Span::new(onset, onset))
+                        .into_iter()
+                        .next()
+                        .map(|sample| match sample.value {
+                            Value::Map(map) => map,
+                            Value::Leaf(_) => {
+                                unreachable!("ControlPattern cannot emit a leaf value")
+                            }
+                        });
+                    let left = event.value.into_map(event.src);
+                    if let Some(right) = sampled {
+                        event.value = Value::Map(left.merged(&right));
+                    } else {
+                        event.value = Value::Map(left);
+                    }
+                    out.push(event);
                 }
             }
 
@@ -439,7 +556,9 @@ impl Pattern {
             Pattern::Shift { inner, .. }
             | Pattern::Rev(inner)
             | Pattern::Range { inner, .. }
+            | Pattern::Named { inner, .. }
             | Pattern::Degrade { inner, .. } => inner.density(),
+            Pattern::Merge { structure, .. } => structure.density(),
             Pattern::When {
                 then, otherwise, ..
             } => then.density().max(otherwise.density()),
@@ -463,11 +582,19 @@ impl Pattern {
     }
 
     pub fn num(x: f64) -> Pattern {
-        Pattern::pure(Value::F(x))
+        Pattern::pure(Value::number(x))
     }
 
     pub fn word(s: &str) -> Pattern {
-        Pattern::pure(Value::S(s.to_string()))
+        Pattern::pure(Value::text(s))
+    }
+
+    /// A privileged primary-value constructor.
+    ///
+    /// Public named fields may not use the reserved `"value"` name. Language
+    /// bindings use this constructor for typed `note(...)` values instead.
+    pub fn primary(value: crate::ControlValue) -> Pattern {
+        Pattern::pure(Value::Map(ControlMap::primary(value, None)))
     }
 
     /// An unweighted sequence filling one cycle.
@@ -557,6 +684,144 @@ impl Pattern {
         }
     }
 
+    pub fn named(self, name: impl Into<String>) -> Result<Pattern, ControlMapError> {
+        let name = name.into();
+        // Use the map constructor as the single field-name policy boundary.
+        ControlMap::named(name.clone(), crate::ControlValue::Bool(false), None)?;
+        Ok(Pattern::Named {
+            name,
+            inner: Box::new(self),
+        })
+    }
+
+    pub fn merge(self, controls: Pattern) -> Result<Pattern, ControlPatternError> {
+        Ok(Pattern::Merge {
+            structure: Box::new(self),
+            controls: ControlPattern::try_from(controls)?,
+        })
+    }
+
+    /// Validate intrinsic values and caller-selected per-event complexity.
+    pub fn validate_value_limits(&self, limits: ValueLimits) -> Result<(), ValueLimitError> {
+        self.validate_stored_values(limits)?;
+        let cost = self.value_cost();
+        if cost.map_fields > limits.map_fields {
+            return Err(ValueLimitError::MapFields {
+                found: cost.map_fields,
+                limit: limits.map_fields,
+                src: None,
+            });
+        }
+        if cost.curve_terms > limits.curve_terms {
+            return Err(ValueLimitError::CurveTerms {
+                found: cost.curve_terms,
+                limit: limits.curve_terms,
+                src: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_stored_values(&self, limits: ValueLimits) -> Result<(), ValueLimitError> {
+        match self {
+            Pattern::Pure { value, src, .. } => value.validate_limits(limits, *src),
+            Pattern::Stack(patterns)
+            | Pattern::Slowcat(patterns)
+            | Pattern::Group {
+                members: patterns, ..
+            } => {
+                for pattern in patterns {
+                    pattern.validate_stored_values(limits)?;
+                }
+                Ok(())
+            }
+            Pattern::Timecat(parts) => {
+                for (_, pattern) in parts {
+                    pattern.validate_stored_values(limits)?;
+                }
+                Ok(())
+            }
+            Pattern::Fast { inner, .. }
+            | Pattern::Shift { inner, .. }
+            | Pattern::Rev(inner)
+            | Pattern::Degrade { inner, .. }
+            | Pattern::Segment { inner, .. }
+            | Pattern::Range { inner, .. }
+            | Pattern::Named { inner, .. } => inner.validate_stored_values(limits),
+            Pattern::When {
+                then, otherwise, ..
+            } => {
+                then.validate_stored_values(limits)?;
+                otherwise.validate_stored_values(limits)
+            }
+            Pattern::Merge {
+                structure,
+                controls,
+            } => {
+                structure.validate_stored_values(limits)?;
+                controls.as_pattern().validate_stored_values(limits)
+            }
+            Pattern::Timeline(timeline) => {
+                for event in timeline.events() {
+                    event.value.validate_limits(limits, event.src)?;
+                }
+                Ok(())
+            }
+            Pattern::Silence | Pattern::Signal(_) => Ok(()),
+        }
+    }
+
+    fn value_cost(&self) -> ValueCost {
+        match self {
+            Pattern::Silence | Pattern::Signal(_) => ValueCost::leaf(),
+            Pattern::Pure { value, .. } => ValueCost::of(value),
+            Pattern::Stack(patterns)
+            | Pattern::Slowcat(patterns)
+            | Pattern::Group {
+                members: patterns, ..
+            } => patterns
+                .iter()
+                .map(Pattern::value_cost)
+                .fold(ValueCost::leaf(), ValueCost::max),
+            Pattern::Timecat(parts) => parts
+                .iter()
+                .map(|(_, pattern)| pattern.value_cost())
+                .fold(ValueCost::leaf(), ValueCost::max),
+            Pattern::Fast { inner, .. }
+            | Pattern::Shift { inner, .. }
+            | Pattern::Rev(inner)
+            | Pattern::Degrade { inner, .. }
+            | Pattern::Segment { inner, .. }
+            | Pattern::Range { inner, .. } => inner.value_cost(),
+            Pattern::Named { inner, .. } => {
+                let inner = inner.value_cost();
+                ValueCost {
+                    map_fields: inner.map_fields.max(1),
+                    curve_terms: inner.curve_terms,
+                }
+            }
+            Pattern::When {
+                then, otherwise, ..
+            } => then.value_cost().max(otherwise.value_cost()),
+            Pattern::Merge {
+                structure,
+                controls,
+            } => {
+                let structure = structure.value_cost();
+                let controls = controls.as_pattern().value_cost();
+                ValueCost {
+                    map_fields: structure.map_fields.max(1) + controls.map_fields,
+                    curve_terms: structure.curve_terms + controls.curve_terms,
+                }
+            }
+            Pattern::Timeline(timeline) => timeline
+                .events()
+                .iter()
+                .map(|event| ValueCost::of(&event.value))
+                .fold(ValueCost::leaf(), ValueCost::max),
+        }
+    }
+
     /// Keep events whose position hashes at or above `amount`.
     pub fn degrade_by(self, amount: f64, seed: u64) -> Pattern {
         Pattern::Degrade {
@@ -625,6 +890,81 @@ impl Pattern {
             })
             .collect();
         Pattern::Timecat(slots)
+    }
+}
+
+/// Return the first source location proving that `pattern` may emit a leaf.
+///
+/// `None` means every possible event is map-valued. Silence is vacuously
+/// map-producing. Merge is map-producing by construction because it always
+/// lifts its left event, even when the right side has no event at that onset.
+fn first_leaf_producer(pattern: &Pattern) -> Option<Option<SrcSpan>> {
+    match pattern {
+        Pattern::Silence | Pattern::Named { .. } | Pattern::Merge { .. } => None,
+        Pattern::Pure {
+            value: Value::Map(_),
+            ..
+        } => None,
+        Pattern::Pure {
+            value: Value::Leaf(_),
+            src,
+            ..
+        } => Some(*src),
+        Pattern::Signal(_) => Some(None),
+        Pattern::Stack(patterns)
+        | Pattern::Slowcat(patterns)
+        | Pattern::Group {
+            members: patterns, ..
+        } => patterns.iter().find_map(first_leaf_producer),
+        Pattern::Timecat(parts) => parts
+            .iter()
+            .find_map(|(_, pattern)| first_leaf_producer(pattern)),
+        Pattern::Fast { inner, .. }
+        | Pattern::Shift { inner, .. }
+        | Pattern::Rev(inner)
+        | Pattern::Degrade { inner, .. }
+        | Pattern::Segment { inner, .. }
+        | Pattern::Range { inner, .. } => first_leaf_producer(inner),
+        Pattern::When {
+            then, otherwise, ..
+        } => first_leaf_producer(then).or_else(|| first_leaf_producer(otherwise)),
+        Pattern::Timeline(timeline) => timeline
+            .events()
+            .iter()
+            .find_map(|event| matches!(event.value, Value::Leaf(_)).then_some(event.src)),
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ValueCost {
+    map_fields: usize,
+    curve_terms: usize,
+}
+
+impl ValueCost {
+    fn leaf() -> ValueCost {
+        ValueCost::default()
+    }
+
+    fn of(value: &Value) -> ValueCost {
+        match value {
+            Value::Leaf(crate::ControlValue::Curve(curve)) => ValueCost {
+                map_fields: 0,
+                curve_terms: curve.terms.len(),
+            },
+            Value::Leaf(_) => ValueCost::leaf(),
+            Value::Map(map) => ValueCost {
+                map_fields: map.len(),
+                curve_terms: map.curve_terms(),
+            },
+        }
+    }
+
+    fn max(self, other: ValueCost) -> ValueCost {
+        ValueCost {
+            map_fields: self.map_fields.max(other.map_fields),
+            curve_terms: self.curve_terms.max(other.curve_terms),
+        }
     }
 }
 

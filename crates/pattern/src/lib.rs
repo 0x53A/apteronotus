@@ -31,6 +31,7 @@
 //!   [`Event::has_onset`], so a window that bisects a note continues it rather
 //!   than restriking it.
 
+pub mod curve;
 pub mod event;
 pub mod frac;
 pub mod mini;
@@ -39,9 +40,15 @@ pub mod rand;
 pub mod span;
 pub mod timeline;
 
-pub use event::{Event, EventOrigin, GroupKey, GroupNode, GroupProvenance, SrcSpan, Value};
+pub use curve::{
+    Basis, Curve, CurveActivity, CurveClock, CurveError, CurveRange, CurveTerm, RangeProof,
+};
+pub use event::{
+    ControlField, ControlMap, ControlMapError, ControlValue, Event, EventOrigin, GroupKey,
+    GroupNode, GroupProvenance, PRIMARY_FIELD, SrcSpan, Value, ValueLimitError, ValueLimits,
+};
 pub use frac::Frac;
 pub use mini::{ParseError, parse, parse_at};
-pub use pattern::{Pattern, Signal, bjorklund};
+pub use pattern::{ControlPattern, ControlPatternError, Pattern, Signal, bjorklund};
 pub use span::Span;
 pub use timeline::{Timeline, TimelineError, TimelineEvent, TimelineId};

@@ -32,8 +32,10 @@
 //! wants, so lowering is a walk rather than a translation.
 
 use crate::control::ControlId;
+use crate::note::{Note, ParamValue, ParamValueError};
 use crate::routing::BusId;
-use apteronotus_pattern::SrcSpan;
+pub use apteronotus_pattern::{Basis, Curve, CurveClock, CurveTerm};
+use apteronotus_pattern::{CurveActivity, SrcSpan};
 
 /// Index of a node within one [`GraphTemplate`]. Meaningless anywhere else.
 pub type NodeId = usize;
@@ -112,6 +114,9 @@ pub struct ParamSpec {
     pub min: f64,
     pub max: f64,
     pub unit: Option<String>,
+    /// Maximum onset-relative horizon accepted from a `NoteSeconds` event
+    /// curve. `None` accepts scalars and `NotePhase` curves only.
+    pub max_curve_seconds: Option<f64>,
 }
 
 impl ParamSpec {
@@ -122,11 +127,17 @@ impl ParamSpec {
             min,
             max,
             unit: None,
+            max_curve_seconds: None,
         }
     }
 
     pub fn with_unit(mut self, unit: &str) -> ParamSpec {
         self.unit = Some(unit.to_string());
+        self
+    }
+
+    pub fn with_curve_horizon(mut self, seconds: f64) -> ParamSpec {
+        self.max_curve_seconds = Some(seconds);
         self
     }
 
@@ -271,126 +282,6 @@ impl core::fmt::Display for DelayRangeError {
 }
 
 impl core::error::Error for DelayRangeError {}
-
-/// A term of an automation curve.
-///
-/// Curves are a **basis sum**, `Σ cᵢ·basisᵢ(t − Tᵢ)`, not a breakpoint list.
-/// The reason is closure under the operations a composer actually performs:
-/// curves add, scale and shift, so superposition works, where two breakpoint
-/// lists cannot be added without merging their time grids. An intro gate is
-/// literally `step(0) − step(T_end)`.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Basis {
-    /// 0 before `delay`, 1 after.
-    Step,
-    /// 0, then rises linearly to 1 over `length`, then holds.
-    Ramp,
-    /// 1 at `delay`, decaying exponentially with time constant `length`,
-    /// scaled so it reaches ~5% at `length` (the t60-ish convention the songs
-    /// assume when they write `decay(ms(26))`).
-    Decay,
-    /// One period of a unipolar sine of period `length`, continuing to
-    /// oscillate.
-    Sine,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct CurveTerm {
-    pub basis: Basis,
-    /// Multiplier `cᵢ`. Negative is how a gate closes.
-    pub coefficient: f64,
-    /// `Tᵢ`, in seconds on this curve's clock.
-    pub delay: f64,
-    /// Time constant / period / rise time, in seconds. Ignored by `Step`.
-    pub length: f64,
-}
-
-/// A sum of basis terms, evaluated at control rate.
-///
-/// The clock is **not** stored here, and that is deliberate: a curve has three
-/// placements — inside a voice (t = note onset), on a pattern (sampled once per
-/// onset, t = transport) and on a bus (persistent, continuous) — and placement
-/// stays syntactically visible rather than inferred. Only the first exists in
-/// this crate today, so everything here reads a note clock; the other two
-/// arrive with buses.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Curve {
-    pub terms: Vec<CurveTerm>,
-    pub offset: f64,
-}
-
-impl Curve {
-    pub fn constant(x: f64) -> Curve {
-        Curve {
-            terms: Vec::new(),
-            offset: x,
-        }
-    }
-
-    pub fn term(mut self, basis: Basis, coefficient: f64, delay: f64, length: f64) -> Curve {
-        self.terms.push(CurveTerm {
-            basis,
-            coefficient,
-            delay,
-            length,
-        });
-        self
-    }
-
-    /// `decay(t)` — the shape `poles.eod` fires into everything.
-    pub fn decay(length: f64) -> Curve {
-        Curve::default().term(Basis::Decay, 1.0, 0.0, length)
-    }
-
-    /// `window(a, b)` — on at `a`, off at `b`. Two steps, which is the whole
-    /// argument for the basis form in one line.
-    pub fn window(a: f64, b: f64) -> Curve {
-        Curve::default()
-            .term(Basis::Step, 1.0, a, 0.0)
-            .term(Basis::Step, -1.0, b, 0.0)
-    }
-
-    /// Value at `t` seconds on this curve's clock.
-    ///
-    /// Pure in `t`, which is the point: an LFO or an envelope derived from a
-    /// clock has no phase to migrate across a live edit.
-    pub fn at(&self, t: f64) -> f64 {
-        let mut sum = self.offset;
-        for term in &self.terms {
-            let u = t - term.delay;
-            if u < 0.0 {
-                continue;
-            }
-            let v = match term.basis {
-                Basis::Step => 1.0,
-                Basis::Ramp => {
-                    if term.length <= 0.0 {
-                        1.0
-                    } else {
-                        (u / term.length).min(1.0)
-                    }
-                }
-                Basis::Decay => {
-                    if term.length <= 0.0 {
-                        0.0
-                    } else {
-                        // 3 time constants to ~5%, matching t_se ≈ 3/(ζω₀).
-                        (-3.0 * u / term.length).exp()
-                    }
-                }
-                Basis::Sine => {
-                    if term.length <= 0.0 {
-                        0.0
-                    } else {
-                        0.5 - 0.5 * (core::f64::consts::TAU * u / term.length).cos()
-                    }
-                }
-            };
-            sum += term.coefficient * v;
-        }
-        sum
-    }
-}
 
 /// An attack-decay-sustain-release envelope keyed to a **known** note length.
 ///
@@ -558,20 +449,71 @@ impl Op {
         }
     }
 
-    /// How long this node keeps producing sound after its input stops, in
-    /// seconds. Summed along a path it tells the scheduler how long to let a
-    /// voice ring before releasing it — a bell with a 2.6 s decay must not be
-    /// cut off at its note length.
-    pub fn tail(&self) -> f64 {
+    /// Whether input `port` carries activity whose lifetime reaches the output.
+    ///
+    /// Filter frequency and Q inputs steer activity but do not create it, so a
+    /// long cutoff curve must not retain a voice. Arithmetic conservatively
+    /// treats both inputs as activity-bearing. In particular `Mul` cannot use
+    /// the tempting minimum rule: `audio * dc(0.5)` would otherwise inherit
+    /// the constant's zero metadata and truncate every voice. Over-retaining a
+    /// delayed signal multiplied by a short envelope is the safe direction.
+    pub fn activity_input(&self, port: usize) -> bool {
+        match self {
+            Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Moog => port == 0,
+            Op::Shape { .. } | Op::DcBlock | Op::Delay(_) | Op::Neg | Op::Pan => port == 0,
+            Op::Add | Op::Sub | Op::Mul | Op::Div => port < 2,
+            Op::Sine
+            | Op::Saw
+            | Op::Pulse
+            | Op::Noise
+            | Op::Impulse
+            | Op::InitRandom { .. }
+            | Op::Adsr(_)
+            | Op::Curve(_) => false,
+        }
+    }
+
+    /// Stateful response after the activity driving this node ends.
+    fn response_tail(&self) -> f64 {
         match self {
             Op::Delay(range) => range.max_seconds(),
-            Op::Adsr(a) => a.tail(),
-            Op::Curve(c) => c
-                .terms
-                .iter()
-                .map(|t| t.delay + t.length)
-                .fold(0.0, f64::max),
             _ => 0.0,
+        }
+    }
+}
+
+/// The two independent ways a graph may remain active past onset.
+///
+/// `gate_tail` is relative to scheduled release. `absolute_horizon` is an
+/// onset-relative time supplied by a finite note-clock source. Keeping them
+/// separate prevents a response tail on one parallel branch from being added
+/// to a horizon on another.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Lifetime {
+    pub gate_tail: f64,
+    pub absolute_horizon: f64,
+}
+
+impl Lifetime {
+    pub fn end_after_onset(self, gate: f64) -> f64 {
+        (gate + self.gate_tail).max(self.absolute_horizon)
+    }
+
+    fn parallel(self, other: Lifetime) -> Lifetime {
+        Lifetime {
+            gate_tail: self.gate_tail.max(other.gate_tail),
+            absolute_horizon: self.absolute_horizon.max(other.absolute_horizon),
+        }
+    }
+
+    fn through_response(self, seconds: f64) -> Lifetime {
+        Lifetime {
+            gate_tail: self.gate_tail + seconds,
+            absolute_horizon: if self.absolute_horizon > 0.0 {
+                self.absolute_horizon + seconds
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -745,33 +687,60 @@ impl GraphTemplate {
         Ok(cost)
     }
 
-    /// The longest tail on any path to an output, in seconds.
+    /// Gate-relative response and onset-relative activity reaching an output.
     ///
-    /// Accumulated **along paths**, not maximised over nodes. A one-second
-    /// delay feeding a five-second reverb needs six, and a per-node maximum
-    /// would say five and cut the tail off. That is the failure worth guarding
-    /// against: holding a dead voice an extra second is inaudible, truncating a
-    /// bell is not.
-    ///
-    /// Valid only on a template that passes [`validate`](Self::validate),
-    /// which is what guarantees nodes reference only earlier ones and so lets
-    /// one forward pass find the longest path. It is still an upper bound
-    /// rather than an exact figure — series composition of tails is additive
-    /// only in the worst case — and it will need explicit per-op composition
-    /// rules once feedback exists, since a feedback path has no finite longest
-    /// path at all.
-    pub fn tail(&self) -> f64 {
-        let mut through = vec![0.0f64; self.nodes.len()];
+    /// Response tails add in series. At a parallel join the two components are
+    /// maximised independently, so a delayed gate-bound branch cannot lend its
+    /// delay to an unrelated long envelope. Feedback will require an explicit
+    /// lifetime rule before it can enter this acyclic representation.
+    pub fn lifetime(&self) -> Lifetime {
+        self.lifetime_impl(None)
+            .expect("static template lifetime does not bind parameter values")
+    }
+
+    /// Lifetime for one concrete event, including curve-valued parameters.
+    pub fn lifetime_for(&self, note: &Note) -> Result<Lifetime, ParamValueError> {
+        self.lifetime_impl(Some(note))
+    }
+
+    fn lifetime_impl(&self, note: Option<&Note>) -> Result<Lifetime, ParamValueError> {
+        let mut through = vec![Lifetime::default(); self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
             let upstream = node
                 .inputs
                 .iter()
-                .map(|input| match input.source {
-                    Source::Port { node, .. } => through.get(node).copied().unwrap_or(0.0),
-                    _ => 0.0,
+                .enumerate()
+                .filter(|(port, _)| node.op.activity_input(*port))
+                .map(|(_, input)| match input.source {
+                    Source::Port { node, .. } => Ok(through.get(node).copied().unwrap_or_default()),
+                    source => self.source_lifetime(source, note),
                 })
-                .fold(0.0, f64::max);
-            through[id] = upstream + node.tail.max(node.op.tail());
+                .try_fold(Lifetime::default(), |lifetime, source| {
+                    source.map(|source| lifetime.parallel(source))
+                })?;
+            let intrinsic = match &node.op {
+                Op::Adsr(adsr) => Lifetime {
+                    gate_tail: adsr.tail(),
+                    absolute_horizon: 0.0,
+                },
+                Op::Curve(curve) => match curve.activity() {
+                    Ok(CurveActivity::Finite(horizon))
+                        if curve.clock == CurveClock::NoteSeconds =>
+                    {
+                        Lifetime {
+                            gate_tail: 0.0,
+                            absolute_horizon: horizon,
+                        }
+                    }
+                    Ok(CurveActivity::Finite(_)) => Lifetime {
+                        gate_tail: 0.0,
+                        absolute_horizon: 0.0,
+                    },
+                    Ok(CurveActivity::GateBounded) | Err(_) => Lifetime::default(),
+                },
+                _ => upstream,
+            };
+            through[id] = intrinsic.through_response(node.tail.max(node.op.response_tail()));
         }
         self.outputs
             .iter()
@@ -781,10 +750,59 @@ impl GraphTemplate {
                     .flat_map(|send| send.outputs.iter().map(|input| &input.source)),
             )
             .map(|source| match source {
-                Source::Port { node, .. } => through.get(*node).copied().unwrap_or(0.0),
-                _ => 0.0,
+                Source::Port { node, .. } => Ok(through.get(*node).copied().unwrap_or_default()),
+                source => self.source_lifetime(*source, note),
             })
-            .fold(0.0, f64::max)
+            .try_fold(Lifetime::default(), |lifetime, source| {
+                source.map(|source| lifetime.parallel(source))
+            })
+    }
+
+    fn source_lifetime(
+        &self,
+        source: Source,
+        note: Option<&Note>,
+    ) -> Result<Lifetime, ParamValueError> {
+        let Source::Param(id) = source else {
+            return Ok(Lifetime::default());
+        };
+        let Some(note) = note else {
+            let absolute_horizon = match id {
+                ParamId::Declared(index) => self
+                    .params
+                    .get(index)
+                    .and_then(|spec| spec.max_curve_seconds)
+                    .unwrap_or(0.0),
+                ParamId::Implicit(_) => 0.0,
+            };
+            return Ok(Lifetime {
+                gate_tail: 0.0,
+                absolute_horizon,
+            });
+        };
+        match note.value(id, self)? {
+            ParamValue::Curve(curve) => match curve
+                .activity()
+                .map_err(ParamValueError::InvalidCurve)?
+            {
+                CurveActivity::Finite(horizon) if curve.clock == CurveClock::NoteSeconds => {
+                    Ok(Lifetime {
+                        gate_tail: 0.0,
+                        absolute_horizon: horizon,
+                    })
+                }
+                CurveActivity::Finite(_) | CurveActivity::GateBounded => Ok(Lifetime::default()),
+            },
+            ParamValue::Number(_) => Ok(Lifetime::default()),
+        }
+    }
+
+    /// Compatibility view used by publication budgets that do not know a
+    /// particular note gate. It is the larger lifetime component, not a claim
+    /// that both components compose as one additive tail.
+    pub fn tail(&self) -> f64 {
+        let lifetime = self.lifetime();
+        lifetime.gate_tail.max(lifetime.absolute_horizon)
     }
 
     /// Check every invariant the lowering relies on.
@@ -798,16 +816,38 @@ impl GraphTemplate {
             return Err(TemplateError::NoOutputs);
         }
         for (param, spec) in self.params.iter().enumerate() {
+            if spec.name.is_empty()
+                || spec.name == apteronotus_pattern::PRIMARY_FIELD
+                || Implicit::ALL
+                    .iter()
+                    .any(|implicit| implicit.name() == spec.name)
+            {
+                return Err(TemplateError::InvalidParamName { param });
+            }
+            if self.params[..param]
+                .iter()
+                .any(|earlier| earlier.name == spec.name)
+            {
+                return Err(TemplateError::DuplicateParamName { param });
+            }
             if !spec.min.is_finite()
                 || !spec.max.is_finite()
                 || !spec.default.is_finite()
                 || spec.min > spec.max
                 || !(spec.min..=spec.max).contains(&spec.default)
+                || spec
+                    .max_curve_seconds
+                    .is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0)
             {
                 return Err(TemplateError::InvalidParamRange { param });
             }
         }
         for (id, node) in self.nodes.iter().enumerate() {
+            if let Op::Curve(curve) = &node.op {
+                curve
+                    .validate()
+                    .map_err(|source| TemplateError::InvalidCurve { node: id, source })?;
+            }
             if !node.tail.is_finite() || node.tail < 0.0 {
                 return Err(TemplateError::InvalidTail {
                     node: id,
@@ -924,6 +964,12 @@ pub enum TemplateError {
     InvalidParamRange {
         param: usize,
     },
+    InvalidParamName {
+        param: usize,
+    },
+    DuplicateParamName {
+        param: usize,
+    },
     NonFiniteConstant,
     InvalidTail {
         node: NodeId,
@@ -938,6 +984,10 @@ pub enum TemplateError {
     DynamicInitRandom {
         node: NodeId,
         port: usize,
+    },
+    InvalidCurve {
+        node: NodeId,
+        source: apteronotus_pattern::CurveError,
     },
 }
 
@@ -964,6 +1014,12 @@ impl core::fmt::Display for TemplateError {
             TemplateError::InvalidParamRange { param } => {
                 write!(f, "parameter {param} has an invalid range or default")
             }
+            TemplateError::InvalidParamName { param } => {
+                write!(f, "parameter {param} has an empty or reserved name")
+            }
+            TemplateError::DuplicateParamName { param } => {
+                write!(f, "parameter {param} duplicates an earlier name")
+            }
             TemplateError::NonFiniteConstant => write!(f, "constant is not finite"),
             TemplateError::InvalidTail { node, seconds } => {
                 write!(f, "node {node} has invalid tail {seconds} seconds")
@@ -978,6 +1034,9 @@ impl core::fmt::Display for TemplateError {
                 f,
                 "node {node} init-random input {port} is not fixed at voice instantiation"
             ),
+            TemplateError::InvalidCurve { node, source } => {
+                write!(f, "node {node} has an invalid curve: {source}")
+            }
         }
     }
 }

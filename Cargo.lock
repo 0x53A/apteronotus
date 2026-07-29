@@ -96,7 +96,17 @@ dependencies = [
  "apteronotus-live",
  "apteronotus-lua",
  "apteronotus-pattern",
+ "console_error_panic_hook",
  "eframe",
+ "egui_web_component",
+ "js-sys",
+ "log",
+ "rust_web_component",
+ "rust_web_component_macro",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -396,6 +406,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -484,6 +504,8 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "windows",
  "windows-core",
@@ -703,6 +725,20 @@ dependencies = [
  "memoffset",
  "profiling",
  "winit",
+]
+
+[[package]]
+name = "egui_web_component"
+version = "0.1.0"
+source = "git+https://github.com/0x53A/web-component-rs.git?rev=dd67eb777ad7af07d7e86888dea2731c0afe048d#dd67eb777ad7af07d7e86888dea2731c0afe048d"
+dependencies = [
+ "eframe",
+ "egui",
+ "js-sys",
+ "log",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -2360,6 +2396,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_web_component"
+version = "0.1.0"
+source = "git+https://github.com/0x53A/web-component-rs.git?rev=dd67eb777ad7af07d7e86888dea2731c0afe048d#dd67eb777ad7af07d7e86888dea2731c0afe048d"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "rust_web_component_macro"
+version = "0.1.0"
+source = "git+https://github.com/0x53A/web-component-rs.git?rev=dd67eb777ad7af07d7e86888dea2731c0afe048d#dd67eb777ad7af07d7e86888dea2731c0afe048d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "venial",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2889,6 +2947,16 @@ dependencies = [
  "glifo",
  "hashbrown 0.17.1",
  "vello_common",
+]
+
+[[package]]
+name = "venial"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a42528baceab6c7784446df2a10f4185078c39bf73dc614f154353f1a6b1229"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]

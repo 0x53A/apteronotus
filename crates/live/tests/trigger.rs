@@ -8,7 +8,7 @@ fn a_live_trigger_is_not_a_pattern_until_recorded() {
         .record(ExternalTrigger::new(
             Frac::new(1, 4),
             Frac::new(1, 8),
-            Value::S("hit".into()),
+            Value::text("hit"),
         ))
         .unwrap();
     let timeline = recorder.finish(TimelineId::new(4), Span::cycle(0)).unwrap();
@@ -26,7 +26,7 @@ fn simultaneous_arrivals_keep_captured_ordinals_and_distinct_seeds() {
             .record(ExternalTrigger::new(
                 Frac::new(1, 3),
                 Frac::new(1, 6),
-                Value::S(value.into()),
+                Value::text(value),
             ))
             .unwrap();
     }

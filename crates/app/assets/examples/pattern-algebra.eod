@@ -1,0 +1,31 @@
+-- Mini-notation and the pattern algebra.
+--
+-- `pattern(...)` parses the notation; everything after it is an ordinary
+-- transform piped in with `>>`. Time is rational throughout, so a triplet
+-- really is a third of a cycle and events that should abut still abut after
+-- any number of operations.
+
+local bell = voice {
+  graph = function(n)
+    local env = adsr(ms(2), ms(260), 0.0, ms(160))
+    return (sine(n.hz) + sine(n.hz * 2.01) * 0.35) * env * n.velocity * 0.10
+        >> pan(n.pan)
+  end,
+}
+
+local bass = voice {
+  graph = function(n)
+    local env = adsr(ms(4), ms(120), 0.4, ms(200))
+    return (saw(n.hz) | dc(320) | dc(0.8)) >> lowpass()
+        >> mul(env * n.velocity * 0.16)
+        >> pan(0)
+  end,
+}
+
+-- `rev` every fourth cycle. The transform is applied while the tree is built,
+-- so the pattern stays plain data — inspectable, serialisable, and identical
+-- every time it is queried.
+play(bell, pattern("c5 e5 g5 b5") >> every(4, rev))
+
+-- Half speed, and a quarter-bar late.
+play(bass, pattern("c2 g2") >> slow(2) >> shift(bars(0.25)))

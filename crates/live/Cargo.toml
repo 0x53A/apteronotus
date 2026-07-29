@@ -8,8 +8,16 @@ license.workspace = true
 apteronotus-music = { version = "0.1.0", path = "../music" }
 apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
 apteronotus-synth = { version = "0.1.0", path = "../synth" }
-cpal = "0.18.1"
 fundsp = { version = "0.23.0", default-features = false, features = ["std"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# CPAL deliberately leaves browser integration behind an opt-in feature. With
+# no feature it still type-checks on wasm, but exposes only the unsupported
+# fallback host, whose default output device is always absent.
+cpal = { version = "0.18.1", features = ["wasm-bindgen"] }
 
 [dev-dependencies]
 # Keeps the production runtime independent of the language while allowing the

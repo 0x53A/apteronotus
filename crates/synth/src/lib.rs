@@ -40,13 +40,13 @@ pub use builder::{GraphBuilder, n};
 pub use control::{ControlError, ControlId, ControlLayout, ControlSpec};
 pub use instrument::{InstrumentLifetime, PatchError, PatchTemplate};
 pub use lower::{
-    ControlStore, LowerError, instantiate, instantiate_patch, instantiate_routed,
-    instantiate_routed_with_controls, instantiate_with_controls,
+    ControlStore, LowerError, instantiate, instantiate_patch, instantiate_patch_routed,
+    instantiate_routed, instantiate_routed_with_controls, instantiate_with_controls,
 };
-pub use note::Note;
+pub use note::{Note, ParamValue, ParamValueError};
 pub use routing::{BusId, BusLayout, EventRouting, EventSend, RoutingError};
 pub use template::{
-    Adsr, Basis, Curve, CurveTerm, DelayRange, DelayRangeError, GraphCost, GraphLimitError,
-    GraphLimits, GraphSend, GraphTemplate, Implicit, Input, Node, NodeId, Op, ParamId, ParamSpec,
-    ShapeKind, Source, TemplateError,
+    Adsr, Basis, Curve, CurveClock, CurveTerm, DelayRange, DelayRangeError, GraphCost,
+    GraphLimitError, GraphLimits, GraphSend, GraphTemplate, Implicit, Input, Lifetime, Node,
+    NodeId, Op, ParamId, ParamSpec, ShapeKind, Source, TemplateError,
 };

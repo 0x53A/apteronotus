@@ -13,6 +13,7 @@ mod source;
 pub use error::EvalError;
 pub use program::{PatchId, Program, ProgramError, Track, VoiceId};
 
+use apteronotus_pattern::ValueLimits;
 use apteronotus_synth::GraphLimits;
 use bindings::{BuildState, PRELUDE, install};
 use piccolo::{Closure, Executor, Fuel, Lua};
@@ -38,6 +39,8 @@ pub struct Limits {
     pub graph_publication: GraphLimits,
     /// Pattern AST nodes allocated across parsed values and stored tracks.
     pub pattern_nodes: usize,
+    /// Maximum map width and curve terms in one pattern event.
+    pub pattern_values: ValueLimits,
     pub voices: usize,
     pub patches: usize,
     pub controls: usize,
@@ -61,6 +64,7 @@ impl Default for Limits {
                 tail_seconds: 600.0,
             },
             pattern_nodes: 200_000,
+            pattern_values: ValueLimits::default(),
             voices: 256,
             patches: 256,
             controls: 2_048,
@@ -163,7 +167,7 @@ impl Evaluator {
             std::mem::take(&mut state.program)
         };
         program
-            .validate(self.limits.graph_publication)
+            .validate_with_value_limits(self.limits.graph_publication, self.limits.pattern_values)
             .map_err(|error| EvalError::Binding(error.to_string()))?;
         Ok(program)
     }

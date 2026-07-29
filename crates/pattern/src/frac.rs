@@ -48,17 +48,75 @@ impl Frac {
 
     /// Nearest rational to `x` with denominator at most `limit`.
     pub fn approx(x: f64, limit: i64) -> Frac {
-        let mut best = Frac::int(x.round() as i64);
-        let mut best_err = (best.to_f64() - x).abs();
-        for d in 1..=limit {
-            let n = (x * d as f64).round() as i64;
-            let err = (n as f64 / d as f64 - x).abs();
-            if err < best_err {
-                best = Frac::new(n, d);
-                best_err = err;
-            }
+        let rounded = x.round() as i64;
+        // Preserve the old total behavior outside the useful approximation
+        // domain. All language callers reject non-finite values before here.
+        if !x.is_finite() || limit < 1 {
+            return Frac::int(rounded);
         }
-        best
+
+        let negative = x.is_sign_negative();
+        let magnitude = x.abs();
+        if magnitude > i64::MAX as f64 {
+            return Frac::int(rounded);
+        }
+        // The historical contract compares errors after f64 division and keeps
+        // the first (smallest-denominator) tie. At very large magnitudes, two
+        // distinct bounded rationals can round to the same f64. Continued
+        // fractions cannot observe that artificial tie, so retain the scan
+        // only in the range where f64 spacing is wide enough for it to occur.
+        if denominator_rounding_can_alias(magnitude, limit) {
+            return denominator_scan(x, limit);
+        }
+        let x = magnitude;
+
+        // Consecutive continued-fraction convergents. Once the next convergent
+        // exceeds the denominator budget, the optimum is either the previous
+        // convergent or the furthest admissible semiconvergent between them.
+        // This is logarithmic in `limit`; the former implementation inspected
+        // every denominator independently.
+        let limit = limit as i128;
+        let (mut p0, mut q0) = (0_i128, 1_i128);
+        let (mut p1, mut q1) = (1_i128, 0_i128);
+        let mut remainder = x;
+        let max_numerator = i64::MAX as i128;
+        loop {
+            let coefficient = remainder.floor() as i128;
+            let denominator_scale = if q1 == 0 {
+                i128::MAX
+            } else {
+                (limit - q0) / q1
+            };
+            let numerator_scale = if p1 == 0 {
+                i128::MAX
+            } else {
+                (max_numerator - p0) / p1
+            };
+            if coefficient > denominator_scale.min(numerator_scale) {
+                break;
+            }
+            let q2 = q0 + coefficient * q1;
+            let p2 = p0 + coefficient * p1;
+            (p0, q0, p1, q1) = (p1, q1, p2, q2);
+
+            let fractional = remainder - coefficient as f64;
+            if fractional == 0.0 {
+                return signed_frac(p1, q1, negative);
+            }
+            remainder = fractional.recip();
+        }
+
+        let denominator_scale = (limit - q0) / q1;
+        let numerator_scale = if p1 == 0 {
+            i128::MAX
+        } else {
+            (max_numerator - p0) / p1
+        };
+        let scale = denominator_scale.min(numerator_scale);
+        let semiconvergent = (p0 + scale * p1, q0 + scale * q1);
+        let convergent = (p1, q1);
+        let best = closer_candidate(x, semiconvergent, convergent);
+        signed_frac(best.0, best.1, negative)
     }
 
     /// Largest integer not greater than `self`. Tidal calls this the *sam*.
@@ -95,6 +153,52 @@ impl Frac {
     pub fn is_negative(self) -> bool {
         self.n < 0
     }
+}
+
+fn closer_candidate(x: f64, left: (i128, i128), right: (i128, i128)) -> (i128, i128) {
+    let left_error = (left.0 as f64 / left.1 as f64 - x).abs();
+    let right_error = (right.0 as f64 / right.1 as f64 - x).abs();
+    match left_error.total_cmp(&right_error) {
+        Ordering::Less => left,
+        Ordering::Greater => right,
+        Ordering::Equal => {
+            // The exhaustive implementation visited denominators in ascending
+            // order. If both candidates occur at the same denominator, f64
+            // round() breaks a midpoint away from zero.
+            if left.1 < right.1 || (left.1 == right.1 && left.0 > right.0) {
+                left
+            } else {
+                right
+            }
+        }
+    }
+}
+
+fn signed_frac(n: i128, d: i128, negative: bool) -> Frac {
+    reduce(if negative { -n } else { n }, d)
+}
+
+fn denominator_rounding_can_alias(x: f64, limit: i64) -> bool {
+    if limit <= 1 {
+        return false;
+    }
+    let spacing = f64::from_bits(x.to_bits() + 1) - x;
+    let closest_distinct_rationals = 1.0 / (limit as f64 * (limit.saturating_sub(1)) as f64);
+    spacing * 2.0 >= closest_distinct_rationals
+}
+
+fn denominator_scan(x: f64, limit: i64) -> Frac {
+    let mut best = Frac::int(x.round() as i64);
+    let mut best_err = (best.to_f64() - x).abs();
+    for d in 1..=limit {
+        let n = (x * d as f64).round() as i64;
+        let err = (n as f64 / d as f64 - x).abs();
+        if err < best_err {
+            best = Frac::new(n, d);
+            best_err = err;
+        }
+    }
+    best
 }
 
 impl Ord for Frac {
@@ -211,6 +315,20 @@ impl fmt::Display for Frac {
 mod tests {
     use super::*;
 
+    fn exhaustive_approx(x: f64, limit: i64) -> Frac {
+        let mut best = Frac::int(x.round() as i64);
+        let mut best_err = (best.to_f64() - x).abs();
+        for d in 1..=limit {
+            let n = (x * d as f64).round() as i64;
+            let err = (n as f64 / d as f64 - x).abs();
+            if err < best_err {
+                best = Frac::new(n, d);
+                best_err = err;
+            }
+        }
+        best
+    }
+
     #[test]
     fn thirds_are_exact() {
         let third = Frac::new(1, 3);
@@ -264,5 +382,50 @@ mod tests {
     fn approx_finds_simple_ratios() {
         assert_eq!(Frac::approx(0.333_333_333, 16), Frac::new(1, 3));
         assert_eq!(Frac::approx(0.75, 16), Frac::new(3, 4));
+    }
+
+    #[test]
+    fn continued_fraction_approx_matches_the_exhaustive_definition() {
+        for limit in 1..=64 {
+            for numerator in -256..=256 {
+                let x = numerator as f64 / 64.0;
+                assert_eq!(
+                    Frac::approx(x, limit),
+                    exhaustive_approx(x, limit),
+                    "x={x}, limit={limit}"
+                );
+            }
+        }
+        for x in [
+            9_223_372_036_854.775,
+            -9_223_372_036_854.775,
+            1_000_000_000_000.125,
+        ] {
+            for limit in [1, 2, 10, 1_000, 1_000_000] {
+                assert_eq!(
+                    Frac::approx(x, limit),
+                    exhaustive_approx(x, limit),
+                    "x={x}, limit={limit}"
+                );
+            }
+        }
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..20_000 {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut bits = state;
+            bits = (bits ^ (bits >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            bits = (bits ^ (bits >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            bits ^= bits >> 31;
+            let unit = (bits >> 11) as f64 / (1_u64 << 53) as f64;
+            let scale = [1.0, 1_000.0, 1_000_000.0][(bits % 3) as usize];
+            let x = (unit * 2.0 - 1.0) * 64.0 * scale;
+            let limit = (bits % 1_000 + 1) as i64;
+            assert_eq!(
+                Frac::approx(x, limit),
+                exhaustive_approx(x, limit),
+                "x={x}, limit={limit}"
+            );
+        }
     }
 }

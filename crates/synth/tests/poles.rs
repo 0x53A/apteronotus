@@ -3,7 +3,7 @@
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
 use apteronotus_synth::stdlib::{RingError, ring};
 use apteronotus_synth::{
-    Curve, GraphBuilder, GraphTemplate, Note, Op, ParamSpec, ShapeKind, instantiate, n,
+    Curve, CurveClock, GraphBuilder, GraphTemplate, Note, Op, ParamSpec, ShapeKind, instantiate, n,
 };
 
 const SR: f64 = 48_000.0;
@@ -60,7 +60,7 @@ fn tom() -> GraphTemplate {
     let mut graph = GraphBuilder::new();
     let decay = graph.param(ParamSpec::new("ring", 0.05, 1.5, 0.34).with_unit("s"));
     let bend = graph.param(ParamSpec::new("bend", 0.0, 2.0, 0.7));
-    let pitch_drop = graph.curve(Curve::decay(0.045));
+    let pitch_drop = graph.curve(Curve::decay(CurveClock::NoteSeconds, 0.045));
     let pitch_drop = graph.mul(bend, pitch_drop);
     let pitch_drop = graph.add(1.0, pitch_drop);
     let swept = graph.mul(n::HZ, pitch_drop);
@@ -75,7 +75,7 @@ fn tom() -> GraphTemplate {
 fn cymbal() -> GraphTemplate {
     let mut graph = GraphBuilder::new();
     let noise = graph.noise();
-    let burst = graph.curve(Curve::decay(0.004));
+    let burst = graph.curve(Curve::decay(CurveClock::NoteSeconds, 0.004));
     let strike = graph.mul(noise, burst);
     let mut modes = Vec::new();
     for hz in [2_810.0, 3_730.0, 4_520.0, 5_890.0, 7_200.0, 9_430.0] {
@@ -141,7 +141,10 @@ fn symbolic_decay_uses_declared_parameter_bounds() {
 fn runtime_signals_cannot_secretly_decide_voice_lifetime() {
     let mut graph = GraphBuilder::new();
     let strike = graph.impulse();
-    let decay = graph.curve(apteronotus_synth::Curve::decay(0.2));
+    let decay = graph.curve(apteronotus_synth::Curve::decay(
+        CurveClock::NoteSeconds,
+        0.2,
+    ));
     assert_eq!(
         ring(&mut graph, strike, 587.0, decay),
         Err(RingError::UnboundedDecay)
@@ -267,7 +270,9 @@ fn the_poles_tom_proves_a_control_signal_can_sweep_a_filter_port() {
     );
     // The control sweep can still affect the resonator for 45 ms, after which
     // the longest allowed ring contributes its own 1.5 seconds.
-    assert_eq!(voice.tail(), 1.545);
+    // The pitch-drop curve steers the filter cutoff port; it does not carry
+    // audio activity and therefore must not extend the resonator's lifetime.
+    assert_eq!(voice.tail(), 1.5);
 
     let note = Note::new(98.0).duration(0.2);
     let mut default = instantiate(&voice, &note).unwrap();

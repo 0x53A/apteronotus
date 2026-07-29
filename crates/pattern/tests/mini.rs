@@ -218,6 +218,22 @@ fn errors_carry_a_position() {
     }
 }
 
+#[test]
+fn supersaws_score_notation_remains_parseable() {
+    let song = include_str!("../../../songs/supersaws.eod");
+    for source in [
+        "g#2@3 g#2@2 g#2!4 g#2@2 g#2",
+        "[0.08 0.08 0.14]*16/3",
+        "200@3 200@2 300!4 1000@2 200",
+    ] {
+        assert!(
+            song.contains(source),
+            "the guard must follow the notation actually shipped in supersaws.eod"
+        );
+        mini::parse(source).unwrap_or_else(|error| panic!("{source:?}: {error}"));
+    }
+}
+
 // ---------------------------------------------------------------- robustness
 
 /// Every diagnostic must be sliceable. An editor paints these ranges, and a

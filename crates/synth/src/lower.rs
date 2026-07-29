@@ -15,7 +15,7 @@
 
 use crate::control::{ControlError, ControlId, ControlLayout};
 use crate::instrument::PatchTemplate;
-use crate::note::Note;
+use crate::note::{Note, ParamValue, ParamValueError};
 use crate::routing::{BusLayout, EventRouting, RoutingError};
 use crate::template::{GraphTemplate, Op, ShapeKind, Source, TemplateError};
 use fundsp::net::{Net, NodeId as FundspNode};
@@ -82,6 +82,26 @@ pub fn instantiate_patch(
     controls: &ControlStore,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
     instantiate_with_controls(patch.graph(), &Note::new(440.0), controls)
+}
+
+/// Instantiate one persistent patch into the flattened main/bus layout.
+///
+/// Zero-input patches become autonomous persistent sources. A patch whose
+/// explicit inputs are the full flattened layout can process routed stems.
+/// The live host decides how those two forms compose; lowering only makes the
+/// lane order and graph sends concrete.
+pub fn instantiate_patch_routed(
+    patch: &PatchTemplate,
+    layout: &BusLayout,
+    controls: &ControlStore,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_routed_impl(
+        patch.graph(),
+        &Note::new(440.0),
+        layout,
+        &EventRouting::new(),
+        Some(controls),
+    )
 }
 
 /// Build one voice whose outputs are the flattened main and bus stems.
@@ -193,7 +213,7 @@ fn instantiate_to_lanes(
     // feedback needs an explicit graph representation before it is legal.)
     let mut nodes: Vec<FundspNode> = Vec::with_capacity(template.nodes.len());
     for node in &template.nodes {
-        nodes.push(net.push(unit_for(&node.op, note)));
+        nodes.push(net.push(unit_for(&node.op, note)?));
     }
 
     // Lifted scalars, keyed by bit pattern. A voice typically reuses `0`, `1`
@@ -206,6 +226,7 @@ fn instantiate_to_lanes(
         nodes: &nodes,
         net: &mut net,
         constants: HashMap::new(),
+        param_nodes: HashMap::new(),
         control_nodes: HashMap::new(),
         input_nodes: HashMap::new(),
     };
@@ -261,9 +282,11 @@ pub enum LowerError {
     Template(TemplateError),
     Routing(RoutingError),
     Control(ControlError),
+    ParamValue(ParamValueError),
     /// A graph-local send cannot be discarded by the main-only lowering path.
     LayoutRequired,
     ControlStoreRequired,
+    InvalidDuration(f64),
 }
 
 impl From<TemplateError> for LowerError {
@@ -284,12 +307,19 @@ impl From<ControlError> for LowerError {
     }
 }
 
+impl From<ParamValueError> for LowerError {
+    fn from(error: ParamValueError) -> LowerError {
+        LowerError::ParamValue(error)
+    }
+}
+
 impl core::fmt::Display for LowerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             LowerError::Template(error) => error.fmt(f),
             LowerError::Routing(error) => error.fmt(f),
             LowerError::Control(error) => error.fmt(f),
+            LowerError::ParamValue(error) => error.fmt(f),
             LowerError::LayoutRequired => {
                 write!(f, "graph has sends and requires a program bus layout")
             }
@@ -297,6 +327,12 @@ impl core::fmt::Display for LowerError {
                 write!(
                     f,
                     "graph has writable controls and requires a control store"
+                )
+            }
+            LowerError::InvalidDuration(seconds) => {
+                write!(
+                    f,
+                    "note duration must be positive and finite, got {seconds}"
                 )
             }
         }
@@ -319,6 +355,7 @@ struct Resolver<'a> {
     nodes: &'a [FundspNode],
     net: &'a mut Net,
     constants: HashMap<u64, FundspNode>,
+    param_nodes: HashMap<crate::template::ParamId, FundspNode>,
     control_nodes: HashMap<ControlId, FundspNode>,
     input_nodes: HashMap<usize, FundspNode>,
 }
@@ -328,14 +365,33 @@ impl Resolver<'_> {
         match source {
             Source::Port { node, channel } => Ok((self.nodes[node], channel as usize)),
             Source::Const(x) => Ok((constant_node(x, self.net, &mut self.constants), 0)),
-            Source::Param(id) => Ok((
-                constant_node(
-                    self.note.value(id, self.template),
-                    self.net,
-                    &mut self.constants,
-                ),
-                0,
-            )),
+            Source::Param(id) => {
+                let node = match self.param_nodes.get(&id) {
+                    Some(node) => *node,
+                    None => {
+                        let node = match self.note.value(id, self.template)? {
+                            ParamValue::Number(value) => {
+                                constant_node(value, self.net, &mut self.constants)
+                            }
+                            ParamValue::Curve(curve) => {
+                                let gate = self.note.duration;
+                                if !gate.is_finite() || gate <= 0.0 {
+                                    return Err(LowerError::InvalidDuration(gate));
+                                }
+                                self.net.push(Box::new(envelope(move |t: f32| {
+                                    curve
+                                        .at(t as f64, gate)
+                                        .expect("parameter curve validated before lowering")
+                                        as f32
+                                })))
+                            }
+                        };
+                        self.param_nodes.insert(id, node);
+                        node
+                    }
+                };
+                Ok((node, 0))
+            }
             Source::Control(id) => {
                 let controls = self.controls.ok_or(LowerError::ControlStoreRequired)?;
                 let node = match self.control_nodes.get(&id) {
@@ -421,8 +477,8 @@ fn constant_node(x: f64, net: &mut Net, constants: &mut HashMap<u64, FundspNode>
         .or_insert_with(|| net.push(Box::new(dc(x as f32))))
 }
 
-fn unit_for(op: &Op, note: &Note) -> Box<dyn AudioUnit> {
-    match op {
+fn unit_for(op: &Op, note: &Note) -> Result<Box<dyn AudioUnit>, LowerError> {
+    let unit: Box<dyn AudioUnit> = match op {
         Op::Sine => Box::new(sine()),
         Op::Saw => Box::new(saw()),
         Op::Pulse => Box::new(pulse()),
@@ -469,11 +525,20 @@ fn unit_for(op: &Op, note: &Note) -> Box<dyn AudioUnit> {
         }
         Op::Curve(curve) => {
             let curve = curve.clone();
-            Box::new(envelope(move |t: f32| curve.at(t as f64) as f32))
+            let gate = note.duration;
+            if !gate.is_finite() || gate <= 0.0 {
+                return Err(LowerError::InvalidDuration(gate));
+            }
+            Box::new(envelope(move |t: f32| {
+                curve
+                    .at(t as f64, gate)
+                    .expect("curve and duration validated before lowering") as f32
+            }))
         }
 
         Op::Pan => Box::new(panner()),
-    }
+    };
+    Ok(unit)
 }
 
 fn seed_unit(mut seed: u64) -> f32 {

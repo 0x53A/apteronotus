@@ -6,6 +6,7 @@
 //! by rendering a fundsp sequencer into memory.
 
 pub mod output;
+pub mod persistent;
 pub mod revision;
 pub mod scheduler;
 pub mod tempo;
@@ -13,6 +14,7 @@ pub mod transport;
 pub mod trigger;
 
 pub use output::{AudioOutput, OutputError};
+pub use persistent::{PersistentError, PersistentRuntime};
 pub use revision::{Generation, Revision, RevisionSlot, SubmitError};
 pub use scheduler::{FillReport, PitchScheduler, ProgramScheduler, ScheduleError, ScheduledTrack};
 pub use tempo::{TempoMap, TempoMapError, TempoPoint};

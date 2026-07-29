@@ -1,9 +1,10 @@
 //! Minimal source attribution pass.
 //!
 //! Piccolo has no debug stack from which a callback can recover its Lua call
-//! site. Direct calls to the two mini-notation entry points are therefore
-//! rewritten to carry their original byte offset. Strings, long strings and
-//! comments are skipped, so text that merely mentions `play(` is untouched.
+//! site. Direct calls to mini-notation entry points and seeded pattern
+//! transforms are therefore rewritten to carry their original byte offset.
+//! Strings, long strings and comments are skipped, so text that merely
+//! mentions `play(` is untouched.
 //!
 //! This lexical first slice treats `play` and `pattern` as reserved in direct
 //! call position. It skips declarations and method/field calls, but is not yet
@@ -65,6 +66,8 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
             let target = match word {
                 "pattern" => Some("__pattern_at"),
                 "play" => Some("__play_at"),
+                "degrade" => Some("__degrade_at"),
+                "sometimes" => Some("__sometimes_at"),
                 _ => None,
             };
             let is_direct_call = target.is_some()
@@ -155,10 +158,10 @@ mod tests {
 
     #[test]
     fn direct_calls_receive_original_byte_offsets() {
-        let source = "local p = pattern(\"a\")\nplay(v, p)";
+        let source = "local p = pattern(\"a\") >> degrade(0.2) >> sometimes(0.1, rev)\nplay(v, p)";
         assert_eq!(
             inject_call_sites(source),
-            "local p = __pattern_at(10,\"a\")\n__play_at(23,v, p)"
+            "local p = __pattern_at(10,\"a\") >> __degrade_at(26,0.2) >> __sometimes_at(42,0.1, rev)\n__play_at(62,v, p)"
         );
     }
 
@@ -169,6 +172,8 @@ mod tests {
           local text = "pattern('string')"
           object:play(v)
           object.pattern("x")
+          object.degrade(0.5)
+          object.sometimes(0.5, rev)
           local function play(v) return v end
         "#;
         assert_eq!(inject_call_sites(source), source);

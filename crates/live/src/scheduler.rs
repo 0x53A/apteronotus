@@ -8,8 +8,11 @@
 use crate::tempo::TempoMap;
 use crate::transport::{CycleTime, Transport, TransportError};
 use apteronotus_music::{Pitch, PitchError};
-use apteronotus_pattern::{Frac, Pattern, Span, Value};
-use apteronotus_synth::{GraphTemplate, LowerError, Note, TemplateError, instantiate};
+use apteronotus_pattern::{ControlValue, Frac, PRIMARY_FIELD, Pattern, Span, Value};
+use apteronotus_synth::{
+    BusLayout, ControlStore, EventRouting, GraphTemplate, Implicit, LowerError, Note, ParamId,
+    ParamValue, ParamValueError, TemplateError, instantiate, instantiate_routed_with_controls,
+};
 use fundsp::prelude32::{AudioUnit, Fade, ReplayMode, Sequencer};
 
 /// One pattern/template pair participating in an atomic scheduling window.
@@ -91,6 +94,7 @@ impl PitchScheduler {
             [ScheduledTrack::new(pattern, template)],
             clock,
             sequencer,
+            VoiceLayout::MainOnly,
         )?;
         let voices = pending.len();
         commit_window(pending, sequencer);
@@ -187,7 +191,51 @@ impl ProgramScheduler {
             });
         }
         let span = Span::new(begin, end);
-        let pending = prepare_window(span, tracks, clock, sequencer)?;
+        let pending = prepare_window(span, tracks, clock, sequencer, VoiceLayout::MainOnly)?;
+        let voices = pending.len();
+        commit_window(pending, sequencer);
+        self.frontier = end;
+        Ok(FillReport { span, voices })
+    }
+
+    /// Fill a program whose voices produce flattened main/bus stems and may
+    /// read program-scope controls.
+    pub fn fill_routed_to<'a>(
+        &mut self,
+        end: Frac,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        transport: Transport,
+        sequencer: &mut Sequencer,
+        layout: &BusLayout,
+        controls: &ControlStore,
+    ) -> Result<FillReport, ScheduleError> {
+        self.fill_routed_with_clock(end, tracks, &transport, sequencer, layout, controls)
+    }
+
+    fn fill_routed_with_clock<'a>(
+        &mut self,
+        end: Frac,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        clock: &impl CycleTime,
+        sequencer: &mut Sequencer,
+        layout: &BusLayout,
+        controls: &ControlStore,
+    ) -> Result<FillReport, ScheduleError> {
+        let begin = self.frontier;
+        if end <= begin {
+            return Ok(FillReport {
+                span: Span::new(begin, begin),
+                voices: 0,
+            });
+        }
+        let span = Span::new(begin, end);
+        let pending = prepare_window(
+            span,
+            tracks,
+            clock,
+            sequencer,
+            VoiceLayout::Routed { layout, controls },
+        )?;
         let voices = pending.len();
         commit_window(pending, sequencer);
         self.frontier = end;
@@ -206,6 +254,21 @@ impl ProgramScheduler {
             .map_err(ScheduleError::Transport)?;
         self.fill_to(end, tracks, transport, sequencer)
     }
+
+    pub fn fill_routed_to_seconds<'a>(
+        &mut self,
+        seconds: f64,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        transport: Transport,
+        sequencer: &mut Sequencer,
+        layout: &BusLayout,
+        controls: &ControlStore,
+    ) -> Result<FillReport, ScheduleError> {
+        let end = transport
+            .seconds_to_cycle(seconds)
+            .map_err(ScheduleError::Transport)?;
+        self.fill_routed_to(end, tracks, transport, sequencer, layout, controls)
+    }
 }
 
 impl Default for ProgramScheduler {
@@ -216,11 +279,21 @@ impl Default for ProgramScheduler {
 
 type PendingVoice = (f64, f64, Box<dyn AudioUnit>);
 
+#[derive(Clone, Copy)]
+enum VoiceLayout<'a> {
+    MainOnly,
+    Routed {
+        layout: &'a BusLayout,
+        controls: &'a ControlStore,
+    },
+}
+
 fn prepare_window<'a>(
     span: Span,
     tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
     clock: &impl CycleTime,
     sequencer: &Sequencer,
+    voice_layout: VoiceLayout<'_>,
 ) -> Result<Vec<PendingVoice>, ScheduleError> {
     let mut pending = Vec::new();
     for track in tracks {
@@ -232,14 +305,17 @@ fn prepare_window<'a>(
                 found: sequencer.inputs(),
             });
         }
-        if sequencer.outputs() != template.channels() {
+        let expected_outputs = match voice_layout {
+            VoiceLayout::MainOnly => template.channels(),
+            VoiceLayout::Routed { layout, .. } => layout.total_channels(),
+        };
+        if sequencer.outputs() != expected_outputs {
             return Err(ScheduleError::ChannelMismatch {
-                expected: template.channels(),
+                expected: expected_outputs,
                 found: sequencer.outputs(),
             });
         }
 
-        let tail = template.tail();
         for event in track.pattern.onsets(span) {
             let whole = event.whole.expect("onsets always have a whole span");
             let pitch = pitch_from_value(&event.value)?;
@@ -249,9 +325,24 @@ fn prepare_window<'a>(
             }
             let start = clock.cycle_to_seconds(whole.begin);
             let gate = clock.span_to_seconds(whole);
-            let note = Note::new(hz).duration(gate).seed(event.seed());
-            let unit = instantiate(template, &note).map_err(ScheduleError::Lower)?;
-            pending.push((start, start + gate + tail, unit));
+            let note = note_from_value(&event.value, template, hz, gate, event.seed())?;
+            let lifetime = template
+                .lifetime_for(&note)
+                .map_err(ScheduleError::ParamValue)?;
+            let unit = match voice_layout {
+                VoiceLayout::MainOnly => {
+                    instantiate(template, &note).map_err(ScheduleError::Lower)?
+                }
+                VoiceLayout::Routed { layout, controls } => instantiate_routed_with_controls(
+                    template,
+                    &note,
+                    layout,
+                    &EventRouting::new(),
+                    controls,
+                )
+                .map_err(ScheduleError::Lower)?,
+            };
+            pending.push((start, start + lifetime.end_after_onset(gate), unit));
         }
     }
     Ok(pending)
@@ -270,13 +361,68 @@ impl Default for PitchScheduler {
 }
 
 fn pitch_from_value(value: &Value) -> Result<Pitch, ScheduleError> {
-    match value {
-        Value::F(midi) => Ok(Pitch::from_midi(*midi)),
-        Value::S(name) => Pitch::parse(name).map_err(|source| ScheduleError::Pitch {
+    let primary = match value {
+        Value::Leaf(value) => value,
+        Value::Map(map) => map
+            .get(PRIMARY_FIELD)
+            .ok_or_else(|| ScheduleError::MissingPrimary(value.clone()))?,
+    };
+    match primary {
+        ControlValue::Number(midi) => Ok(Pitch::from_midi(*midi)),
+        ControlValue::Text(name) => Pitch::parse(name).map_err(|source| ScheduleError::Pitch {
             value: name.clone(),
             source,
         }),
-        Value::B(_) => Err(ScheduleError::NotPitch(value.clone())),
+        ControlValue::Bool(_) | ControlValue::Curve(_) => {
+            Err(ScheduleError::NotPitch(value.clone()))
+        }
+    }
+}
+
+fn note_from_value(
+    value: &Value,
+    template: &GraphTemplate,
+    hz: f64,
+    gate: f64,
+    seed: u64,
+) -> Result<Note, ScheduleError> {
+    let mut note = Note::new(hz).duration(gate).seed(seed);
+    let Value::Map(map) = value else {
+        return Ok(note);
+    };
+    for field in map.fields() {
+        if field.name() == PRIMARY_FIELD {
+            continue;
+        }
+        let control =
+            numeric_param_value(field.value()).ok_or_else(|| ScheduleError::NonNumericControl {
+                name: field.name().to_owned(),
+                value: field.value().clone(),
+            })?;
+        let id = match field.name() {
+            "velocity" => ParamId::Implicit(Implicit::Velocity),
+            "pan" => ParamId::Implicit(Implicit::Pan),
+            "duration" => return Err(ScheduleError::DurationControl),
+            "hz" => return Err(ScheduleError::HzControlDeferred),
+            name => {
+                let index = template
+                    .params
+                    .iter()
+                    .position(|spec| spec.name == name)
+                    .ok_or_else(|| ScheduleError::UnknownControl(name.to_owned()))?;
+                ParamId::Declared(index)
+            }
+        };
+        note = note.bind(id, control);
+    }
+    Ok(note)
+}
+
+fn numeric_param_value(value: &ControlValue) -> Option<ParamValue> {
+    match value {
+        ControlValue::Number(value) => Some(ParamValue::Number(*value)),
+        ControlValue::Curve(curve) => Some(ParamValue::Curve(curve.clone())),
+        ControlValue::Text(_) | ControlValue::Bool(_) => None,
     }
 }
 
@@ -290,7 +436,13 @@ pub struct FillReport {
 pub enum ScheduleError {
     Pitch { value: String, source: PitchError },
     NotPitch(Value),
+    MissingPrimary(Value),
+    UnknownControl(String),
+    NonNumericControl { name: String, value: ControlValue },
+    DurationControl,
+    HzControlDeferred,
     InvalidFrequency(f64),
+    ParamValue(ParamValueError),
     Template(TemplateError),
     Lower(LowerError),
     Transport(TransportError),
@@ -305,9 +457,27 @@ impl core::fmt::Display for ScheduleError {
                 write!(f, "cannot schedule {value:?} as a pitch: {source}")
             }
             ScheduleError::NotPitch(value) => write!(f, "{value} is not a pitch"),
+            ScheduleError::MissingPrimary(value) => {
+                write!(f, "control map {value} has no primary pitch field")
+            }
+            ScheduleError::UnknownControl(name) => {
+                write!(f, "voice has no parameter named {name:?}")
+            }
+            ScheduleError::NonNumericControl { name, value } => {
+                write!(f, "parameter {name:?} cannot be bound to {value}")
+            }
+            ScheduleError::DurationControl => write!(
+                f,
+                "duration is determined by the event span; a live gate is a separate signal"
+            ),
+            ScheduleError::HzControlDeferred => write!(
+                f,
+                "hz controls require a typed frequency value and are not implemented yet"
+            ),
             ScheduleError::InvalidFrequency(hz) => {
                 write!(f, "pitch produced invalid frequency {hz}")
             }
+            ScheduleError::ParamValue(error) => error.fmt(f),
             ScheduleError::Template(error) => write!(f, "invalid graph template: {error}"),
             ScheduleError::Lower(error) => write!(f, "cannot lower graph: {error}"),
             ScheduleError::Transport(error) => error.fmt(f),

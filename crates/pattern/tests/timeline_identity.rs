@@ -13,8 +13,8 @@ fn a_timeline_is_finite_and_does_not_repeat() {
         TimelineId::new(7),
         Span::new(Frac::ZERO, Frac::int(4)),
         vec![
-            TimelineEvent::new(Span::new(f(1, 2), f(3, 2)), Value::S("a".into()), 10),
-            TimelineEvent::new(Span::new(Frac::int(3), f(7, 2)), Value::S("b".into()), 11),
+            TimelineEvent::new(Span::new(f(1, 2), f(3, 2)), Value::text("a"), 10),
+            TimelineEvent::new(Span::new(Frac::int(3), f(7, 2)), Value::text("b"), 11),
         ],
     )
     .unwrap();
@@ -38,7 +38,7 @@ fn recorded_ordinals_are_validated_not_reconstructed() {
     let event = |ordinal| {
         TimelineEvent::new(
             Span::new(Frac::ZERO, Frac::ONE),
-            Value::S("hit".into()),
+            Value::text("hit"),
             ordinal,
         )
     };
@@ -54,8 +54,8 @@ fn simultaneous_recorded_events_have_stable_distinct_seeds() {
         TimelineId::new(99),
         Span::cycle(0),
         vec![
-            TimelineEvent::new(Span::cycle(0), Value::S("x".into()), 20),
-            TimelineEvent::new(Span::cycle(0), Value::S("x".into()), 21),
+            TimelineEvent::new(Span::cycle(0), Value::text("x"), 20),
+            TimelineEvent::new(Span::cycle(0), Value::text("x"), 21),
         ],
     )
     .unwrap();

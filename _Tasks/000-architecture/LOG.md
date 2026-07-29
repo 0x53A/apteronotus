@@ -231,7 +231,7 @@ what the fish emits and an accurate description of what the file is.
 ### Milestone 1 — `crates/pattern`
 
 Built: rational time, spans, events, deterministic randomness, the pattern
-algebra, the mini-notation, 65 tests, zero dependencies.
+algebra and the mini-notation, with zero dependencies.
 
 The decisions inside it, each tied to a goal:
 
@@ -1563,3 +1563,94 @@ those values already exist in the owned program, but silently discarding their
 audio would make a successful Run lie. The first cpal stream also fixes the
 output channel count for its lifetime; changing it requires restart until
 device-stream replacement has explicit semantics.
+
+---
+
+## The strobe question — 2026-07-29
+
+Asked as a user question rather than a design one: how do you write a strobe?
+It turned out to be the shortest path to the third curve placement, so the
+reasoning is kept.
+
+The gate is `e(t mod T) − e((t mod T) − T_on)`. The modulo has to apply before
+the on-time is subtracted; `e(t mod T) − e((t − T_on) mod T)` wraps back to a
+non-negative phase, so both steps are 1 and the whole thing cancels to zero.
+
+### Two implementations, and what each one exposed
+
+The first was `pulse(hz, duty) >> shape("clip", 100)` — an audio-rate square
+used as a VCA. It works and it is the right sound for an aggressive effect, but
+clipping at that gain discards fundsp's band-limiting, so it is a naive square
+with full aliasing rather than merely a click. Worth being precise about,
+because the aliasing is not caused by the strobe rate.
+
+The second was a summed window train, `Σ [step(kT) − step(kT + T_on)]`, built by
+an ordinary Lua loop. That is the one that fits, and it is the case the exact
+piecewise-linear range partition was built for: 2N step terms with ±1
+coefficients that cancel, so `prove_range` proves `[0, 1]` exactly instead of
+falling back to an enclosure, and `activity()` returns a finite horizon because
+the terminal sums to zero. Both budgets already cover it — `window()` in a graph
+emits `Op::Curve` nodes counted by `GraphLimits.nodes`, and event-carried curves
+are capped separately by `ValueLimits`. Its two costs are that the voice lives to
+the last window regardless of gate, and that the count is explicit.
+
+A property worth stating rather than treating as a consolation: the control path
+is *inherently declicked*. A step sampled at 2 ms and interpolated is a 4 ms
+triangle — the same observation that already lives under ε versus δ — so the
+edge softens for free. You choose the path by whether you want the click, which
+is a good design property, but it does mean a genuinely hard strobe edge is only
+available at audio rate and will alias.
+
+### The real finding, which was not about strobes
+
+`Op::Sine` and `Op::Pulse` lower to free-running fundsp oscillators, so their
+phase is an accumulator. The derive-from-coordinates section of `/CLAUDE.md`
+lists "a fixed-rate LFO's phase from transport time rather than an accumulator"
+as one of the five places the principle turned up — and the implementation had
+not earned that line. In a per-note voice nothing is wrong, because the note
+clock is the correct coordinate. In a persistent `patch` phase starts when the
+instance does, so a hard reset re-phases it. Compatible-edit arena reuse hides
+this, which is why nobody had noticed. `/CLAUDE.md` now carries the correction
+next to the claim.
+
+### Rejected: `transport_seconds()`, `%` and `lt(a, b)`
+
+The obvious fix is three new signal operations: an absolute transport
+coordinate, a Euclidean remainder, and a comparison. Rejected on three grounds.
+`lt` produces a hard edge at signal rate whose position is signal-dependent,
+which is exactly the construction the DSP notes say must be a Rust node because
+it aliases — and it opens signal-rate branching generally, which the rate
+hierarchy exists to prevent. `%` earns its place only by feeding `lt`. And
+together they convert declarative, data-only curve terms into an imperative
+expression, which costs `prove_range`, `activity()` and serialisability at once.
+That is a large amount of architecture surrendered for one effect.
+
+### Taken: the periodic transport clock
+
+One clock variant instead. A `Curve` gains a transport clock carrying a period
+and is evaluated at `t mod period`, so `window(0, T_on)` becomes an infinite
+train with no `count`. It is a pure function of transport time, so it derives
+rather than retains: an edit costs it nothing, and a hard reset re-enters at the
+correct phase for free — which is precisely what the rejected proposal was
+reaching for, obtained by not introducing state in the first place.
+
+The existing algebra survives untouched. `prove_range` bounds one period on the
+exact piecewise-linear path. `activity()` needs no new case: a periodic curve
+never settles, so it reports `GateBounded`, and a transport curve therefore
+cannot extend a note — which is the answer you want anyway.
+
+Note the shape of the argument, because it recurs. The question "how do I write
+a strobe" has an imperative answer and a declarative one, and the declarative one
+is smaller only because the surrounding machinery was already built to reward it.
+Adding `lt` would have been three days of work that made four existing analyses
+weaker; adding a clock variant is an afternoon that makes none of them weaker.
+
+### Blocked on tempo, and that is the correct order
+
+A periodic curve immediately asks whether its period is seconds or bars. That is
+the persistent-graph half of the `beats(0.75)` ambiguity already recorded — a
+send outlives any particular tempo, so a tempo-relative duration inside a
+persistent graph has no single answer. A bar-synced strobe is the first thing
+anyone will ask for, so tempo/timeline integration goes first; building transport
+curves before it would mean defaulting to seconds and inheriting the classic
+sequencer bug in the one place the docs already warn about it.

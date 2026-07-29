@@ -1,0 +1,15 @@
+-- Three notes.
+--
+-- A voice is a function from a note to a graph, and it runs once per edit —
+-- not once per note. While it builds, `n.hz`, `n.velocity` and `n.pan` are
+-- symbolic; the runtime instantiates one copy of the finished graph per onset,
+-- which is what makes the polyphony real rather than a monosynth with knobs.
+
+local tone = voice {
+  graph = function(n)
+    local env = adsr(ms(5), ms(80), 0.6, ms(180))
+    return (sine(n.hz) * env * n.velocity * 0.12) >> pan(n.pan)
+  end,
+}
+
+play(tone, "c4 e4 g4")

@@ -96,6 +96,28 @@ impl ControlLayout {
     pub fn specs(&self) -> &[ControlSpec] {
         &self.specs
     }
+
+    /// Resolve a host-facing logical name inside this program arena.
+    pub fn id(&self, name: &str) -> Option<ControlId> {
+        self.specs
+            .iter()
+            .position(|spec| spec.name == name)
+            .map(|index| ControlId {
+                layout: self.identity,
+                index,
+            })
+    }
+
+    /// Resolve an equivalent handle from another compatible arena.
+    ///
+    /// Arena identities deliberately differ across evaluations. Reconciliation
+    /// may reuse a live store only when the logical specification at the same
+    /// position agrees; the returned handle always belongs to `target`.
+    pub fn corresponding_id(&self, id: ControlId, target: &ControlLayout) -> Option<ControlId> {
+        let spec = self.spec(id)?;
+        let target_id = target.id(&spec.name)?;
+        (target.spec(target_id) == Some(spec)).then_some(target_id)
+    }
 }
 
 impl Default for ControlLayout {

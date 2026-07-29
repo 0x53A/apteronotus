@@ -77,6 +77,10 @@ impl BusLayout {
         self.main_channels + self.buses.iter().sum::<usize>()
     }
 
+    pub fn bus_channel_counts(&self) -> &[usize] {
+        &self.buses
+    }
+
     pub fn main_range(&self) -> Range<usize> {
         0..self.main_channels
     }
@@ -85,6 +89,22 @@ impl BusLayout {
         let channels = self.bus_channels(bus)?;
         let begin = self.main_channels + self.buses[..bus.index].iter().sum::<usize>();
         Some(begin..begin + channels)
+    }
+
+    /// Resolve an equivalent bus handle from another layout with the same
+    /// logical shape. The returned handle always belongs to `target`.
+    pub fn corresponding_id(&self, bus: BusId, target: &BusLayout) -> Option<BusId> {
+        if bus.layout != self.identity
+            || self.main_channels != target.main_channels
+            || self.buses != target.buses
+        {
+            return None;
+        }
+        self.buses.get(bus.index)?;
+        Some(BusId {
+            layout: target.identity,
+            index: bus.index,
+        })
     }
 }
 

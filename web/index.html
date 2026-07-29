@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#080c11">
+    <meta
+      name="description"
+      content="Apteronotus: patterns in text, real synthesis underneath, live editing."
+    >
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <title>Apteronotus</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #080c11;
+      }
+
+      apteronotus-app {
+        display: block;
+        width: 100%;
+        height: 100%;
+        color: #becfda;
+        font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .loading {
+        box-sizing: border-box;
+        display: grid;
+        width: 100%;
+        height: 100%;
+        place-content: center;
+        justify-items: center;
+        padding: 32px;
+      }
+
+      .loading__oscillator {
+        display: flex;
+        height: 52px;
+        margin-bottom: 24px;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .loading__oscillator span {
+        width: 4px;
+        height: 12px;
+        background: #00c8ff;
+        animation: discharge 900ms ease-in-out infinite alternate;
+      }
+
+      .loading__oscillator span:nth-child(2) {
+        animation-delay: -720ms;
+      }
+
+      .loading__oscillator span:nth-child(3) {
+        animation-delay: -540ms;
+      }
+
+      .loading__oscillator span:nth-child(4) {
+        animation-delay: -360ms;
+      }
+
+      .loading__oscillator span:nth-child(5) {
+        animation-delay: -180ms;
+      }
+
+      .loading__title,
+      .loading__status,
+      .loading__detail {
+        text-transform: uppercase;
+        letter-spacing: 0.22em;
+      }
+
+      .loading__title {
+        margin: 0;
+        color: #e8f4fb;
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      .loading__meter {
+        width: min(340px, 72vw);
+        height: 2px;
+        margin: 24px 0 14px;
+        overflow: hidden;
+        background: #22303c;
+      }
+
+      .loading__progress {
+        display: block;
+        width: 0;
+        height: 100%;
+        background: #00c8ff;
+        transition: width 100ms linear;
+      }
+
+      .loading__meter--indeterminate .loading__progress {
+        width: 32%;
+        animation: progress-indeterminate 1.2s ease-in-out infinite alternate;
+      }
+
+      .loading__status,
+      .loading__detail {
+        margin: 0;
+        color: #596c7a;
+        font-size: 10px;
+        font-weight: 400;
+        line-height: 1.6;
+        text-align: center;
+      }
+
+      .loading__detail {
+        min-height: 1.6em;
+        margin-top: 4px;
+        color: #354551;
+        font-size: 9px;
+      }
+
+      .loading--error .loading__oscillator span,
+      .loading--error .loading__progress {
+        background: #ff5148;
+      }
+
+      .loading--error .loading__status {
+        color: #ff5148;
+      }
+
+      @keyframes discharge {
+        from { height: 8px; opacity: 0.4; }
+        to { height: 48px; opacity: 1; }
+      }
+
+      @keyframes progress-indeterminate {
+        from { transform: translateX(-105%); }
+        to { transform: translateX(318%); }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .loading__oscillator span,
+        .loading__meter--indeterminate .loading__progress {
+          animation: none;
+        }
+
+        .loading__meter--indeterminate .loading__progress {
+          transform: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <apteronotus-app>
+      <main class="loading" id="loading">
+        <div class="loading__oscillator" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <h1 class="loading__title">Apteronotus</h1>
+        <div
+          class="loading__meter loading__meter--indeterminate"
+          id="loading-meter"
+          role="progressbar"
+          aria-label="Loading Apteronotus"
+        >
+          <span class="loading__progress" id="loading-progress"></span>
+        </div>
+        <p class="loading__status" id="loading-status" aria-live="polite">
+          Preparing
+        </p>
+        <p class="loading__detail" id="loading-detail">
+          Loading the pattern and synthesis engine
+        </p>
+      </main>
+    </apteronotus-app>
+    <script type="module" src="./bootstrap.js"></script>
+  </body>
+</html>

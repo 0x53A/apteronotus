@@ -36,7 +36,7 @@ bass = voice {
   graph = function(n)
     local env = adsr(0.004, 0.16, 0.55, 0.10)
     return (saw(n.hz) | n.cutoff * (1 + 2.5 * env) | dc(0.72)) >> moog()
-        >> mul(env * n.vel)
+        >> mul(env * n.velocity)
         >> shape("tanh", n.drive)
         >> dcblock()
         >> pan(0)
@@ -70,7 +70,7 @@ hat = voice {
   params = { tone = { 2000, 14000, 8200, "hz" }, decay = { 0.01, 0.4, 0.045, "s" } },
   graph = function(n)
     return (noise() | dc(n.tone) | dc(1.1)) >> highpass()
-        >> mul(decay(n.decay) * n.vel)
+        >> mul(decay(n.decay) * n.velocity)
         >> pan(n.pan)
   end,
 }

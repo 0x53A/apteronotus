@@ -1,0 +1,33 @@
+-- Live controls.
+--
+-- `control` declares a program-scope value you can move while the program is
+-- running; the host draws one fader per declaration, over there on the right.
+--
+-- A `patch` is one persistent graph instance rather than a graph per note, so
+-- these controls keep addressing the same nodes for as long as the program is
+-- up. That is the difference between a rack and an instrument: a patch may not
+-- refer to `n.*` at all, because there is no note to refer to.
+--
+-- A control is a signal, so it goes anywhere a signal goes: `dc(cutoff)` lifts
+-- it into the filter's cutoff port, and `mul(level)` is a VCA. What it cannot
+-- do is set something that must be known when the graph is built — the shaper
+-- takes a constant, so `drive` works the way it does on a real amplifier,
+-- by changing how hard the signal hits a fixed curve.
+
+local cutoff = control { name = "cutoff", range = { 80, 4000 }, default = 700 }
+local drive = control { name = "drive", range = { 1, 12 }, default = 2 }
+local level = control { name = "level", range = { 0, 0.6 }, default = 0.25 }
+
+local drone = patch {
+  graph = function()
+    -- Three detuned saws, so the filter has something to bite on.
+    local reeds = (saw(55) + saw(55.3) * 0.8 + saw(110.2) * 0.4) * 0.25
+    return (reeds | dc(cutoff) | dc(0.7)) >> lowpass()
+        >> mul(drive)
+        >> shape("tanh", 1.0)
+        >> mul(level)
+        >> pan(0)
+  end,
+}
+
+run(drone)

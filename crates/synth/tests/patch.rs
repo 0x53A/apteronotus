@@ -1,11 +1,38 @@
 use apteronotus_synth::lower::{render, zero_crossing_hz};
 use apteronotus_synth::{
-    Adsr, ControlError, ControlLayout, ControlSpec, ControlStore, DelayRange, GraphBuilder,
-    LowerError, Note, PatchError, PatchTemplate, instantiate, instantiate_patch,
+    Adsr, AudioInputLayout, AudioInputSpec, BusLayout, ControlError, ControlLayout, ControlSpec,
+    ControlStore, DelayRange, GraphBuilder, LowerError, Note, PatchError, PatchTemplate, Source,
+    instantiate, instantiate_patch, instantiate_patch_routed_with_audio_inputs,
     instantiate_with_controls, n,
 };
 
 const SR: f64 = 48_000.0;
+
+#[test]
+fn logical_audio_input_can_be_supplied_as_a_live_host_lane() {
+    let mut inputs = AudioInputLayout::new();
+    let microphone = inputs
+        .add(AudioInputSpec::silence("microphone", 1))
+        .unwrap();
+    let mut graph = GraphBuilder::new();
+    let graph = graph
+        .out_mono(Source::ExternalAudio {
+            input: microphone,
+            channel: 0,
+        })
+        .unwrap();
+    let patch = PatchTemplate::new(graph).unwrap();
+    let buses = BusLayout::new(1).unwrap();
+    let controls = ControlLayout::new();
+    let store = ControlStore::new(&controls);
+
+    let mut unit =
+        instantiate_patch_routed_with_audio_inputs(&patch, &buses, &store, &inputs).unwrap();
+    assert_eq!(unit.inputs(), 1);
+    let mut output = [0.0];
+    unit.tick(&[0.42], &mut output);
+    assert_eq!(output, [0.42]);
+}
 
 #[test]
 fn control_values_default_clamp_and_reject_non_finite_updates() {

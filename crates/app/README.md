@@ -33,8 +33,9 @@ real `voice { ... }` plus `play(v, "c4 e4 g4")` program and goes through the
 same owned `Program`, revision, scheduler, `GraphTemplate`, fundsp sequencer and
 cpal output path as the offline acceptance tests. A program may instead start
 autonomous `run(patch)` graphs, route voices and patches through buses, and
-declare writable controls; those controls appear as live sliders beside the
-editor.
+declare writable controls; user-declared controls appear as live sliders beside
+the editor. Engine-owned controls used to fan out analysers and trigger edges
+remain hidden.
 
 ## Activation and failure semantics
 
@@ -81,16 +82,28 @@ that same frontier and reports the failure.
 
 ## Deliberately narrow first slice
 
-The GUI currently uses a fixed 120 BPM transport. Ordinary note voices,
-autonomous zero-input runs, whole-stem processors, graph sends, buses, and
-program controls share one realtime path. Zero-input runs mix with routed
-voices; a run with explicit inputs must consume the complete flattened
-main/bus layout and processes that layout in declaration order.
+The GUI schedules each owned program through its constant or ramped `TempoMap`.
+Ordinary note voices, autonomous zero-input runs, whole-stem processors, graph
+sends, buses, and program controls share one realtime path. Zero-input runs mix
+with routed voices; a run with explicit inputs must consume the complete
+flattened main/bus layout and processes that layout in declaration order.
 
 It still reports and rejects, rather than ignores:
 
-- live-input graphs;
-- mixed track channel layouts.
+- mixed track channel layouts in a main-only program.
+
+A routed persistent program has an authoritative main layout. Mono voice tracks
+are broadcast into that layout before buses and whole-stem processors, so a
+mono pad may coexist with stereo voices in `synthwave.eod`. Wider incompatible
+track layouts remain diagnostics. Program-scope onset detectors publish a
+short retained control pulse; the player observes rising edges and schedules
+their voices with a 30 ms minimum-latency margin while sampling any
+`at_onset(...)` bindings. On native systems the first declared logical
+`audio_input` is attached to the default input device when its sample rate
+matches the output device. Missing devices, mismatched rates and unbound lanes
+use the declaration's silence fallback and produce a visible warning; the host
+does not guess at resampling. Browser permission/device attachment remains
+pending.
 
 When controls, buses and the patch templates selected by `run` compare
 compatible after resolving their arena-scoped handles, a later Run keeps the
@@ -99,13 +112,14 @@ change. New voice graphs and patterns are rebound to that live arena and
 activate at the ordinary monotonic frontier, so score editing neither rewinds
 transport nor resets faders.
 
-Until replacement crossfade is implemented, a Run that introduces, removes, or
-changes persistent state—or changes the device output layout—performs an
-explicit hard reset. The player fully evaluates, validates, lowers, fills, and
-opens the replacement while the old stream is still active. Only then does it
-pause the old stream, start the replacement, and restart transport at cycle
-zero. A failure before that switch leaves the old program sounding; if starting
-the replacement fails after pausing, the player attempts to resume it.
+Until replacement crossfade and clock-map reconciliation are implemented, a Run
+that introduces, removes, or changes persistent state, changes the device
+output layout, or changes the tempo map performs an explicit hard reset. The
+player fully evaluates, validates, lowers, fills, and opens the replacement
+while the old stream is still active. Only then does it pause the old stream,
+start the replacement, and restart transport at cycle zero. A failure before
+that switch leaves the old program sounding; if starting the replacement fails
+after pausing, the player attempts to resume it.
 
 This reset is a temporary host policy, not revision reconciliation. It discards
 DSP state and resets program controls to their declared defaults, and it may
@@ -122,7 +136,7 @@ recoverable. A later example choice replaces that slot; it is not file history.
 The editor's colouring is deliberately lexical and presentation-only.
 Not present yet: parser/type diagnostics while typing, sounding-source
 highlighting, files/recent documents, transport controls, MIDI/device
-selection, live inputs, threaded browser evaluation, or blended/continuous
+selection and input-lane attachment, threaded browser evaluation, or blended/continuous
 persistent patch replacement.
 Those are UI and host integrations over framework types that already exist;
 they are not new Lua syntax.
@@ -144,12 +158,14 @@ Worker boundary that returns an owned/transferable program to the UI runtime,
 or an AudioWorklet rendering path that no longer depends on CPAL's main-thread
 buffer scheduler. Neither boundary is implemented yet.
 
-An incompatible persistent-program or output-layout edit uses the transactional
-hard reset described above. The old stream and its tails stop before the
-replacement starts at cycle zero, with no gain overlap, so the transition may
-click and resets persistent DSP and control state. The intended fix is a
-bounded two-stream crossfade after the candidate has been completely prepared;
-increasing the device buffer does not address this transition.
+Any of the three hard-reset conditions listed under “Activation and failure
+semantics”—incompatible persistent state, changed device output layout, or a
+changed tempo map—uses the transactional reset described there. The old stream
+and its tails stop before the replacement starts at cycle zero, with no gain
+overlap, so the transition may click and resets persistent DSP and control
+state. The intended fix is a bounded two-stream crossfade after the candidate
+has been completely prepared; increasing the device buffer does not address
+this transition.
 
 ## Realtime headroom
 

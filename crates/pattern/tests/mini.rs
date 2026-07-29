@@ -69,6 +69,18 @@ fn angle_brackets_alternate_across_cycles() {
 }
 
 #[test]
+fn pipe_chooses_one_reproducible_branch_per_cycle() {
+    let pattern = mini::parse_at("2 | 6", 73).unwrap();
+    for cycle in -8..8 {
+        let first = pattern.onsets(Span::cycle(cycle));
+        let second = pattern.onsets(Span::cycle(cycle));
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0].value.as_f64(), Some(2.0 | 6.0)));
+    }
+}
+
+#[test]
 fn alternation_advances_per_outer_cycle_not_per_slot() {
     // The classic trap: `<a b>` must step once per bar, not once per slot.
     assert_eq!(words("<a b> c", 0), vec!["a", "c"]);

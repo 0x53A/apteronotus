@@ -57,6 +57,29 @@ their_hit = them >> onset_detector { floor = 0.04, hold = ms(90) }
 -- stream and it becomes an ordinary finite `timeline`, queryable like anything
 -- else. One conversion, two holes closed.
 
+----------------------------------------------------------------------- sends
+
+-- Not one opaque `reverb()`. Predelay, early reflections, diffusion, then a
+-- modulated feedback matrix — all composition over delays, allpasses and
+-- matrix mixing, so the only Rust primitive underneath is the interpolating
+-- delay line. The modulation is what stops a seven-second tail turning
+-- metallic, and it is the single largest thing standing between this and
+-- sounding like a stock plugin.
+hall = send {
+  graph =
+      predelay(ms(38))
+      >> early({ ms(11), ms(17), ms(23), ms(31), ms(43) }, 0.62)
+      >> diffuse({ ms(4.7), ms(6.8), ms(10.1), ms(13.7) }, 0.72)
+      >> fdn {
+           size       = 8,
+           t60        = secs(7.5),
+           damping    = 0.42,
+           modulation = { depth = ms(1.6), rate = 0.11 },
+         }
+      >> width(0.92),
+  level = 0.5,
+}
+
 ------------------------------------------------------------------------ rack
 
 -- The response itself: a pair sitting a fixed interval away from wherever the
@@ -91,12 +114,14 @@ jar = patch {
     -- at, laid over material that has no cycle at all. Note this needs the
     -- pattern-to-control conversion that `duck` also wants — same open
     -- question, arrived at from the other direction.
-    local pulse = 0.35 + 0.65 * ("1 0.2 0.6 0.15" >> segment(4) >> slow(3))
+    local pulse = 0.35 + 0.65 * control_signal(
+      "1 0.2 0.6 0.15" >> segment(4) >> slow(3),
+      bars(3))
 
     return (pair * 0.22 | cv.body * (1 + 3 * pulse * room) | dc(0.45))
         >> lowpass()
         >> mul(room * field)
-        >> (pan(-0.55) ~ pan(0.55))
+        >> (pan(-0.55) & pan(0.55))
         >> to(hall, 0.6)
   end,
 }
@@ -134,29 +159,6 @@ bell = voice {
   end,
 }
 
------------------------------------------------------------------------ sends
-
--- Not one opaque `reverb()`. Predelay, early reflections, diffusion, then a
--- modulated feedback matrix — all composition over delays, allpasses and
--- matrix mixing, so the only Rust primitive underneath is the interpolating
--- delay line. The modulation is what stops a seven-second tail turning
--- metallic, and it is the single largest thing standing between this and
--- sounding like a stock plugin.
-hall = send {
-  graph =
-      predelay(ms(38))
-      >> early({ ms(11), ms(17), ms(23), ms(31), ms(43) }, 0.62)
-      >> diffuse({ ms(4.7), ms(6.8), ms(10.1), ms(13.7) }, 0.72)
-      >> fdn {
-           size       = 8,
-           t60        = secs(7.5),
-           damping    = 0.42,
-           modulation = { depth = ms(1.6), rate = 0.11 },
-         }
-      >> width(0.92),
-  level = 0.5,
-}
-
 ----------------------------------------------------------------------- score
 
 -- Almost nothing, and no arrangement, because the piece has no length — it is
@@ -178,13 +180,13 @@ run(presence)
 -- the bell wants the value at the moment it was hit. Same source, two
 -- projections, and neither can be the silent default.
 play(bell, their_hit
-      >> hz(at_onset(their_hz >> slew(ms(20))))
-      >> velocity(at_onset(scale(0.15, 0.90, their_amp)))
-      >> ring(scale(1.2, 5.0, 1 - distance))
-      >> bright(scale(0.2, 0.95, perlin(0.05)))
+      >> bell.hz(at_onset(their_hz >> slew(ms(20))))
+      >> bell.velocity(at_onset(scale(0.15, 0.90, their_amp)))
+      >> bell.ring(at_onset(scale(5.0, 1.2, distance)))
+      >> bell.bright(scale(0.2, 0.95, perlin(0.05)))
       >> degrade(0.35))          -- not every discharge gets an answer
 
-master(limiter(0.01, 0.4) >> gain(0.8))
+master(limiter(0.01, 0.4) >> mul(0.8))
 
 -- What this file was written to find, now that it has found it:
 --

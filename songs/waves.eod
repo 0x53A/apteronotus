@@ -7,6 +7,10 @@
 
 tempo(38)
 
+---------------------------------------------------------------------- sends
+
+deep = send { graph = reverb(64, 11.0, 0.35), level = 0.55 }
+
 ---------------------------------------------------------------------- rack
 
 -- Surf: filtered pink noise, swelling on a period far longer than a bar.
@@ -16,7 +20,7 @@ surf = voice {
     local swell = 0.5 - 0.5 * cosine(0.07)
     return (pink() | 300 + 900 * swell | dc(0.6)) >> lowpass()
         >> mul(swell * 0.35 * n.depth)
-        >> (pan(-0.7) ~ pan(0.7))         -- branch: two independent widths
+        >> (pan(-0.7) & pan(0.7))         -- two independent widths, mixed stereo
         >> chorus(1, 0.03, 0.02, 0.3)
   end,
 }
@@ -45,26 +49,22 @@ drone = voice {
   end,
 }
 
----------------------------------------------------------------------- sends
-
-deep = send { graph = reverb(64, 11.0, 0.35), level = 0.55 }
-
 ---------------------------------------------------------------------- score
 
 -- One breath every eight cycles, which at this tempo is about thirteen
 -- seconds.
-play(surf, "~ x" >> slow(8) >> depth(scale(0.6, 1.0, perlin(0.01))))
+play(surf, "~ x" >> slow(8) >> surf.depth(scale(0.6, 1.0, perlin(0.01))))
 
 play(drone, "<c2 [c2,g2] a#1 [f2,c3]>"
       >> slow(8)
-      >> gain(0.3))
+      >> velocity(0.3))
 
 -- Sparse and unrepeating, but reproducible: the same file always gives the
 -- same nine minutes.
 play(glass, "~ c5 ~ [~ g5] ~ ~ e5 ~"
       >> slow(2)
       >> degrade(0.6)
-      >> gain(scale(0.15, 0.40, perlin(0.03)))
-      >> bright(scale(0.7, 0.95, perlin(0.017))))
+      >> velocity(scale(0.15, 0.40, perlin(0.03)))
+      >> glass.bright(scale(0.7, 0.95, perlin(0.017))))
 
-master(limiter(0.05, 1.2) >> gain(0.7))
+master(limiter(0.05, 1.2) >> mul(0.7))

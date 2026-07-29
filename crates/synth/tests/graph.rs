@@ -7,9 +7,10 @@
 
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
 use apteronotus_synth::{
-    Adsr, Basis, Curve, CurveClock, DelayRange, DelayRangeError, GraphBuilder, GraphLimitError,
-    GraphLimits, GraphTemplate, Input, Note, Op, ParamSpec, ShapeKind, Source, TemplateError,
-    instantiate, n,
+    Adsr, Basis, BusLayout, ControlLayout, ControlStore, Curve, CurveClock, DelayRange,
+    DelayRangeError, FdnConfig, GraphBuilder, GraphLimitError, GraphLimits, GraphTemplate,
+    InitScalarError, Input, Note, ONSET_PULSE_SECONDS, Op, ParamSpec, PatchTemplate, ShapeKind,
+    Source, TemplateError, TransportSlot, instantiate, instantiate_timed_patch_routed, n,
 };
 
 const SR: f64 = 48_000.0;
@@ -239,6 +240,31 @@ fn an_interpolating_delay_places_an_impulse_at_the_requested_time() {
 }
 
 #[test]
+fn a_finite_patch_stops_sources_before_downstream_state_drains() {
+    let mut graph = GraphBuilder::new();
+    let tone = graph.sine(220.0);
+    let delayed = graph.delay(tone, 0.05, DelayRange::fixed(0.05).unwrap());
+    let patch = PatchTemplate::new(graph.out_mono(delayed).unwrap()).unwrap();
+    let layout = BusLayout::new(1).unwrap();
+    let controls = ControlStore::new(&ControlLayout::new());
+    let (mut unit, lifetime) =
+        instantiate_timed_patch_routed(&patch, 0.1, 0.005, &layout, &controls).unwrap();
+
+    assert!(lifetime.absolute_horizon >= 0.15);
+    let audio = render(unit.as_mut(), SR, 0.2);
+    let after_boundary = rms(&audio[0][(0.105 * SR) as usize..(0.14 * SR) as usize]);
+    let after_tail = rms(&audio[0][(0.17 * SR) as usize..]);
+    assert!(
+        after_boundary > 0.05,
+        "the output was gated instead of allowing the delay to drain"
+    );
+    assert!(
+        after_tail < 1.0e-5,
+        "the nonterminating source was not stopped at the run boundary"
+    );
+}
+
+#[test]
 fn delay_tails_accumulate_in_series_and_buffers_sum_in_parallel() {
     let mut graph = GraphBuilder::new();
     let impulse = graph.impulse();
@@ -256,6 +282,7 @@ fn delay_tails_accumulate_in_series_and_buffers_sum_in_parallel() {
         connections: usize::MAX,
         input_channels: usize::MAX,
         output_channels: usize::MAX,
+        data_entries: usize::MAX,
         delay_buffer_seconds: 0.69,
         tail_seconds: f64::INFINITY,
     };
@@ -412,6 +439,7 @@ fn publication_budgets_use_a_deterministic_graph_cost() {
         connections: usize::MAX,
         input_channels: usize::MAX,
         output_channels: usize::MAX,
+        data_entries: usize::MAX,
         delay_buffer_seconds: f64::INFINITY,
         tail_seconds: f64::INFINITY,
     };
@@ -424,7 +452,7 @@ fn publication_budgets_use_a_deterministic_graph_cost() {
 #[test]
 fn per_voice_initialization_depends_only_on_event_seed_and_stream() {
     let mut g = GraphBuilder::new();
-    let initialized = g.init_random(17, -1.0, 1.0);
+    let initialized = g.init_random(17, -1.0, 1.0).unwrap();
     let voice = g.out_mono(initialized).unwrap();
 
     let sample = |seed, stream_voice: &GraphTemplate| {
@@ -435,7 +463,7 @@ fn per_voice_initialization_depends_only_on_event_seed_and_stream() {
     assert_ne!(a, sample(124, &voice));
 
     let mut g = GraphBuilder::new();
-    let initialized = g.init_random(18, -1.0, 1.0);
+    let initialized = g.init_random(18, -1.0, 1.0).unwrap();
     let other_stream = g.out_mono(initialized).unwrap();
     assert_ne!(a, sample(123, &other_stream));
 }
@@ -444,11 +472,7 @@ fn per_voice_initialization_depends_only_on_event_seed_and_stream() {
 fn init_random_cannot_collapse_a_runtime_signal_implicitly() {
     let mut g = GraphBuilder::new();
     let moving = g.sine(1.0);
-    let initialized = g.init_random(0, moving, 1.0);
-    assert!(matches!(
-        g.out_mono(initialized),
-        Err(TemplateError::DynamicInitRandom { node: 1, port: 0 })
-    ));
+    assert_eq!(g.init_random(0, moving, 1.0), Err(InitScalarError::Dynamic));
 }
 
 // --------------------------------------------------- the data-only invariant
@@ -555,6 +579,92 @@ fn a_curve_on_a_filter_control_port_does_not_extend_audio() {
 }
 
 #[test]
+fn bounded_feedback_delay_produces_audible_repeats_and_declares_its_tail() {
+    let mut g = GraphBuilder::new();
+    let impulse = g.impulse();
+    let echoed = g.feedback_delay(impulse, 0.02, Some((3_200.0, 0.707)), 0.5);
+    let voice = g.out_mono(echoed).unwrap();
+    assert!(voice.lifetime().gate_tail >= 0.08);
+
+    let audio = play(&voice, &Note::new(440.0), 0.12);
+    let first_echo = (SR * 0.02) as usize;
+    let second_echo = (SR * 0.04) as usize;
+    let peak = |center: usize| {
+        audio[0][center.saturating_sub(8)..center + 24]
+            .iter()
+            .copied()
+            .map(f32::abs)
+            .fold(0.0, f32::max)
+    };
+    assert!(peak(first_echo) > 0.01);
+    assert!(peak(second_echo) > 0.001);
+}
+
+#[test]
+fn hadamard_fdn_has_bounded_storage_and_an_audible_decay() {
+    let mut g = GraphBuilder::new();
+    let impulse = g.impulse();
+    let wet = g.fdn(
+        impulse,
+        Source::Const(0.35),
+        FdnConfig {
+            delays: vec![0.011, 0.013, 0.017, 0.019],
+            damping: 0.35,
+            modulation_rate: 0.17,
+            modulation_depth: 0.0007,
+            max_t60: 0.5,
+        },
+    );
+    let voice = g.out_mono(wet).unwrap();
+    voice.validate().unwrap();
+    assert_eq!(voice.lifetime().gate_tail, 0.5);
+    assert!(voice.cost().delay_buffer_seconds > 0.06);
+
+    let audio = play(&voice, &Note::new(440.0), 0.25);
+    assert!(audio[0].iter().all(|sample| sample.is_finite()));
+    let first_arrival = (SR * 0.010) as usize;
+    assert!(rms(&audio[0][first_arrival..]) > 0.0001);
+}
+
+#[test]
+fn analyser_warmup_and_audible_response_are_distinct_metadata() {
+    let pitch = Op::PitchTracker {
+        min_hz: 65.0,
+        max_hz: 1_100.0,
+        default_hz: 220.0,
+        hold_seconds: 0.14,
+    };
+    assert_eq!(pitch.warmup_seconds(), 0.14);
+
+    let mut g = GraphBuilder::new();
+    let impulse = g.impulse();
+    let followed = g.envelope_follower(impulse, 0.006, 0.12);
+    let follower = g.out_mono(followed).unwrap();
+    assert_eq!(follower.lifetime().gate_tail, 0.12);
+
+    let mut g = GraphBuilder::new();
+    let impulse = g.impulse();
+    let onset = g.onset_detector(impulse, 0.04, 0.09);
+    let detector = g.out_mono(onset).unwrap();
+    assert_eq!(detector.lifetime().gate_tail, ONSET_PULSE_SECONDS);
+    assert_eq!(detector.nodes[1].op.warmup_seconds(), 0.09);
+}
+
+#[test]
+fn init_rate_pluck_parameters_create_a_bounded_audible_string() {
+    let mut g = GraphBuilder::new();
+    let excitation = g.impulse();
+    let string = g.pluck(excitation, n::HZ, 0.5, 0.86).unwrap();
+    let voice = g.out_mono(string).unwrap();
+    assert!(voice.lifetime().gate_tail > 4.0);
+    assert!(voice.cost().delay_buffer_seconds >= 1.0);
+
+    let audio = play(&voice, &Note::new(220.0), 0.25);
+    assert!(audio[0].iter().all(|sample| sample.is_finite()));
+    assert!(rms(&audio[0]) > 0.01);
+}
+
+#[test]
 fn note_phase_parameter_curves_remain_live_for_the_held_note() {
     let mut g = GraphBuilder::new();
     let gain = g.param(ParamSpec::new("gain", 0.0, 1.0, 0.0));
@@ -585,4 +695,60 @@ fn note_seconds_parameter_horizons_are_declared_and_join_the_same_lifetime_walk(
     let lifetime = voice.lifetime_for(&note).unwrap();
     assert_eq!(lifetime.absolute_horizon, 2.0);
     assert_eq!(lifetime.end_after_onset(note.duration), 2.0);
+}
+
+#[test]
+fn onset_detector_emits_one_bounded_pulse_for_one_impulse() {
+    let mut graph = GraphBuilder::new();
+    let impulse = graph.impulse();
+    let onset = graph.onset_detector(impulse, 0.04, 0.09);
+    let template = graph.out_mono(onset).unwrap();
+    let audio = play(&template, &Note::new(220.0), 0.05);
+    let high = audio[0].iter().filter(|sample| **sample > 0.5).count();
+    assert!((1_400..=1_500).contains(&high));
+}
+
+#[test]
+fn compiled_transport_sequence_repeats_without_querying_a_pattern() {
+    let mut graph = GraphBuilder::new();
+    let sequence = graph.transport_sequence(
+        0.1,
+        vec![
+            TransportSlot {
+                begin_seconds: 0.0,
+                end_seconds: 0.05,
+                value: 0.2,
+            },
+            TransportSlot {
+                begin_seconds: 0.05,
+                end_seconds: 0.1,
+                value: 0.8,
+            },
+        ],
+    );
+    let template = graph.out_mono(sequence).unwrap();
+    let audio = play(&template, &Note::new(220.0), 0.12);
+    assert!((audio[0][100] - 0.2).abs() < 1.0e-6);
+    assert!((audio[0][3_000] - 0.8).abs() < 1.0e-6);
+    assert!((audio[0][5_000] - 0.2).abs() < 1.0e-6);
+    assert_eq!(template.cost().data_entries, 2);
+}
+
+#[test]
+fn shared_slew_can_start_at_its_published_default() {
+    let mut graph = GraphBuilder::new();
+    let slew = graph.slew_from(Source::Const(440.0), 0.06, 440.0).unwrap();
+    let template = graph.out_mono(slew).unwrap();
+    let audio = play(&template, &Note::new(220.0), 0.01);
+    assert!((audio[0][0] - 440.0).abs() < 0.01);
+}
+
+#[test]
+fn width_is_a_modulated_stereo_mid_side_operation() {
+    let mut graph = GraphBuilder::new();
+    let [left, right] = graph.width(Source::Const(1.0), Source::Const(0.0), Source::Const(1.0));
+    let template = graph.out(&[left, right]).unwrap();
+    let audio = play(&template, &Note::new(220.0), 0.01);
+    assert!((audio[0][0] - 1.0).abs() < 1.0e-6);
+    assert!(audio[1][0].abs() < 1.0e-6);
 }

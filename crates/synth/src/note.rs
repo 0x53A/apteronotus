@@ -30,6 +30,12 @@ impl From<Curve> for ParamValue {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Note {
     pub hz: f64,
+    /// Pitch of the preceding onset on this score track, when one exists.
+    ///
+    /// This is instantiation-rate history, not a public graph parameter.
+    /// `slew(n.hz, ...)` consumes it to construct a finite note-clock glide;
+    /// ordinary polyphonic graphs cannot observe or branch on it.
+    pub previous_hz: Option<f64>,
     pub velocity: f64,
     /// Length in seconds. Known here because the sequencer scheduled it, which
     /// is what lets envelopes be note-clock functions rather than gate
@@ -48,6 +54,7 @@ impl Note {
     pub fn new(hz: f64) -> Note {
         Note {
             hz,
+            previous_hz: None,
             velocity: Implicit::Velocity.default_value(),
             duration: Implicit::Duration.default_value(),
             pan: Implicit::Pan.default_value(),
@@ -55,6 +62,11 @@ impl Note {
             implicit_curves: core::array::from_fn(|_| None),
             declared: Vec::new(),
         }
+    }
+
+    pub fn previous_hz(mut self, previous_hz: Option<f64>) -> Note {
+        self.previous_hz = previous_hz;
+        self
     }
 
     pub fn velocity(mut self, velocity: f64) -> Note {

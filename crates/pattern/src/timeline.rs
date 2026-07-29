@@ -5,7 +5,7 @@
 //! same pure `query(span) -> events` contract; finiteness is a property of this
 //! constructor, not a second query model.
 
-use crate::{Event, EventOrigin, Span, SrcSpan, Value};
+use crate::{Event, EventOrigin, GroupProvenance, Span, SrcSpan, Value};
 use std::collections::HashSet;
 
 /// Identity of one timeline binding within an evaluated program.
@@ -29,6 +29,9 @@ pub struct TimelineEvent {
     pub value: Value,
     pub ordinal: u64,
     pub src: Option<SrcSpan>,
+    /// Chord/member identity captured with the event. The occurrence key is
+    /// re-derived at its finite timeline position when queried.
+    pub group: Option<GroupProvenance>,
 }
 
 impl TimelineEvent {
@@ -38,11 +41,17 @@ impl TimelineEvent {
             value,
             ordinal,
             src: None,
+            group: None,
         }
     }
 
     pub fn at(mut self, src: SrcSpan) -> TimelineEvent {
         self.src = Some(src);
+        self
+    }
+
+    pub fn in_group(mut self, group: GroupProvenance) -> TimelineEvent {
+        self.group = Some(group);
         self
     }
 }
@@ -100,7 +109,7 @@ impl Timeline {
                     value: event.value.clone(),
                     src: event.src,
                     origin: EventOrigin::recorded(self.id.0, event.ordinal),
-                    group: None,
+                    group: event.group.map(|group| group.at_occurrence(event.whole)),
                 });
             }
         }

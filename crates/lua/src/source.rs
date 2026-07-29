@@ -21,7 +21,19 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
     while index < bytes.len() {
         if matches!(bytes[index], b'\'' | b'"') {
             let end = quoted_end(bytes, index);
-            output.push_str(&source[index..end]);
+            let mut next = end;
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if bytes.get(next..next + 2) == Some(b">>") {
+                output.push_str("__pattern_at(");
+                output.push_str(&index.to_string());
+                output.push(',');
+                output.push_str(&source[index..end]);
+                output.push(')');
+            } else {
+                output.push_str(&source[index..end]);
+            }
             index = end;
             previous_word = None;
             last_significant = Some(b'"');
@@ -68,6 +80,16 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
                 "play" => Some("__play_at"),
                 "degrade" => Some("__degrade_at"),
                 "sometimes" => Some("__sometimes_at"),
+                "ply" => Some("__ply_at"),
+                "perlin" => Some("__perlin_at"),
+                "sine" => Some("__sine_at"),
+                "cosine" => Some("__cosine_at"),
+                "rand" => Some("__rand_at"),
+                "saw" => Some("__saw_at"),
+                "step" => Some("__step_at"),
+                "line" => Some("__line_at"),
+                "window" => Some("__window_at"),
+                "chord" => Some("__chord_at"),
                 _ => None,
             };
             let is_direct_call = target.is_some()
@@ -78,7 +100,13 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
                 output.push_str(target.expect("target was checked"));
                 output.push('(');
                 output.push_str(&start.to_string());
-                output.push(',');
+                let mut first_argument = open + 1;
+                while first_argument < bytes.len() && bytes[first_argument].is_ascii_whitespace() {
+                    first_argument += 1;
+                }
+                if bytes.get(first_argument) != Some(&b')') {
+                    output.push(',');
+                }
                 index = open + 1;
                 previous_word = None;
                 last_significant = Some(b'(');
@@ -158,10 +186,40 @@ mod tests {
 
     #[test]
     fn direct_calls_receive_original_byte_offsets() {
-        let source = "local p = pattern(\"a\") >> degrade(0.2) >> sometimes(0.1, rev)\nplay(v, p)";
+        let source = "local p = pattern(\"a\") >> degrade(0.2) >> sometimes(0.1, rev)\nlocal x = perlin(0.1)\nplay(v, p)";
         assert_eq!(
             inject_call_sites(source),
-            "local p = __pattern_at(10,\"a\") >> __degrade_at(26,0.2) >> __sometimes_at(42,0.1, rev)\n__play_at(62,v, p)"
+            "local p = __pattern_at(10,\"a\") >> __degrade_at(26,0.2) >> __sometimes_at(42,0.1, rev)\nlocal x = __perlin_at(72,0.1)\n__play_at(84,v, p)"
+        );
+    }
+
+    #[test]
+    fn transport_signal_calls_receive_original_byte_offsets() {
+        let source = "local a = step(bars(2))\nlocal b = line(0, 1, bars(2)) + sine(0.5)\nlocal c = window(0, 1) * saw(2)";
+        assert_eq!(
+            inject_call_sites(source),
+            "local a = __step_at(10,bars(2))\nlocal b = __line_at(34,0, 1, bars(2)) + __sine_at(56,0.5)\nlocal c = __window_at(76,0, 1) * __saw_at(91,2)"
+        );
+    }
+
+    #[test]
+    fn empty_signal_calls_do_not_receive_a_trailing_comma() {
+        assert_eq!(inject_call_sites("sine()"), "__sine_at(0)");
+    }
+
+    #[test]
+    fn literal_chords_receive_construction_site_identity() {
+        assert_eq!(
+            inject_call_sites("local harmony = chord(\"Dm(add9)\")"),
+            "local harmony = __chord_at(16,\"Dm(add9)\")"
+        );
+    }
+
+    #[test]
+    fn mini_literal_on_the_left_of_a_transform_keeps_its_site() {
+        assert_eq!(
+            inject_call_sites(r#"play(v, "c4 e4" >> velocity(0.5))"#),
+            r#"__play_at(0,v, __pattern_at(8,"c4 e4") >> velocity(0.5))"#
         );
     }
 
@@ -174,6 +232,7 @@ mod tests {
           object.pattern("x")
           object.degrade(0.5)
           object.sometimes(0.5, rev)
+          object.perlin(0.1)
           local function play(v) return v end
         "#;
         assert_eq!(inject_call_sites(source), source);

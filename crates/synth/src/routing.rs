@@ -14,6 +14,7 @@
 //! Keeping those distinct prevents a score-level control from pretending it
 //! can address a local wire inside an instrument.
 
+use apteronotus_pattern::Pattern;
 use core::ops::Range;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -115,10 +116,23 @@ pub struct EventSend {
     pub level: f64,
 }
 
+/// A score rhythm compiled into a continuous gain envelope by the scheduler.
+///
+/// This remains track routing rather than a voice parameter: every routed lane
+/// of the completed voice is attenuated together, including event and graph
+/// sends. The scheduler owns the tempo projection because the synthesis graph
+/// has only note-relative clocks.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DuckControl {
+    pub pattern: Pattern,
+    pub amount: f64,
+}
+
 /// Routing values bound once per onset.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct EventRouting {
     sends: Vec<EventSend>,
+    duck: Option<DuckControl>,
 }
 
 impl EventRouting {
@@ -137,6 +151,54 @@ impl EventRouting {
     pub fn sends(&self) -> &[EventSend] {
         &self.sends
     }
+
+    pub fn duck(
+        &mut self,
+        pattern: Pattern,
+        amount: f64,
+    ) -> Result<&mut EventRouting, RoutingError> {
+        if !amount.is_finite() || !(0.0..=1.0).contains(&amount) {
+            return Err(RoutingError::InvalidDuckAmount);
+        }
+        if self.duck.is_some() {
+            return Err(RoutingError::DuplicateDuck);
+        }
+        self.duck = Some(DuckControl { pattern, amount });
+        Ok(self)
+    }
+
+    pub fn duck_control(&self) -> Option<&DuckControl> {
+        self.duck.as_ref()
+    }
+
+    pub fn merge(&mut self, other: &EventRouting) -> Result<&mut EventRouting, RoutingError> {
+        for send in other.sends() {
+            self.send(send.bus, send.level)?;
+        }
+        if let Some(duck) = other.duck_control() {
+            self.duck(duck.pattern.clone(), duck.amount)?;
+        }
+        Ok(self)
+    }
+
+    /// Rebind arena-scoped bus handles onto an equivalent retained layout.
+    pub fn rebound(
+        &self,
+        from: &BusLayout,
+        target: &BusLayout,
+    ) -> Result<EventRouting, RoutingError> {
+        let mut routing = EventRouting::new();
+        for send in &self.sends {
+            let bus = from
+                .corresponding_id(send.bus, target)
+                .ok_or(RoutingError::UnknownBus(send.bus))?;
+            routing.send(bus, send.level)?;
+        }
+        if let Some(duck) = &self.duck {
+            routing.duck(duck.pattern.clone(), duck.amount)?;
+        }
+        Ok(routing)
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -153,6 +215,8 @@ pub enum RoutingError {
         found: usize,
     },
     NonFiniteLevel,
+    InvalidDuckAmount,
+    DuplicateDuck,
 }
 
 impl core::fmt::Display for RoutingError {
@@ -173,6 +237,12 @@ impl core::fmt::Display for RoutingError {
                 "bus {bus:?} has {expected} channels but the send has {found}"
             ),
             RoutingError::NonFiniteLevel => write!(f, "send level is not finite"),
+            RoutingError::InvalidDuckAmount => {
+                write!(f, "duck amount must be finite and within 0..=1")
+            }
+            RoutingError::DuplicateDuck => {
+                write!(f, "a track may have only one duck control")
+            }
         }
     }
 }

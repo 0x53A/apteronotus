@@ -1,7 +1,8 @@
 use apteronotus_lua::{EvalError, Evaluator, Limits, evaluate};
 use apteronotus_pattern::{ControlValue, CurveClock, Frac, Span, Value};
 use apteronotus_synth::{
-    GraphLimits, Note, Op, instantiate,
+    ControlStore, GraphLimits, Note, Op, Source, instantiate, instantiate_patch,
+    instantiate_with_controls,
     lower::{render, rms, zero_crossing_hz},
 };
 
@@ -146,6 +147,43 @@ fn duration_units_are_checked_at_their_binding_boundaries() {
     )
     .unwrap();
 
+    let beat_program = evaluate(
+        r#"
+        tempo(120)
+        local timed = voice {
+          graph = function(n) return sine(n.hz) >> delay(beats(1)) end,
+        }
+        play(timed, pattern("c4") >> shift(beats(1)))
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        beat_program.tracks[0].pattern.onsets(Span::cycle(0))[0]
+            .part
+            .begin,
+        Frac::new(1, 4)
+    );
+
+    let beat_order_error = evaluate("local x = beats(1)\ntempo(120)")
+        .unwrap_err()
+        .to_string();
+    assert!(beat_order_error.contains("requires tempo"));
+
+    let changing_beat_error = evaluate(
+        r#"
+        tempo {
+          { at = bars(0), bpm = 120 },
+          { at = bars(4), bpm = 90 },
+        }
+        local timed = voice {
+          graph = function(n) return sine(n.hz) >> delay(beats(1)) end,
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(changing_beat_error.contains("changing tempo"));
+
     let graph_error = evaluate(
         r#"
         local timed = voice {
@@ -244,6 +282,63 @@ fn pattern_growth_is_bounded_separately_from_lua_memory() {
         .evaluate(r#"pattern("a b c d e f")"#)
         .unwrap_err();
     assert!(error.to_string().contains("pattern node limit"));
+}
+
+#[test]
+fn optional_audio_input_count_is_host_bounded() {
+    let error = Evaluator::new(Limits {
+        audio_inputs: 0,
+        ..Limits::default()
+    })
+    .evaluate(
+        r#"
+        local room = audio_input {
+          name = "room",
+          channels = 1,
+          fallback = "silence",
+        }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("audio input limit of 0 exceeded"));
+}
+
+#[test]
+fn cycle_hold_lookback_has_its_own_host_policy_limit() {
+    let limits = Limits {
+        max_hold_cycles: 4,
+        ..Limits::default()
+    };
+    for source in [
+        r#"local notes = pattern("c4") >> hold(bars(5))"#,
+        r#"tempo(120); local notes = pattern("c4") >> hold(beats(17))"#,
+    ] {
+        let error = Evaluator::new(limits)
+            .evaluate(source)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("query look-back limit of 4 cycles"),
+            "{error}"
+        );
+    }
+
+    // Seconds holds become finite timeline event extents. They do not create a
+    // Pattern::Hold look-back and therefore use a different resource policy.
+    Evaluator::new(Limits {
+        max_hold_cycles: 0,
+        ..Limits::default()
+    })
+    .evaluate(
+        r#"
+        tempo(120)
+        local score = timeline {
+          at(bars(0), pattern("c4") >> hold(secs(1))),
+        }
+        "#,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -347,7 +442,6 @@ fn typed_patch_operators_lower_song_shaped_graphs() {
         Op::Add,
         Op::Shape {
             kind: apteronotus_synth::ShapeKind::Tanh,
-            amount: 1.4,
         },
         Op::DcBlock,
         Op::Mul,
@@ -355,6 +449,30 @@ fn typed_patch_operators_lower_song_shaped_graphs() {
     ] {
         assert!(voice.nodes.iter().any(|node| node.op == expected));
     }
+}
+
+#[test]
+fn zero_and_soft_saw_cover_accumulator_and_readable_stdlib_roles() {
+    let program = evaluate(
+        r#"
+        local pad = voice {
+          graph = function(n)
+            local oscillators = zero()
+            for i = -1, 1 do
+              oscillators = oscillators + soft_saw(n.hz * (1 + i * 0.003))
+            end
+            return oscillators * 0.02
+          end,
+        }
+        play(pad, "c4")
+        "#,
+    )
+    .unwrap();
+
+    assert!(program.voices[0].nodes.len() >= 15);
+    program
+        .validate(Limits::default().graph_publication)
+        .unwrap();
 }
 
 #[test]
@@ -477,7 +595,7 @@ fn persistent_patches_controls_buses_and_graph_sends_are_plain_program_data() {
     assert_eq!(program.controls.specs().len(), 2);
     assert_eq!(program.patches.len(), 1);
     assert_eq!(program.patches[0].graph().inputs, 1);
-    assert_eq!(program.runs[0].index(), 0);
+    assert_eq!(program.runs[0].patch.index(), 0);
     assert_eq!(program.buses.total_channels(), 4);
     assert_eq!(program.voices[0].sends.len(), 1);
     assert!(
@@ -487,6 +605,203 @@ fn persistent_patches_controls_buses_and_graph_sends_are_plain_program_data() {
             .iter()
             .any(|node| matches!(node.op, Op::Delay(_)))
     );
+}
+
+#[test]
+fn user_controls_cannot_enter_the_engine_owned_signal_namespace() {
+    let error = evaluate(
+        r#"
+        local hidden = control {
+          name = "__apteronotus.signal.0",
+          range = { 0, 1 },
+          default = 0.5,
+        }
+        "#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("are reserved"), "{error}");
+}
+
+#[test]
+fn score_sends_are_owned_track_routing_not_graph_taps() {
+    let program = evaluate(
+        r#"
+        local room = bus { channels = 2 }
+        local pad = voice {
+          graph = function(n)
+            return sine(n.hz) * 0.05 >> pan(n.pan)
+          end,
+        }
+        play(pad, pattern("c4 e4") >> to(room, 0.35))
+        "#,
+    )
+    .unwrap();
+
+    assert!(program.voices[0].sends.is_empty());
+    assert_eq!(program.tracks[0].routing.sends().len(), 1);
+    assert_eq!(program.tracks[0].routing.sends()[0].level, 0.35);
+    program
+        .validate(Limits::default().graph_publication)
+        .unwrap();
+}
+
+#[test]
+fn program_send_returns_and_stereo_master_finalize_after_bus_layout() {
+    let program = evaluate(
+        r#"
+        tempo(120)
+        local room = send {
+          graph = reverb(18, secs(1.2), 0.55),
+          level = 0.25,
+        }
+        local tone = voice {
+          graph = function(n)
+            return (sine(n.hz) * decay(ms(80)) * 0.08)
+                >> pan(n.pan)
+                >> to(room, 0.3)
+          end,
+        }
+        play(tone, "c4 ~")
+        master(limiter(ms(3), ms(120)) >> mul(0.85))
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(program.runs.len(), 1);
+    let patch = program.patch(program.runs[0].patch).unwrap();
+    assert_eq!(patch.graph().inputs, program.buses.total_channels());
+    assert_eq!(patch.graph().channels(), program.buses.main_channels());
+}
+
+#[test]
+fn diffuser_spellings_expand_to_bounded_allpass_stages() {
+    let program = evaluate(
+        r#"
+        local compact = voice {
+          graph = function(n)
+            return sine(n.hz) >> diffuse({ ms(4.7), ms(6.8) }, 0.72)
+          end,
+        }
+        local explicit = voice {
+          graph = function(n)
+            return sine(n.hz) >> diffuse {
+              delays = { ms(10.1), ms(13.7) },
+              gains = { 0.67, -0.65 },
+            }
+          end,
+        }
+        play(compact, "c4")
+        play(explicit, "e4")
+        "#,
+    )
+    .unwrap();
+
+    for voice in &program.voices {
+        let stages = voice
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.op, Op::AllpassDelay { .. }))
+            .count();
+        assert_eq!(stages, 2);
+    }
+    program
+        .validate(Limits::default().graph_publication)
+        .unwrap();
+}
+
+#[test]
+fn send_fdn_resolves_its_declared_live_decay_control() {
+    let program = evaluate(
+        r#"
+        local hall = send {
+          params = {
+            decay = { 1, 18, 8.6, "s" },
+          },
+          graph = diffuse({ ms(4.7), ms(6.8) }, 0.7)
+               >> fdn {
+                    delays = { ms(43.7), ms(47.9), ms(53.3), ms(59.9) },
+                    decay = param("decay"),
+                    damping = 0.46,
+                    modulation = { rate = 0.11, depth = ms(1.7) },
+                  },
+          level = 0.4,
+        }
+        local tone = voice {
+          graph = function(n)
+            return sine(n.hz) * decay(ms(60)) >> pan(0) >> to(hall, 0.5)
+          end,
+        }
+        play(tone, "c4")
+        "#,
+    )
+    .unwrap();
+
+    assert!(program.controls.specs().iter().any(|control| {
+        control.name == "send1.decay"
+            && control.min == 1.0
+            && control.max == 18.0
+            && control.default == 8.6
+    }));
+    let return_patch = program.patch(program.runs[0].patch).unwrap();
+    assert!(
+        return_patch
+            .graph()
+            .nodes
+            .iter()
+            .any(|node| { matches!(node.op, Op::Fdn { max_t60: 18.0, .. }) })
+    );
+    program
+        .validate(Limits::default().graph_publication)
+        .unwrap();
+}
+
+#[test]
+fn finite_patch_play_builds_a_control_driver_sharing_the_patch_arena() {
+    let program = evaluate(
+        r#"
+        tempo(120)
+        local lead = patch {
+          controls = {
+            pitch = note_control("c4"),
+            gate = gate_control(false),
+            pressure = control { range = { 0, 1 }, default = 0.4 },
+          },
+          graph = function(c)
+            return sine(note_hz(c.pitch))
+              * gate_env(c.gate, ms(2), ms(10), 0.8, ms(30))
+              * c.pressure
+          end,
+        }
+        play(lead, timeline {
+          at(bars(0), note("c4") >> hold(secs(0.2)) >> lead.pressure(0.7))
+        })
+        "#,
+    )
+    .unwrap();
+
+    let controls = ControlStore::new(&program.controls);
+    let patch_controls = &program.patch_controls[0];
+    let gate = patch_controls
+        .iter()
+        .find(|control| control.name == "gate")
+        .unwrap()
+        .id;
+    let driver = program.voice(program.tracks[0].voice).unwrap();
+    let mut driver =
+        instantiate_with_controls(driver, &Note::new(261.6256).duration(0.2), &controls).unwrap();
+    let mut patch = instantiate_patch(&program.patches[0], &controls).unwrap();
+    driver.set_sample_rate(SR);
+    patch.set_sample_rate(SR);
+    let mut driver_frame = vec![0.0; driver.outputs()];
+    let mut patch_frame = vec![0.0; patch.outputs()];
+    let mut peak = 0.0_f32;
+    for _ in 0..2_000 {
+        driver.tick(&[], &mut driver_frame);
+        patch.tick(&[], &mut patch_frame);
+        peak = peak.max(patch_frame[0].abs());
+    }
+    assert_eq!(controls.value(gate).unwrap(), 1.0);
+    assert!(peak > 0.01);
 }
 
 #[test]
@@ -575,7 +890,7 @@ fn voice_scoped_setters_carry_note_phase_curves_into_owned_patterns() {
           offset = 0,
           { basis = "ramp", coefficient = 1, delay = 0, length = 1 },
         }
-        local notes = pattern("c4 e4") >> pad.pressure(pressure)
+        local notes = pattern("c4 e4") >> hold(bars(1)) >> pad.pressure(pressure)
         play(pad, notes)
         "#,
     )
@@ -586,6 +901,51 @@ fn voice_scoped_setters_carry_note_phase_curves_into_owned_patterns() {
         panic!("pressure was sampled instead of carried as a curve");
     };
     assert_eq!(curve.clock, CurveClock::NotePhase);
+}
+
+#[test]
+fn phase_breakpoints_desugar_to_a_live_curve_and_require_hold() {
+    let program = evaluate(
+        r#"
+        local pad = voice {
+          params = { pressure = { 0, 1, 0 } },
+          graph = function(n) return sine(n.hz) * n.pressure end,
+        }
+        local shape = curve {
+          { phase(0.00), 0.10 },
+          { phase(0.25), 0.90 },
+          { phase(1.00), 0.20 },
+        }
+        play(pad, pattern("c4") >> hold(bars(2)) >> pad.pressure(shape))
+        "#,
+    )
+    .unwrap();
+
+    let event = program.tracks[0].pattern.onsets(Span::cycle(0)).remove(0);
+    let ControlValue::Curve(curve) = event.value.as_map().unwrap().get("pressure").unwrap() else {
+        panic!("breakpoint curve was sampled instead of carried whole");
+    };
+    assert_eq!(curve.clock, CurveClock::NotePhase);
+    assert_eq!(curve.terms.len(), 2);
+    assert!((curve.at_coordinate(0.25) - 0.90).abs() < 1.0e-12);
+    assert!((curve.at_coordinate(1.00) - 0.20).abs() < 1.0e-12);
+
+    let error = evaluate(
+        r#"
+        local pad = voice {
+          params = { pressure = { 0, 1, 0 } },
+          graph = function(n) return sine(n.hz) * n.pressure end,
+        }
+        local shape = curve {
+          { phase(0), 0 },
+          { phase(1), 1 },
+        }
+        play(pad, pattern("c4") >> pad.pressure(shape))
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("require an explicit hold"), "{error}");
 }
 
 #[test]
@@ -697,6 +1057,335 @@ fn structural_pattern_transforms_build_owned_ast_nodes() {
 }
 
 #[test]
+fn arp_serializes_group_members_with_derived_or_explicit_spacing() {
+    let program = evaluate(
+        r#"
+        local v = voice {
+          graph = function(n) return sine(n.hz) * 0.03 end,
+        }
+        play(v, pattern("[c4,e4,g4]") >> arp("down"))
+        "#,
+    )
+    .unwrap();
+    let events = program.tracks[0].pattern.onsets(Span::cycle(0));
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.whole.unwrap().begin)
+            .collect::<Vec<_>>(),
+        vec![Frac::ZERO, Frac::new(1, 3), Frac::new(2, 3)]
+    );
+
+    let spaced = evaluate(
+        r#"
+        local v = voice {
+          graph = function(n) return sine(n.hz) * 0.03 end,
+        }
+        play(v, pattern("[c4,e4,g4]") >> arp("up", bars(0.25)))
+        "#,
+    )
+    .unwrap();
+    let events = spaced.tracks[0].pattern.onsets(Span::cycle(0));
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.whole.unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Span::new(Frac::ZERO, Frac::new(1, 4)),
+            Span::new(Frac::new(1, 4), Frac::new(1, 2)),
+            Span::new(Frac::new(1, 2), Frac::new(3, 4)),
+        ]
+    );
+}
+
+#[test]
+fn literal_chords_expand_to_grouped_owned_pitches_before_query_time() {
+    let program = evaluate(
+        r#"
+        local v = voice {
+          graph = function(n) return sine(n.hz) * 0.03 end,
+        }
+        local voiced = chord("Dm(add9)") >> anchor("a4") >> voicing("open-5")
+        play(v, voiced)
+        play(v, voiced >> arp("outside-in"))
+        local finite = timeline { at(bars(0), voiced) }
+        play(v, finite >> root_notes() >> octave(-2))
+        "#,
+    )
+    .unwrap();
+
+    let chord = program.tracks[0].pattern.onsets(Span::cycle(0));
+    assert_eq!(chord.len(), 5);
+    for (index, event) in chord.iter().enumerate() {
+        let group = event.group.unwrap();
+        assert_eq!(group.index, index as u32);
+        assert_eq!(group.count, 5);
+        assert!(event.src.is_some());
+        let midi = event
+            .value
+            .as_map()
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!([2, 4, 5, 9].contains(&((midi.round() as i32).rem_euclid(12))));
+        assert!(midi <= 69.0);
+    }
+
+    let arp = program.tracks[1].pattern.onsets(Span::cycle(0));
+    assert_eq!(arp.len(), 5);
+    assert!(arp.iter().all(|event| event.group.is_none()));
+    assert_eq!(
+        arp.iter()
+            .map(|event| event.whole.unwrap().begin)
+            .collect::<Vec<_>>(),
+        vec![
+            Frac::ZERO,
+            Frac::new(1, 5),
+            Frac::new(2, 5),
+            Frac::new(3, 5),
+            Frac::new(4, 5),
+        ]
+    );
+
+    let root = program.tracks[2].pattern.onsets(Span::cycle(0));
+    assert_eq!(root.len(), 1);
+    assert!(root[0].group.is_none());
+    let midi = root[0]
+        .value
+        .as_map()
+        .unwrap()
+        .get("value")
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert_eq!((midi.round() as i32).rem_euclid(12), 2);
+    assert!(midi < 48.0);
+
+    let error = evaluate(
+        r#"
+        local v = voice {
+          graph = function(n) return sine(n.hz) * 0.03 end,
+        }
+        play(v, pattern("c4") >> octave(-1))
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("numeric event values"), "{error}");
+}
+
+#[test]
+fn tempo_and_timeline_evaluate_to_owned_finite_score_data() {
+    let program = evaluate(
+        r#"
+        tempo {
+          { at = bars(0), bpm = 60 },
+          { at = bars(2), bpm = 120 },
+        }
+        local tone = voice {
+          graph = function(n) return sine(n.hz) * n.velocity * 0.08 end,
+        }
+        local score = timeline {
+          at(bars(0), pattern("[c4,e4,g4]")),
+          at(secs(9), pattern("a4")),
+        }
+        play(tone, score)
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(program.tempo.bpm_at(Frac::ZERO), 60.0);
+    assert_eq!(program.tempo.bpm_at(Frac::int(2)), 120.0);
+    let events = program.tracks[0]
+        .pattern
+        .onsets(Span::new(Frac::ZERO, Frac::int(8)));
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[3].whole.unwrap().begin, Frac::new(5, 2));
+    assert_eq!(
+        events[0].group.map(|group| (group.index, group.count)),
+        Some((0, 3))
+    );
+    assert!(
+        program.tracks[0]
+            .pattern
+            .query(Span::new(Frac::int(4), Frac::int(8)))
+            .is_empty()
+    );
+}
+
+#[test]
+fn hold_uses_exact_cycle_time_or_resolves_seconds_at_timeline_placement() {
+    let cycle_program = evaluate(
+        r#"
+        local tone = voice {
+          graph = function(n) return sine(n.hz) * 0.01 end,
+        }
+        play(tone, pattern("c4 e4") >> hold(bars(2)))
+        "#,
+    )
+    .unwrap();
+    let cycle_events = cycle_program.tracks[0].pattern.onsets(Span::cycle(0));
+    assert_eq!(cycle_events[0].whole.unwrap().length(), Frac::int(2));
+    assert_eq!(cycle_events[1].whole.unwrap().length(), Frac::int(2));
+
+    let seconds_program = evaluate(
+        r#"
+        tempo {
+          { at = bars(0), bpm = 60 },
+          { at = bars(2), bpm = 120, over = bars(2) },
+        }
+        local tone = voice {
+          graph = function(n) return sine(n.hz) * 0.01 end,
+        }
+        play(tone, timeline {
+          at(bars(0), pattern("c4") >> hold(secs(1))),
+          at(bars(1), pattern("e4") >> hold(secs(1))),
+        })
+        "#,
+    )
+    .unwrap();
+    let events = seconds_program.tracks[0]
+        .pattern
+        .onsets(Span::new(Frac::ZERO, Frac::int(3)));
+    assert_eq!(events.len(), 2);
+    for event in events {
+        let whole = event.whole.unwrap();
+        let seconds = seconds_program.tempo.span_to_seconds(whole);
+        assert!((seconds - 1.0).abs() < 1.0e-5, "{whole:?} lasted {seconds}");
+    }
+
+    let error = evaluate(
+        r#"
+        tempo(120)
+        local tone = voice {
+          graph = function(n) return sine(n.hz) * 0.01 end,
+        }
+        play(tone, pattern("c4") >> hold(secs(1)))
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("must be resolved inside at"), "{error}");
+}
+
+#[test]
+fn key_is_owned_tonal_context_not_an_evaluation_noop() {
+    let program = evaluate(
+        r#"
+        key("f#", "minor")
+        local v = voice {
+          graph = function(n) return sine(n.hz) * 0.02 end,
+        }
+        play(v, "f#3")
+        "#,
+    )
+    .unwrap();
+
+    let key = program.key.expect("key declaration is owned by Program");
+    assert_eq!(key.tonic.semitones(), 6);
+    assert_eq!(key.mode, apteronotus_music::Mode::Minor);
+    assert!(
+        evaluate("key('d', 'dorian'); key('c', 'major')")
+            .unwrap_err()
+            .to_string()
+            .contains("only once")
+    );
+}
+
+#[test]
+fn absolute_timeline_placements_require_an_explicit_prior_clock() {
+    let missing = evaluate(
+        r#"
+        local score = timeline { at(secs(1), pattern("c4")) }
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(missing.contains("requires tempo(...) earlier"));
+
+    let late = evaluate(
+        r#"
+        local score = timeline { at(secs(1), pattern("c4")) }
+        tempo(120)
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(late.contains("requires tempo(...) earlier"));
+}
+
+#[test]
+fn transport_signals_build_owned_arithmetic_and_dynamic_setters() {
+    let program = evaluate(
+        r#"
+        local pad = voice {
+          params = { cutoff = { 200, 2000, 800, "hz" } },
+          graph = function(n)
+            return sine(n.hz) * n.velocity * 0.08
+          end,
+        }
+        local main = step(bars(1))
+        local movement = scale(400, 1600, sine(0.5))
+        play(pad, pattern("c4*4")
+          >> velocity("0.5 1" * (0.5 + 0.5 * main))
+          >> pad.cutoff(movement)
+          >> pan("-0.25 0.25"))
+        "#,
+    )
+    .unwrap();
+
+    let first = program.tracks[0].pattern.onsets(Span::cycle(0));
+    let second = program.tracks[0].pattern.onsets(Span::cycle(1));
+    let field = |event: &apteronotus_pattern::Event, name| {
+        event
+            .value
+            .as_map()
+            .unwrap()
+            .get(name)
+            .and_then(ControlValue::as_f64)
+            .unwrap()
+    };
+    assert_eq!(field(&first[0], "velocity"), 0.25);
+    assert_eq!(field(&first[2], "velocity"), 0.5);
+    assert_eq!(field(&second[0], "velocity"), 0.5);
+    assert_eq!(field(&second[2], "velocity"), 1.0);
+    assert!((400.0..=1600.0).contains(&field(&first[0], "cutoff")));
+    assert!(
+        first[0]
+            .value
+            .as_map()
+            .unwrap()
+            .field("cutoff")
+            .unwrap()
+            .src()
+            .is_some()
+    );
+    assert_eq!(field(&first[0], "pan"), -0.25);
+    assert_eq!(field(&first[2], "pan"), 0.25);
+}
+
+#[test]
+fn pattern_arithmetic_rejects_text_instead_of_silently_preserving_it() {
+    let error = evaluate(
+        r#"
+        local v = voice {
+          graph = function(n) return sine(n.hz) * 0.05 end,
+        }
+        local movement = step(bars(1))
+        play(v, pattern("c4 e4") * movement)
+        "#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("pattern arithmetic requires numeric event values"));
+    assert!(error.contains("source bytes"));
+}
+
+#[test]
 fn degrade_uses_stable_distinct_source_site_seeds() {
     let source = r#"
         local tone = voice {
@@ -788,4 +1477,197 @@ fn compatible_persistent_programs_rebind_new_voices_to_the_live_arena() {
 
     let changed_patch = evaluate(&source("saw", 111.0, "")).unwrap();
     assert!(!changed_patch.persistent_compatible_with(&active));
+}
+
+#[test]
+fn optional_inputs_are_owned_once_and_can_feed_multiple_graphs() {
+    let program = evaluate(
+        r#"
+        local city = audio_input {
+          name = "city",
+          channels = 1,
+          fallback = "silence",
+        }
+        local expression = control_input {
+          name = "expression",
+          range = { 0, 1 },
+          default = 0.4,
+        }
+        local first = patch {
+          graph = function()
+            return (city + expression * 0) >> pan(-0.2)
+          end,
+        }
+        local second = patch {
+          graph = function()
+            return (city * 0.5) >> pan(0.2)
+          end,
+        }
+        run(first)
+        run(second)
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(program.audio_inputs.specs().len(), 1);
+    assert_eq!(program.audio_inputs.specs()[0].name, "city");
+    assert_eq!(program.audio_inputs.specs()[0].channels, 1);
+    assert_eq!(program.control_inputs, ["expression"]);
+    assert!(program.controls.id("expression").is_some());
+    for patch in &program.patches {
+        assert!(patch.graph().nodes.iter().any(|node| {
+            node.inputs
+                .iter()
+                .any(|input| matches!(input.source, Source::ExternalAudio { .. }))
+        }));
+    }
+}
+
+#[test]
+fn compatible_optional_inputs_rebind_across_evaluation_arenas() {
+    let source = r#"
+        local city = audio_input {
+          name = "city",
+          channels = 1,
+          fallback = "silence",
+        }
+        local expression = control_input {
+          name = "expression",
+          range = { 0, 1 },
+          default = 0.4,
+        }
+        local rack = patch {
+          graph = function()
+            return (city + expression * 0) >> pan(0)
+          end,
+        }
+        run(rack)
+    "#;
+    let active = evaluate(source).unwrap();
+    let mut candidate = evaluate(source).unwrap();
+
+    assert!(candidate.persistent_compatible_with(&active));
+    assert!(candidate.reuse_persistent_from(&active));
+    candidate
+        .validate(Limits::default().graph_publication)
+        .unwrap();
+
+    let changed = evaluate(&source.replace("name = \"city\"", "name = \"street\"")).unwrap();
+    assert!(!changed.persistent_compatible_with(&active));
+}
+
+#[test]
+fn finite_run_owns_an_exact_transport_span() {
+    let program = evaluate(
+        r#"
+        tempo(120)
+        local weather = patch {
+          graph = function()
+            return sine(110) * 0.05 >> pan(0)
+          end,
+        }
+        run(weather, span(bars(1), bars(3)))
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(program.runs.len(), 1);
+    assert_eq!(
+        program.runs[0].span,
+        Some(apteronotus_pattern::Span::new(
+            apteronotus_pattern::Frac::ONE,
+            apteronotus_pattern::Frac::int(3)
+        ))
+    );
+}
+
+#[test]
+fn transport_pattern_control_is_compiled_into_flat_persistent_data() {
+    let program = evaluate(
+        r#"
+        tempo(72)
+        local rack = patch {
+          graph = function()
+            local pulse = control_signal(
+              "1 0.2 0.6 0.15" >> segment(4) >> slow(3),
+              bars(3))
+            return sine(220) * pulse * 0.05 >> pan(0)
+          end,
+        }
+        run(rack)
+        "#,
+    )
+    .unwrap();
+
+    let graph = program.patch(program.runs[0].patch).unwrap().graph();
+    assert!(graph.nodes.iter().any(|node| {
+        matches!(
+            &node.op,
+            Op::TransportSequence {
+                period_seconds,
+                slots,
+            } if (*period_seconds - 10.0).abs() < 1.0e-9 && slots.len() == 4
+        )
+    }));
+}
+
+#[test]
+fn transport_pattern_control_period_is_bounded_before_querying() {
+    let error = Evaluator::new(Limits {
+        max_control_signal_cycles: 0,
+        ..Limits::default()
+    })
+    .evaluate(
+        r#"
+        tempo(72)
+        local rack = patch {
+          graph = function()
+            return sine(220) * control_signal(pattern("1"), bars(1)) * 0.05 >> pan(0)
+          end,
+        }
+        run(rack)
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("compile-window limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn external_onset_and_init_samples_remain_distinct_in_the_owned_track() {
+    let program = evaluate(
+        r#"
+        tempo(72)
+        local them = audio_input {
+          name = "them",
+          channels = 1,
+          fallback = "silence",
+        }
+        local hz = them >> pitch_tracker { min = 65, max = 1100, hold = ms(140) }
+        local amp = them >> envelope_follower(ms(6), ms(320))
+        local hit = them >> onset_detector { floor = 0.04, hold = ms(90) }
+        local bell = voice {
+          params = { ring = { 0.4, 6.0, 2.4, "s" } },
+          graph = function(n)
+            return sine(n.hz) * n.velocity * n.ring * 0.01 >> pan(0)
+          end,
+        }
+        play(bell, hit
+          >> bell.hz(at_onset(hz >> slew(ms(20))))
+          >> bell.velocity(at_onset(scale(0.15, 0.9, amp)))
+          >> bell.ring(at_onset(scale(1.2, 5.0, amp))))
+        "#,
+    )
+    .unwrap();
+
+    let track = &program.tracks[0];
+    assert!(track.external_trigger.is_some());
+    assert_eq!(track.onset_bindings.len(), 3);
+    assert!(track.pattern.query(Span::cycle(0)).is_empty());
+    program
+        .validate(Limits::default().graph_publication)
+        .unwrap();
 }

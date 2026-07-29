@@ -8,6 +8,7 @@ license.workspace = true
 apteronotus-music = { version = "0.1.0", path = "../music" }
 apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
 apteronotus-synth = { version = "0.1.0", path = "../synth" }
+apteronotus-transport = { version = "0.1.0", path = "../transport" }
 fundsp = { version = "0.23.0", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

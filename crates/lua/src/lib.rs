@@ -11,7 +11,10 @@ mod program;
 mod source;
 
 pub use error::EvalError;
-pub use program::{PatchId, Program, ProgramError, Track, VoiceId};
+pub use program::{
+    ExternalControlBinding, ExternalDegrade, PatchControl, PatchControlKind, PatchId, PatchRun,
+    Program, ProgramError, Track, VoiceId,
+};
 
 use apteronotus_pattern::ValueLimits;
 use apteronotus_synth::GraphLimits;
@@ -39,11 +42,26 @@ pub struct Limits {
     pub graph_publication: GraphLimits,
     /// Pattern AST nodes allocated across parsed values and stored tracks.
     pub pattern_nodes: usize,
+    /// Maximum look-back introduced by one cycle-domain `hold`.
+    ///
+    /// This is separate from pattern density: hold does not create more
+    /// onsets per cycle, but querying it may inspect this many earlier cycles
+    /// to recover continuations.
+    pub max_hold_cycles: i64,
+    /// Maximum cycle-domain period compiled by one `control_signal`.
+    ///
+    /// Compilation queries the whole period during evaluation, so this bounds
+    /// the same duration-times-density resource shape as `hold` without
+    /// pretending that either operation changes steady-state pattern density.
+    pub max_control_signal_cycles: i64,
     /// Maximum map width and curve terms in one pattern event.
     pub pattern_values: ValueLimits,
+    /// Tempo points in one evaluated score.
+    pub tempo_points: usize,
     pub voices: usize,
     pub patches: usize,
     pub controls: usize,
+    pub audio_inputs: usize,
     pub buses: usize,
     pub tracks: usize,
 }
@@ -60,14 +78,19 @@ impl Default for Limits {
                 connections: 100_000,
                 input_channels: 256,
                 output_channels: 256,
+                data_entries: 65_536,
                 delay_buffer_seconds: 600.0,
                 tail_seconds: 600.0,
             },
             pattern_nodes: 200_000,
+            max_hold_cycles: 4_096,
+            max_control_signal_cycles: 4_096,
             pattern_values: ValueLimits::default(),
+            tempo_points: 1_024,
             voices: 256,
             patches: 256,
             controls: 2_048,
+            audio_inputs: 256,
             buses: 256,
             tracks: 2_048,
         }
@@ -154,6 +177,7 @@ impl Evaluator {
         lua.try_enter(|ctx| {
             let executor = ctx.fetch(&executor);
             executor.take_result::<()>(ctx)??;
+            bindings::finalize(ctx, &state)?;
             Ok(())
         })?;
 

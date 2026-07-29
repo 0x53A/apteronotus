@@ -12,8 +12,9 @@
 use crate::control::ControlId;
 use crate::routing::BusId;
 use crate::template::{
-    Adsr, Curve, DelayRange, GraphSend, GraphTemplate, Implicit, Input, Node, NodeId, Op, ParamId,
-    ParamSpec, ShapeKind, Source, TemplateError,
+    Adsr, BreakpointHorizon, Curve, DelayRange, GraphSend, GraphTemplate, Implicit, InitExpr,
+    InitScalar, InitScalarError, Input, Node, NodeId, Op, ParamId, ParamSpec, ShapeKind, Source,
+    TemplateError,
 };
 use apteronotus_pattern::SrcSpan;
 
@@ -21,6 +22,19 @@ use apteronotus_pattern::SrcSpan;
 pub struct GraphBuilder {
     template: GraphTemplate,
     src: Option<SrcSpan>,
+}
+
+/// Construction-time topology, stability and allocation data for one FDN.
+///
+/// Decay time remains a live signal input to [`GraphBuilder::fdn`]. These
+/// fields describe the delay matrix itself and its publication ceiling.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FdnConfig {
+    pub delays: Vec<f64>,
+    pub damping: f64,
+    pub modulation_rate: f64,
+    pub modulation_depth: f64,
+    pub max_t60: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -87,6 +101,31 @@ impl GraphBuilder {
 
     pub fn input(&self, channel: usize) -> Source {
         Source::Input(channel)
+    }
+
+    /// Publish a persistent program signal into a shared control while
+    /// retaining it in the graph's dataflow.
+    pub fn write_control(&mut self, signal: Source, target: ControlId) -> Source {
+        self.node(
+            Op::ControlWrite { target },
+            [Input {
+                source: signal,
+                src: self.src,
+            }],
+        )
+    }
+
+    /// Keep a control writer alive briefly beyond the note gate so a
+    /// gate-shaped signal can publish its terminating zero.
+    pub fn write_control_with_release(
+        &mut self,
+        signal: Source,
+        target: ControlId,
+        release_seconds: f64,
+    ) -> Source {
+        let source = self.write_control(signal, target);
+        self.set_tail(source, release_seconds);
+        source
     }
 
     /// Attribute every node built from here on to `src`.
@@ -177,6 +216,7 @@ impl GraphBuilder {
             Source::Param(ParamId::Implicit(_)) => None,
             Source::Control(_) => None,
             Source::Input(_) => None,
+            Source::ExternalAudio { .. } => None,
             Source::Port { node, channel: 0 } => {
                 let node = self.template.nodes.get(node)?;
                 let input = |index: usize| self.bounds(node.inputs.get(index)?.source);
@@ -212,6 +252,11 @@ impl GraphBuilder {
         self.node(Op::Sine, [hz])
     }
 
+    pub fn cosine(&mut self, hz: impl Into<Source>) -> Source {
+        let hz = self.arg(hz);
+        self.node(Op::Cosine, [hz])
+    }
+
     pub fn saw(&mut self, hz: impl Into<Source>) -> Source {
         let hz = self.arg(hz);
         self.node(Op::Saw, [hz])
@@ -226,6 +271,10 @@ impl GraphBuilder {
         self.node(Op::Noise, [])
     }
 
+    pub fn pink(&mut self) -> Source {
+        self.node(Op::Pink, [])
+    }
+
     pub fn impulse(&mut self) -> Source {
         self.node(Op::Impulse, [])
     }
@@ -236,9 +285,103 @@ impl GraphBuilder {
         stream: u64,
         min: impl Into<Source>,
         max: impl Into<Source>,
+    ) -> Result<Source, InitScalarError> {
+        let min = self.init_expr(min.into()).ok_or(InitScalarError::Dynamic)?;
+        let max = self.init_expr(max.into()).ok_or(InitScalarError::Dynamic)?;
+        Ok(self.node(Op::InitRandom { stream, min, max }, []))
+    }
+
+    pub fn pluck(
+        &mut self,
+        excitation: Source,
+        frequency: impl Into<Source>,
+        gain_per_second: f64,
+        damping: impl Into<Source>,
+    ) -> Result<Source, InitScalarError> {
+        let frequency = InitScalar::from_source(frequency.into())?;
+        let damping = InitScalar::from_source(damping.into())?;
+        let excitation = self.arg(excitation);
+        Ok(self.node(
+            Op::Pluck {
+                frequency,
+                gain_per_second,
+                damping,
+                // One hertz is a deliberately generous publication bound.
+                // Instantiation rejects lower frequencies before fundsp
+                // allocates its delay line.
+                max_delay_seconds: 1.0,
+            },
+            [excitation],
+        ))
+    }
+
+    /// Smooth a live signal, or construct a previous-note pitch glide when
+    /// the input is exactly the implicit `n.hz` source.
+    ///
+    /// A fresh per-note voice sees `n.hz` as a constant, so an ordinary
+    /// follower would have no transition to observe. The specialized IR node
+    /// makes that score/instantiation boundary explicit while leaving every
+    /// other input as a normal live follower.
+    pub fn slew(
+        &mut self,
+        input: Source,
+        response_time: impl Into<Source>,
+    ) -> Result<Source, InitScalarError> {
+        let response_time = InitScalar::from_source(response_time.into())?;
+        if input == Source::Param(ParamId::Implicit(Implicit::Hz)) {
+            Ok(self.node(
+                Op::Portamento {
+                    target: InitScalar::Param(ParamId::Implicit(Implicit::Hz)),
+                    response_time,
+                },
+                [],
+            ))
+        } else {
+            let input = self.arg(input);
+            Ok(self.node(
+                Op::Slew {
+                    response_time,
+                    initial: 0.0,
+                },
+                [input],
+            ))
+        }
+    }
+
+    pub fn slew_from(
+        &mut self,
+        input: Source,
+        response_time: impl Into<Source>,
+        initial: f64,
+    ) -> Result<Source, InitScalarError> {
+        let response_time = InitScalar::from_source(response_time.into())?;
+        let input = self.arg(input);
+        Ok(self.node(
+            Op::Slew {
+                response_time,
+                initial,
+            },
+            [input],
+        ))
+    }
+
+    pub fn gate_env(
+        &mut self,
+        gate: Source,
+        attack: f64,
+        decay: f64,
+        sustain: f64,
+        release: f64,
     ) -> Source {
-        let (min, max) = (self.arg(min), self.arg(max));
-        self.node(Op::InitRandom { stream }, [min, max])
+        self.node(
+            Op::GateEnv {
+                attack,
+                decay,
+                sustain,
+                release,
+            },
+            [self.arg(gate)],
+        )
     }
 
     // --------------------------------------------------------------- filters
@@ -273,6 +416,16 @@ impl GraphBuilder {
         self.node(Op::Bandpass, a)
     }
 
+    pub fn peak(
+        &mut self,
+        audio: Source,
+        cutoff: impl Into<Source>,
+        q: impl Into<Source>,
+    ) -> Source {
+        let a = self.filter_args(audio, cutoff, q);
+        self.node(Op::Peak, a)
+    }
+
     pub fn moog(
         &mut self,
         audio: Source,
@@ -294,9 +447,9 @@ impl GraphBuilder {
 
     // --------------------------------------------------------------- shaping
 
-    pub fn shape(&mut self, audio: Source, kind: ShapeKind, amount: f64) -> Source {
-        let audio = self.arg(audio);
-        self.node(Op::Shape { kind, amount }, [audio])
+    pub fn shape(&mut self, audio: Source, kind: ShapeKind, amount: impl Into<Source>) -> Source {
+        let (audio, amount) = (self.arg(audio), self.arg(amount));
+        self.node(Op::Shape { kind }, [audio, amount])
     }
 
     pub fn dcblock(&mut self, audio: Source) -> Source {
@@ -318,6 +471,159 @@ impl GraphBuilder {
     ) -> Source {
         let (audio, seconds) = (self.arg(audio), self.arg(seconds));
         self.node(Op::Delay(range), [audio, seconds])
+    }
+
+    pub fn reverb(
+        &mut self,
+        left: Source,
+        right: Source,
+        room_size: f64,
+        time: f64,
+        damping: f64,
+    ) -> (Source, Source) {
+        let inputs = [self.arg(left), self.arg(right)];
+        let source = self.node(
+            Op::Reverb {
+                room_size,
+                time,
+                damping,
+            },
+            inputs,
+        );
+        let node = self.node_id(source).expect("reverb is a node");
+        (Source::port(node, 0), Source::port(node, 1))
+    }
+
+    pub fn limiter(
+        &mut self,
+        left: Source,
+        right: Source,
+        attack: f64,
+        release: f64,
+    ) -> (Source, Source) {
+        let inputs = [self.arg(left), self.arg(right)];
+        let source = self.node(Op::Limiter { attack, release }, inputs);
+        let node = self.node_id(source).expect("limiter is a node");
+        (Source::port(node, 0), Source::port(node, 1))
+    }
+
+    pub fn chorus(
+        &mut self,
+        audio: Source,
+        seed: u64,
+        separation: f64,
+        variation: f64,
+        frequency: f64,
+    ) -> Source {
+        let audio = self.arg(audio);
+        self.node(
+            Op::Chorus {
+                seed,
+                separation,
+                variation,
+                frequency,
+            },
+            [audio],
+        )
+    }
+
+    pub fn feedback_delay(
+        &mut self,
+        audio: Source,
+        delay_seconds: f64,
+        cutoff_q: Option<(f64, f64)>,
+        amount: f64,
+    ) -> Source {
+        let audio = self.arg(audio);
+        self.node(
+            Op::FeedbackDelay {
+                delay_seconds,
+                cutoff_q,
+                amount,
+            },
+            [audio],
+        )
+    }
+
+    pub fn allpass_delay(&mut self, audio: Source, seconds: f64, gain: f64) -> Source {
+        self.node(Op::AllpassDelay { seconds, gain }, [self.arg(audio)])
+    }
+
+    pub fn fdn(&mut self, audio: Source, t60: Source, config: FdnConfig) -> Source {
+        let audio = self.arg(audio);
+        let t60 = self.arg(t60);
+        self.node(
+            Op::Fdn {
+                delays: config.delays,
+                damping: config.damping,
+                modulation_rate: config.modulation_rate,
+                modulation_depth: config.modulation_depth,
+                max_t60: config.max_t60,
+            },
+            [audio, t60],
+        )
+    }
+
+    pub fn envelope_follower(&mut self, audio: Source, attack: f64, release: f64) -> Source {
+        let audio = self.arg(audio);
+        self.node(Op::EnvelopeFollower { attack, release }, [audio])
+    }
+
+    pub fn pitch_tracker(
+        &mut self,
+        audio: Source,
+        min_hz: f64,
+        max_hz: f64,
+        default_hz: f64,
+        hold_seconds: f64,
+    ) -> Source {
+        let audio = self.arg(audio);
+        self.node(
+            Op::PitchTracker {
+                min_hz,
+                max_hz,
+                default_hz,
+                hold_seconds,
+            },
+            [audio],
+        )
+    }
+
+    pub fn onset_detector(&mut self, audio: Source, floor: f64, hold_seconds: f64) -> Source {
+        let audio = self.arg(audio);
+        self.node(
+            Op::OnsetDetector {
+                floor,
+                hold_seconds,
+            },
+            [audio],
+        )
+    }
+
+    pub fn transport_sequence(
+        &mut self,
+        period_seconds: f64,
+        slots: Vec<crate::TransportSlot>,
+    ) -> Source {
+        self.node(
+            Op::TransportSequence {
+                period_seconds,
+                slots,
+            },
+            [],
+        )
+    }
+
+    pub fn width(&mut self, left: Source, right: Source, amount: Source) -> [Source; 2] {
+        let source = self.node(
+            Op::Width,
+            [self.arg(left), self.arg(right), self.arg(amount)],
+        );
+        let node = self.node_id(source).expect("width is a node");
+        [
+            Source::Port { node, channel: 0 },
+            Source::Port { node, channel: 1 },
+        ]
     }
 
     // ------------------------------------------------------------ arithmetic
@@ -342,9 +648,24 @@ impl GraphBuilder {
         self.node(Op::Div, [a, b])
     }
 
+    pub fn pow(&mut self, base: impl Into<Source>, exponent: impl Into<Source>) -> Source {
+        let (base, exponent) = (self.arg(base), self.arg(exponent));
+        self.node(Op::Pow, [base, exponent])
+    }
+
     pub fn neg(&mut self, a: Source) -> Source {
         let a = self.arg(a);
         self.node(Op::Neg, [a])
+    }
+
+    pub fn hz_to_midi(&mut self, hz: impl Into<Source>) -> Source {
+        let hz = self.arg(hz);
+        self.node(Op::HzToMidi, [hz])
+    }
+
+    pub fn clamp(&mut self, value: impl Into<Source>, min: f64, max: f64) -> Source {
+        let value = self.arg(value);
+        self.node(Op::Clamp { min, max }, [value])
     }
 
     /// Sum a collection. This is `mix(...)`, and it exists as its own call
@@ -364,8 +685,129 @@ impl GraphBuilder {
         self.node(Op::Adsr(adsr), [])
     }
 
+    pub fn decay(&mut self, seconds: Source) -> Result<Source, DecayError> {
+        let bounds = self.bounds(seconds).ok_or(DecayError::Unbounded)?;
+        if bounds.min <= 0.0 {
+            return Err(DecayError::NonPositive {
+                minimum: bounds.min,
+            });
+        }
+        let seconds = self.arg(seconds);
+        Ok(self.node(
+            Op::Decay {
+                max_seconds: bounds.max,
+            },
+            [seconds],
+        ))
+    }
+
+    pub fn window(
+        &mut self,
+        begin_seconds: Source,
+        end_seconds: Source,
+    ) -> Result<Source, WindowError> {
+        let begin = self
+            .bounds(begin_seconds)
+            .ok_or(WindowError::UnboundedBegin)?;
+        if end_seconds == n::DURATION {
+            if begin.min < 0.0 {
+                return Err(WindowError::NegativeBegin { minimum: begin.min });
+            }
+            // The note duration is not publication-time bounded, but it is
+            // the gate itself. This window can therefore never extend the
+            // voice beyond its already-authoritative gate. A short note whose
+            // duration precedes `begin` simply produces an empty window.
+            return Ok(self.node(
+                Op::Window { max_seconds: 0.0 },
+                [self.arg(begin_seconds), self.arg(end_seconds)],
+            ));
+        }
+        let end = self.bounds(end_seconds).ok_or(WindowError::UnboundedEnd)?;
+        if begin.min < 0.0 {
+            return Err(WindowError::NegativeBegin { minimum: begin.min });
+        }
+        if begin.max >= end.min {
+            return Err(WindowError::Unordered {
+                latest_begin: begin.max,
+                earliest_end: end.min,
+            });
+        }
+        let inputs = [self.arg(begin_seconds), self.arg(end_seconds)];
+        Ok(self.node(
+            Op::Window {
+                max_seconds: end.max,
+            },
+            inputs,
+        ))
+    }
+
     pub fn curve(&mut self, curve: Curve) -> Source {
         self.node(Op::Curve(curve), [])
+    }
+
+    pub fn breakpoint_curve(
+        &mut self,
+        points: &[(Source, f64)],
+    ) -> Result<Source, BreakpointCurveError> {
+        if points.is_empty() {
+            return Err(BreakpointCurveError::Empty);
+        }
+        if points.iter().any(|(_, value)| !value.is_finite()) {
+            return Err(BreakpointCurveError::NonFiniteValue);
+        }
+        let times = points
+            .iter()
+            .map(|(time, _)| self.init_expr(*time))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(BreakpointCurveError::DynamicTime)?;
+        let values = points.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+        let terminal_scale = values.iter().map(|value| value.abs()).sum::<f64>().max(1.0);
+        let horizon = if values.last().copied().unwrap_or_default().abs()
+            > f64::EPSILON * (values.len() + 1) as f64 * terminal_scale
+        {
+            BreakpointHorizon::GateBounded
+        } else {
+            let (duration, offset) = affine_duration(times.last().expect("points are nonempty"))
+                .ok_or(BreakpointCurveError::UnboundedHorizon)?;
+            if duration == 0.0 && offset >= 0.0 {
+                BreakpointHorizon::Absolute(offset)
+            } else if duration == 1.0 && offset >= 0.0 {
+                BreakpointHorizon::GateTail(offset)
+            } else {
+                return Err(BreakpointCurveError::UnboundedHorizon);
+            }
+        };
+        Ok(self.node(
+            Op::BreakpointCurve {
+                times,
+                values,
+                horizon,
+            },
+            [],
+        ))
+    }
+
+    fn init_expr(&self, source: Source) -> Option<InitExpr> {
+        match source {
+            Source::Const(value) => Some(InitExpr::Const(value)),
+            Source::Param(id) => Some(InitExpr::Param(id)),
+            Source::Port { node, channel: 0 } => {
+                let node = self.template.nodes.get(node)?;
+                let input = |index: usize| self.init_expr(node.inputs.get(index)?.source);
+                match node.op {
+                    Op::Add => Some(InitExpr::Add(Box::new(input(0)?), Box::new(input(1)?))),
+                    Op::Sub => Some(InitExpr::Sub(Box::new(input(0)?), Box::new(input(1)?))),
+                    Op::Mul => Some(InitExpr::Mul(Box::new(input(0)?), Box::new(input(1)?))),
+                    Op::Div => Some(InitExpr::Div(Box::new(input(0)?), Box::new(input(1)?))),
+                    Op::Neg => Some(InitExpr::Neg(Box::new(input(0)?))),
+                    _ => None,
+                }
+            }
+            Source::Control(_)
+            | Source::Input(_)
+            | Source::ExternalAudio { .. }
+            | Source::Port { .. } => None,
+        }
     }
 
     // ---------------------------------------------------------------- output
@@ -420,6 +862,127 @@ impl GraphBuilder {
         template.outputs = channels.to_vec();
         template.validate()?;
         Ok(template)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DecayError {
+    Unbounded,
+    NonPositive { minimum: f64 },
+}
+
+impl core::fmt::Display for DecayError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DecayError::Unbounded => write!(
+                f,
+                "decay length must be a bounded scalar expression, not an audio signal"
+            ),
+            DecayError::NonPositive { minimum } => {
+                write!(f, "decay length can reach non-positive value {minimum}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for DecayError {}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum WindowError {
+    UnboundedBegin,
+    UnboundedEnd,
+    NegativeBegin {
+        minimum: f64,
+    },
+    Unordered {
+        latest_begin: f64,
+        earliest_end: f64,
+    },
+}
+
+impl core::fmt::Display for WindowError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            WindowError::UnboundedBegin | WindowError::UnboundedEnd => write!(
+                f,
+                "window bounds must be bounded scalar expressions, not audio signals"
+            ),
+            WindowError::NegativeBegin { minimum } => {
+                write!(f, "window begin can be negative: {minimum}")
+            }
+            WindowError::Unordered {
+                latest_begin,
+                earliest_end,
+            } => write!(
+                f,
+                "window begin can reach {latest_begin}, not before end {earliest_end}"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for WindowError {}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BreakpointCurveError {
+    Empty,
+    NonFiniteValue,
+    DynamicTime,
+    UnboundedHorizon,
+}
+
+impl core::fmt::Display for BreakpointCurveError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            BreakpointCurveError::Empty => {
+                write!(f, "breakpoint curve requires at least one point")
+            }
+            BreakpointCurveError::NonFiniteValue => {
+                write!(f, "breakpoint curve values must be finite")
+            }
+            BreakpointCurveError::DynamicTime => write!(
+                f,
+                "breakpoint times must be constants or note-parameter scalar arithmetic"
+            ),
+            BreakpointCurveError::UnboundedHorizon => write!(
+                f,
+                "a zero-settling breakpoint curve must end at fixed seconds or n.duration plus a non-negative offset"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for BreakpointCurveError {}
+
+fn affine_duration(expression: &InitExpr) -> Option<(f64, f64)> {
+    match expression {
+        InitExpr::Const(value) => Some((0.0, *value)),
+        InitExpr::Param(ParamId::Implicit(Implicit::Duration)) => Some((1.0, 0.0)),
+        InitExpr::Param(_) => None,
+        InitExpr::Add(left, right) => {
+            let (la, lb) = affine_duration(left)?;
+            let (ra, rb) = affine_duration(right)?;
+            Some((la + ra, lb + rb))
+        }
+        InitExpr::Sub(left, right) => {
+            let (la, lb) = affine_duration(left)?;
+            let (ra, rb) = affine_duration(right)?;
+            Some((la - ra, lb - rb))
+        }
+        InitExpr::Mul(left, right) => {
+            let (la, lb) = affine_duration(left)?;
+            let (ra, rb) = affine_duration(right)?;
+            (la == 0.0 || ra == 0.0).then_some((la * rb + ra * lb, lb * rb))
+        }
+        InitExpr::Div(left, right) => {
+            let (la, lb) = affine_duration(left)?;
+            let (ra, rb) = affine_duration(right)?;
+            (ra == 0.0 && rb != 0.0).then_some((la / rb, lb / rb))
+        }
+        InitExpr::Neg(inner) => {
+            let (a, b) = affine_duration(inner)?;
+            Some((-a, -b))
+        }
     }
 }
 

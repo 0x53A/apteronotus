@@ -27,8 +27,11 @@
 //! `pattern` never learns that fundsp does. That seam is what keeps the engine
 //! liftable behind an ABI later without disturbing anything above it.
 
+mod analyzer;
 pub mod builder;
 pub mod control;
+mod fdn;
+pub mod input;
 pub mod instrument;
 pub mod lower;
 pub mod note;
@@ -36,17 +39,23 @@ pub mod routing;
 pub mod stdlib;
 pub mod template;
 
-pub use builder::{GraphBuilder, n};
+pub use builder::{FdnConfig, GraphBuilder, n};
 pub use control::{ControlError, ControlId, ControlLayout, ControlSpec};
+pub use input::{
+    AudioInputError, AudioInputFallback, AudioInputId, AudioInputLayout, AudioInputSpec,
+};
 pub use instrument::{InstrumentLifetime, PatchError, PatchTemplate};
 pub use lower::{
     ControlStore, LowerError, instantiate, instantiate_patch, instantiate_patch_routed,
-    instantiate_routed, instantiate_routed_with_controls, instantiate_with_controls,
+    instantiate_patch_routed_with_audio_inputs, instantiate_routed,
+    instantiate_routed_with_controls, instantiate_timed_patch_routed,
+    instantiate_timed_patch_routed_with_routing, instantiate_with_controls,
 };
 pub use note::{Note, ParamValue, ParamValueError};
-pub use routing::{BusId, BusLayout, EventRouting, EventSend, RoutingError};
+pub use routing::{BusId, BusLayout, DuckControl, EventRouting, EventSend, RoutingError};
 pub use template::{
     Adsr, Basis, Curve, CurveClock, CurveTerm, DelayRange, DelayRangeError, GraphCost,
-    GraphLimitError, GraphLimits, GraphSend, GraphTemplate, Implicit, Input, Lifetime, Node,
-    NodeId, Op, ParamId, ParamSpec, ShapeKind, Source, TemplateError,
+    GraphLimitError, GraphLimits, GraphSend, GraphTemplate, Implicit, InitControlBinding,
+    InitScalar, InitScalarError, Input, Lifetime, Node, NodeId, ONSET_PULSE_SECONDS, Op, ParamId,
+    ParamSpec, ShapeKind, Source, TemplateError, TransportSlot,
 };

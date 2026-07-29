@@ -1,4 +1,4 @@
-//! The constant-tempo cycle ↔ seconds mapping used by the first sound path.
+//! Constant-tempo cycle ↔ seconds mapping.
 //!
 //! A cycle is a pattern coordinate, not permanently a 4/4 bar. Four
 //! quarter-note beats per cycle is the default meter; keeping it in transport

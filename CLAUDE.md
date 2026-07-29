@@ -13,27 +13,32 @@ roughly a kilohertz.
   I/O, no dependencies.** Cyclic patterns and finite `Timeline`s share the same
   pure `Pattern::query` boundary; recorded timelines preserve arrival ordinals,
   and chord groups carry provenance beside values.
-- `crates/music` — the first pure slice is written: typed scientific-notation
-  pitch, accidentals and pitch ↔ frequency. Scales and modes, chord symbols,
-  voicing dictionaries, anchors and inversions remain. Deliberately *not*
-  inside `pattern`, which has no musical domain knowledge and should keep it
-  that way.
+- `crates/music` — typed scientific-notation pitch, accidentals, pitch ↔
+  frequency, owned major/minor/dorian key context, literal chord symbols,
+  anchors, slash basses and the first deterministic named voicings are written.
+  Patterned music-theory inputs and wider dictionaries remain. Deliberately
+  *not* inside `pattern`, which has no musical domain knowledge and should keep
+  it that way.
 - `crates/synth` — data-only `GraphTemplate`, validation and caller-supplied
   publication budgets, per-note voices, routed stems, program-scope writable
   controls, explicit graph inputs, an allocation-bounded interpolating delay,
   and the first persistent `PatchTemplate` lowering onto fundsp. The wider
   primitive set remains.
-- `crates/live` — constant and ramped tempo maps, a monotonic-frontier pitch
-  scheduler, routed voice stems, the first persistent run/control executor,
-  transactional generation activation, external-trigger recording, and cpal
-  output over `fundsp::Sequencer::backend()`. Device/MIDI binding and
-  persistent replacement remain.
+- `crates/transport` — device-free constant/ramped `TempoMap` and exact
+  cycle↔seconds conversion shared by owned programs and schedulers.
+- `crates/live` — a monotonic-frontier pitch scheduler over transport clocks,
+  routed voice stems, the first persistent run/control executor,
+  transactional generation activation, external-trigger recording, native
+  default-device input through a bounded capture ring, and cpal output over
+  `fundsp::Sequencer::backend()`. Browser input attachment, native input
+  selection, MIDI binding and persistent replacement remain.
 - `crates/lua` — a fresh, sandboxed Piccolo VM per evaluation, producing only
   owned pattern/graph/program data. The same crate builds natively and for
   `wasm32-unknown-unknown`. Typed graph operators, voices, persistent patches,
   controls, buses/sends, structural pattern transforms and source-site
-  attribution for notation/random transforms are connected; graph-expression
-  spans, tempo/timeline bindings and the wider score API remain.
+  attribution for notation/random transforms are connected. Tempo maps and
+  finite timeline placement are owned `Program` data; graph-expression spans
+  and the wider score API remain.
 - `crates/app` — the first native and wasm user paths: a lexically highlighted
   Lua editor, explicit Run/Stop commands, activation diagnostics, persistent
   patch/bus execution and live control faders over the production evaluator,
@@ -68,7 +73,7 @@ one row, and it is the topmost:
 while it executes; it builds a `GraphTemplate` that the runtime instantiates per
 onset. Loops and tables may generate topology, but a branch on a symbolic note
 value has to become an explicit graph operation rather than an ordinary `if`.
-All six specification songs' graph functions stage cleanly under this rule —
+All seven specification songs' graph functions stage cleanly under this rule —
 none contains such an `if`, and every topology-building loop is over literal
 constants. If a real instrument ever needs event-dependent topology the answer
 is an explicitly marked dynamic factory, not making every voice dynamic.
@@ -104,11 +109,14 @@ below.
 
 It is a test that can be applied per primitive rather than a slogan. A reverb's
 output depends on all past input, so it retains. A pitch tracker's depends on
-recent input, so it retains a *bounded* horizon it must declare. An LFO's
-depends only on `t`, so it derives and an edit costs it nothing. The payoff is
-that the live-update system has correspondingly little to reconcile: state that
-is derived never needs migrating, warming or crossfading, because it was never
-mutable in the first place.
+recent input, so it retains a *bounded* horizon it must declare. Analyser ops
+now expose that as `warmup_seconds()` separately from audible response tail;
+the metadata is intentionally inert until incompatible persistent replacement
+can pre-roll a candidate from retained input. An LFO's depends only on `t`, so
+it derives and an edit costs it nothing. The payoff is that the live-update
+system has correspondingly little to reconcile: state that is derived never
+needs migrating, warming or crossfading, because it was never mutable in the
+first place.
 
 Corollary, and the reason it matters beyond elegance: **evaluation proposes a
 runtime configuration; it never authorises destruction of user material.**
@@ -173,9 +181,11 @@ is what gives one onsets when you do want to play it.
 
 **Notation desugars into a small node set.** `Silence`, `Pure`, `Stack`,
 `Group`, `Slowcat`, `Timecat`, `Fast`, `Shift`, `Rev`, `When`, `Degrade`,
-`Signal`, `Segment`, `Range`, `Timeline` — that is all of it. `*`, `/`, `!`,
-`@`, `?`, `(k,n,r)` are parser sugar; euclidean rhythms become a `Timecat` of
-the pattern and silence. The algebra has no special cases for notation.
+`Signal`, `Segment`, `Range`, `Math`, `Timeline` — that is all of it. `*`, `/`,
+`!`, `@`, `?`, `(k,n,r)` are parser sugar; euclidean rhythms become a `Timecat`
+of the pattern and silence. `Math` accepts scalar/signal or event/signal
+arithmetic but rejects event/event operands until temporal join semantics are
+explicit. The algebra has no special cases for notation.
 
 **`every` holds branches, not functions.** `When { modulo, offset, then,
 otherwise }` — the transform is applied while the tree is built, so the tree
@@ -218,7 +228,10 @@ alias. In the first live executor, a zero-input `run` is an autonomous source
 mixed with routed voices. An input-bearing `run` must consume every flattened
 main/bus lane and processes that layout in declaration order; exact arity
 prevents accidental modulo folding between buses. Instances survive scheduler
-windows. Replacement, bounded run spans, host inputs and clocked patch
+windows. A finite autonomous run inserts its gate at nonterminating graph
+sources so downstream state drains before removal; finite whole-stem
+processors remain deferred because their input-retention semantics differ.
+Replacement, host input selection/browser attachment and clocked patch
 automation remain separate concerns, not hidden inside this lifetime slice.
 
 **Per-voice randomness derives from event provenance.** Pattern events hash
@@ -293,7 +306,7 @@ and numeric operations.
 | `table` | Piccolo plus sandbox implementations of `insert`/`remove`/`sort`/`concat` |
 | `coroutine` | Piccolo's core coroutine library |
 | `utf8` | not exposed yet; no specification song requires it |
-| `apteronotus` | current pattern and synthesis builders; music theory and tempo/timeline bindings remain |
+| `apteronotus` | current pattern/synthesis builders plus tempo maps and finite timelines; music theory remains |
 
 Deliberately absent: `io`, `os`, `loadfile`, `dofile`, `package.loadlib`,
 `debug`, filesystem-backed `require` (host-controlled stdlib modules only). Also
@@ -350,16 +363,20 @@ exists as a struct but is not in the prelude.
 vector space — addition, scaling and shifting are closed, so superposition
 works, where two breakpoint lists cannot be added without merging time grids.
 Compiles directly to a flat op array; no branching, no allocation. An intro
-gate is literally `step(0) - step(T_end)`.
+gate is literally `step(0) - step(T_end)`. Event breakpoint syntax is only
+construction-time sugar: successive value differences desugar to held ramp
+terms before the curve enters event data.
 
 **A curve has three placements and they use different clocks**: a graph-local
 curve and a curve carried in an event both run on a note clock; a pattern signal
 runs on the transport clock and `Merge` samples it at the left event's onset; a
 future bus curve is persistent and continuous, and its shape is a **periodic
 transport clock** rather than a new signal algebra. Placement stays
-syntactically visible. Pattern merge and `at_onset` are the two explicit
-signal-to-init boundaries at their respective layers. A sampled pattern signal
-freezes for a held note; an event-carried curve does not.
+syntactically visible. Pattern merge, external-trigger setter sampling and
+`at_onset` are the explicit signal-to-init boundaries at their respective
+layers. The external-trigger case samples at the observed transport cycle
+because a live edge has no queryable future. A sampled pattern signal freezes
+for a held note; an event-carried curve does not.
 
 **An interpolating delay declares its allocation range when staged.** Its delay
 time remains an ordinary modulatable signal, but a signal cannot be sampled to
@@ -411,24 +428,21 @@ Kept as doors, not built:
   patch matrix. Unlikely, but it is why `schedule` should be a `Backend` trait
   and why `InstrumentSpec` must be declarative data rather than names hardcoded
   in a parser.
-- **The transport-clock periodic curve.** The third placement, and one clock
-  variant rather than three signal operations: a `Curve` gains a transport clock
-  with a period, evaluated at `t mod period`. That is a pure function of
-  transport time, so it derives rather than retains, an edit costs it nothing,
-  and a hard reset re-enters at the correct phase for free. The existing algebra
-  survives unchanged — `prove_range` bounds one period on the exact
-  piecewise-linear path, and `activity()` reports `GateBounded` because a
-  periodic curve never settles, which is the right answer: a transport curve may
-  not extend a note. The rejected alternative was `transport_seconds()`, `%` and
-  `lt(a, b)`. `lt` is a signal-rate comparison producing a hard edge, which is
-  the construction that must be a Rust node because it aliases; `%` exists only
-  to feed it; and together they turn declarative curve data into an imperative
-  expression, losing range proofs, activity classification and serialisability.
-  **Blocked on tempo**, not on effort: a periodic curve immediately asks whether
-  its period is seconds or bars, which is the persistent-graph half of the
-  `beats(0.75)` ambiguity already recorded under decisions taken. Building it
-  first would mean defaulting to seconds and inheriting the classic sequencer
-  bug in the one place the docs already warn about it.
+- **The persistent transport-clock periodic control.** Score-level `Signal`
+  patterns already derive periodic values from rational cycle position and are
+  sampled by `Merge`. `control_signal(pattern, period)` is the explicit
+  continuously running bus/patch placement: evaluation queries one bounded,
+  gap-free numeric period and compiles it to a flat `TransportSequence`.
+  Changing tempo is rejected because there is no single repeating seconds
+  projection. No Lua or pattern query reaches the audio thread.
+
+  The current `TransportSequenceUnit` advances a sample counter from its
+  instance origin. Compatible edits reuse that instance and hard resets begin
+  at cycle zero, so current output is coherent, but this is deliberately
+  recorded clock debt: before replacement crossfade may start a patch at a
+  nonzero transport coordinate, lowering must receive that absolute coordinate
+  and derive phase from it. A replacement must never mistake its own age for
+  transport position.
 
 ## Development
 

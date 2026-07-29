@@ -25,7 +25,23 @@ impl PatchTemplate {
             return Err(PatchError::VoiceParameters);
         }
         for node in &graph.nodes {
-            if matches!(node.op, Op::Adsr(_) | Op::Curve(_) | Op::InitRandom { .. }) {
+            if let Op::Pluck {
+                frequency, damping, ..
+            } = node.op
+                && (matches!(frequency, crate::InitScalar::Param(_))
+                    || matches!(damping, crate::InitScalar::Param(_)))
+            {
+                return Err(PatchError::VoiceParameters);
+            }
+            if matches!(
+                node.op,
+                Op::Adsr(_)
+                    | Op::Decay { .. }
+                    | Op::Window { .. }
+                    | Op::Curve(_)
+                    | Op::InitRandom { .. }
+                    | Op::RunGate { .. }
+            ) {
                 return Err(PatchError::NoteClockNode);
             }
             for input in &node.inputs {

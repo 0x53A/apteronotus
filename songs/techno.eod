@@ -6,6 +6,10 @@
 
 tempo(146)
 
+---------------------------------------------------------------------- sends
+
+plate = send { graph = reverb(28, 2.2, 0.6), level = 0.24 }
+
 ---------------------------------------------------------------------- rack
 
 kick = voice {
@@ -67,10 +71,6 @@ stab = voice {
   end,
 }
 
----------------------------------------------------------------------- sends
-
-plate = send { graph = reverb(28, 2.2, 0.6), level = 0.24 }
-
 ---------------------------------------------------------------------- shape
 
 -- One 32-bar riser, reused by everything that has to climb together.
@@ -80,30 +80,30 @@ sidechain = "1 0 0 0"
 
 ---------------------------------------------------------------------- score
 
-play(kick, "bd*4" >> gain(1.0))
+play(kick, "bd*4" >> velocity(1.0))
 
-play(clap, "~ x ~ x" >> gain(0.7))
+play(clap, "~ x ~ x" >> velocity(0.7))
 
 play(hat, "x(11,16)"
-      >> gain("0.42 0.22 0.3 0.22")
+      >> velocity("0.42 0.22 0.3 0.22")
       >> pan("-0.3 0.3")
-      >> tone(scale(6000, 13000, riser))
+      >> hat.tone(scale(6000, 13000, riser))
       >> every(8, fast(2)))
 
 play(acid, "a1 [~ a2] c2 [a1 ~] ~ g1 [a1 ~] a1"
       >> fast(2)
       >> every(4, rev)
       >> every(16, fast(2))
-      >> cutoff(scale(220, 3400, riser))
-      >> res(scale(0.7, 0.93, riser))
-      >> gain("1 0.7 0.7 1")                       -- accents drive the filter
+      >> acid.cutoff(scale(220, 3400, riser))
+      >> acid.res(scale(0.7, 0.93, riser))
+      >> velocity("1 0.7 0.7 1")                   -- accents drive the filter
       >> duck(sidechain, 0.55))
 
 play(stab, "~ ~ ~ [a3,c4,e4]"
       >> slow(2)
-      >> gain(0.5 * drop)
+      >> velocity(0.5 * drop)
       >> pan("-0.4 0.4")
-      >> sometimes(0.2, off(beats(0.5), gain(0.35)))
+      >> sometimes(0.2, off(beats(0.5), velocity(0.35)))
       >> duck(sidechain, 0.4))
 
-master(limiter(0.002, 0.09) >> gain(0.9))
+master(limiter(0.002, 0.09) >> mul(0.9))

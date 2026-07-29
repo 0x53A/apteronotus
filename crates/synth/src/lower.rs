@@ -1,8 +1,9 @@
 //! Lowering a [`GraphTemplate`] onto fundsp.
 //!
-//! This is the only file in the crate that knows fundsp exists, and it is the
-//! only place a `Box<dyn AudioUnit>` is allowed to appear. Everything above it
-//! is data.
+//! This is the only place a staged template is assembled into a fundsp `Net`
+//! and the only place a `Box<dyn AudioUnit>` is allowed to appear. Small
+//! realtime-safe custom `AudioUnit` implementations live in backend-private
+//! sibling modules; everything in the public template/builder layer is data.
 //!
 //! Instantiation runs **on the control thread, once per onset**, ahead of the
 //! audio clock. It allocates freely — a `Net`, a unit per node, a constant per
@@ -14,10 +15,14 @@
 //! 10 ms collection inaudible, and 20 ms does not.
 
 use crate::control::{ControlError, ControlId, ControlLayout};
+use crate::input::AudioInputLayout;
 use crate::instrument::PatchTemplate;
 use crate::note::{Note, ParamValue, ParamValueError};
 use crate::routing::{BusLayout, EventRouting, RoutingError};
-use crate::template::{GraphTemplate, Op, ShapeKind, Source, TemplateError};
+use crate::template::{
+    GraphTemplate, InitExpr, InitScalar, Input, Lifetime, Node, Op, ShapeKind, Source,
+    TemplateError,
+};
 use fundsp::net::{Net, NodeId as FundspNode};
 use fundsp::prelude32::*;
 use std::collections::HashMap;
@@ -43,6 +48,7 @@ pub fn instantiate(
         template,
         note,
         None,
+        None,
         template.channels(),
         template
             .outputs
@@ -66,6 +72,7 @@ pub fn instantiate_with_controls(
         template,
         note,
         Some(controls),
+        None,
         template.channels(),
         template
             .outputs
@@ -101,7 +108,157 @@ pub fn instantiate_patch_routed(
         layout,
         &EventRouting::new(),
         Some(controls),
+        None,
     )
+}
+
+/// Instantiate a persistent patch whose declared program audio inputs become
+/// additional unit inputs after its explicit graph inputs.
+///
+/// The live host supplies those flattened lanes in declaration order. The
+/// template remains device-neutral, and callers that do not choose this path
+/// continue to receive the declared silence fallback.
+pub fn instantiate_patch_routed_with_audio_inputs(
+    patch: &PatchTemplate,
+    layout: &BusLayout,
+    controls: &ControlStore,
+    audio_inputs: &AudioInputLayout,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_routed_impl(
+        patch.graph(),
+        &Note::new(440.0),
+        layout,
+        &EventRouting::new(),
+        Some(controls),
+        Some(audio_inputs),
+    )
+}
+
+/// Instantiate one autonomous patch for a finite transport span.
+///
+/// The lifecycle gate is inserted immediately after every nonterminating audio
+/// source. This is intentionally not an output gain: stateful processors
+/// downstream receive silence when the span closes and continue rendering
+/// until their declared response tails have drained.
+pub fn instantiate_timed_patch_routed(
+    patch: &PatchTemplate,
+    active_seconds: f64,
+    fade_seconds: f64,
+    layout: &BusLayout,
+    controls: &ControlStore,
+) -> Result<(Box<dyn AudioUnit>, Lifetime), LowerError> {
+    instantiate_timed_patch_routed_with_routing(
+        patch,
+        active_seconds,
+        fade_seconds,
+        layout,
+        &EventRouting::new(),
+        controls,
+    )
+}
+
+/// Instantiate one finite patch while routing its completed outputs to
+/// program buses. This is the persistent-patch counterpart of score-level
+/// voice sends.
+pub fn instantiate_timed_patch_routed_with_routing(
+    patch: &PatchTemplate,
+    active_seconds: f64,
+    fade_seconds: f64,
+    layout: &BusLayout,
+    routing: &EventRouting,
+    controls: &ControlStore,
+) -> Result<(Box<dyn AudioUnit>, Lifetime), LowerError> {
+    if !active_seconds.is_finite() || active_seconds <= 0.0 {
+        return Err(LowerError::InvalidDuration(active_seconds));
+    }
+    let fade_seconds = fade_seconds.clamp(0.0, active_seconds * 0.5);
+    let graph = lifecycle_gated_graph(patch.graph(), active_seconds, fade_seconds);
+    let lifetime = graph.lifetime();
+    let unit = instantiate_routed_impl(
+        &graph,
+        &Note::new(440.0).duration(active_seconds),
+        layout,
+        routing,
+        Some(controls),
+        None,
+    )?;
+    Ok((unit, lifetime))
+}
+
+fn lifecycle_gated_graph(
+    template: &GraphTemplate,
+    active_seconds: f64,
+    fade_seconds: f64,
+) -> GraphTemplate {
+    let gate = Node {
+        op: Op::RunGate {
+            active_seconds,
+            fade_seconds,
+        },
+        inputs: Vec::new(),
+        tail: 0.0,
+        src: None,
+    };
+    let mut nodes = vec![gate];
+    let gate_source = Source::port(0, 0);
+    let mut remapped = Vec::<Vec<Source>>::with_capacity(template.nodes.len());
+
+    let rewrite = |source: Source, remapped: &[Vec<Source>]| match source {
+        Source::Port { node, channel } => remapped
+            .get(node)
+            .and_then(|channels| channels.get(channel as usize))
+            .copied()
+            .expect("validated graph sources only refer to earlier node outputs"),
+        other => other,
+    };
+
+    for node in &template.nodes {
+        let inputs = node
+            .inputs
+            .iter()
+            .map(|input| Input {
+                source: rewrite(input.source, &remapped),
+                src: input.src,
+            })
+            .collect();
+        let node_id = nodes.len();
+        nodes.push(Node {
+            op: node.op.clone(),
+            inputs,
+            tail: node.tail,
+            src: node.src,
+        });
+        let mut outputs = (0..node.op.outputs())
+            .map(|channel| Source::port(node_id, channel as u32))
+            .collect::<Vec<_>>();
+        if node.op.begins_audio_activity() {
+            for output in &mut outputs {
+                let mul_id = nodes.len();
+                nodes.push(Node {
+                    op: Op::Mul,
+                    inputs: vec![Input::new(*output), Input::new(gate_source)],
+                    tail: 0.0,
+                    src: node.src,
+                });
+                *output = Source::port(mul_id, 0);
+            }
+        }
+        remapped.push(outputs);
+    }
+
+    let mut graph = template.clone();
+    graph.nodes = nodes;
+    graph.outputs = template
+        .outputs
+        .iter()
+        .map(|source| rewrite(*source, &remapped))
+        .collect();
+    for (send, original) in graph.sends.iter_mut().zip(&template.sends) {
+        for (input, original) in send.outputs.iter_mut().zip(&original.outputs) {
+            input.source = rewrite(original.source, &remapped);
+        }
+    }
+    graph
 }
 
 /// Build one voice whose outputs are the flattened main and bus stems.
@@ -115,7 +272,7 @@ pub fn instantiate_routed(
     layout: &BusLayout,
     event: &EventRouting,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
-    instantiate_routed_impl(template, note, layout, event, None)
+    instantiate_routed_impl(template, note, layout, event, None, None)
 }
 
 pub fn instantiate_routed_with_controls(
@@ -125,7 +282,7 @@ pub fn instantiate_routed_with_controls(
     event: &EventRouting,
     controls: &ControlStore,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
-    instantiate_routed_impl(template, note, layout, event, Some(controls))
+    instantiate_routed_impl(template, note, layout, event, Some(controls), None)
 }
 
 fn instantiate_routed_impl(
@@ -134,9 +291,10 @@ fn instantiate_routed_impl(
     layout: &BusLayout,
     event: &EventRouting,
     controls: Option<&ControlStore>,
+    audio_inputs: Option<&AudioInputLayout>,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
     template.validate()?;
-    if template.channels() != layout.main_channels() {
+    if template.channels() != layout.main_channels() && template.channels() != 1 {
         return Err(RoutingError::MainChannelMismatch {
             template: template.channels(),
             layout: layout.main_channels(),
@@ -148,13 +306,21 @@ fn instantiate_routed_impl(
     // possibly symbolic gain as a Mul node; event sends bind one scalar per
     // onset and are scaled during concrete lowering.
     let mut routes = Vec::new();
-    routes.extend(
-        template
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(lane, source)| (lane, *source, 1.0)),
-    );
+    if template.channels() == 1 {
+        routes.extend(
+            layout
+                .main_range()
+                .map(|lane| (lane, template.outputs[0], 1.0)),
+        );
+    } else {
+        routes.extend(
+            template
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(lane, source)| (lane, *source, 1.0)),
+        );
+    }
 
     for send in &template.sends {
         let range = layout
@@ -179,7 +345,7 @@ fn instantiate_routed_impl(
         let range = layout
             .bus_range(send.bus)
             .ok_or(RoutingError::UnknownBus(send.bus))?;
-        if template.channels() != range.len() {
+        if template.channels() != range.len() && template.channels() != 1 {
             return Err(RoutingError::BusChannelMismatch {
                 bus: send.bus,
                 expected: range.len(),
@@ -187,24 +353,37 @@ fn instantiate_routed_impl(
             }
             .into());
         }
-        routes.extend(
-            range
-                .zip(&template.outputs)
-                .map(|(lane, source)| (lane, *source, send.level)),
-        );
+        if template.channels() == 1 {
+            routes.extend(range.map(|lane| (lane, template.outputs[0], send.level)));
+        } else {
+            routes.extend(
+                range
+                    .zip(&template.outputs)
+                    .map(|(lane, source)| (lane, *source, send.level)),
+            );
+        }
     }
 
-    instantiate_to_lanes(template, note, controls, layout.total_channels(), routes)
+    instantiate_to_lanes(
+        template,
+        note,
+        controls,
+        audio_inputs,
+        layout.total_channels(),
+        routes,
+    )
 }
 
 fn instantiate_to_lanes(
     template: &GraphTemplate,
     note: &Note,
     controls: Option<&ControlStore>,
+    audio_inputs: Option<&AudioInputLayout>,
     output_channels: usize,
     routes: impl IntoIterator<Item = (usize, Source, f64)>,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
-    let mut net = Net::new(template.inputs, output_channels);
+    let external_channels = audio_inputs.map_or(0, AudioInputLayout::total_channels);
+    let mut net = Net::new(template.inputs + external_channels, output_channels);
 
     // Push every node first, so wiring is a second pass and node order in the
     // template need not be a topological order for the walk to work. (It still
@@ -213,7 +392,7 @@ fn instantiate_to_lanes(
     // feedback needs an explicit graph representation before it is legal.)
     let mut nodes: Vec<FundspNode> = Vec::with_capacity(template.nodes.len());
     for node in &template.nodes {
-        nodes.push(net.push(unit_for(&node.op, note)?));
+        nodes.push(net.push(unit_for(&node.op, note, template, controls)?));
     }
 
     // Lifted scalars, keyed by bit pattern. A voice typically reuses `0`, `1`
@@ -223,6 +402,7 @@ fn instantiate_to_lanes(
         template,
         note,
         controls,
+        audio_inputs,
         nodes: &nodes,
         net: &mut net,
         constants: HashMap::new(),
@@ -287,6 +467,10 @@ pub enum LowerError {
     LayoutRequired,
     ControlStoreRequired,
     InvalidDuration(f64),
+    InvalidPluckParameter,
+    InvalidSlewTime(f64),
+    InvalidBreakpointCurve,
+    UnknownAudioInput,
 }
 
 impl From<TemplateError> for LowerError {
@@ -335,6 +519,27 @@ impl core::fmt::Display for LowerError {
                     "note duration must be positive and finite, got {seconds}"
                 )
             }
+            LowerError::InvalidPluckParameter => {
+                write!(
+                    f,
+                    "pluck pitch, decay gain, or damping is outside its safe range"
+                )
+            }
+            LowerError::InvalidSlewTime(seconds) => {
+                write!(
+                    f,
+                    "slew response time must be finite and non-negative, got {seconds}"
+                )
+            }
+            LowerError::InvalidBreakpointCurve => {
+                write!(
+                    f,
+                    "breakpoint curve times are not finite and strictly increasing"
+                )
+            }
+            LowerError::UnknownAudioInput => {
+                write!(f, "graph refers to an audio input outside its host layout")
+            }
         }
     }
 }
@@ -352,6 +557,7 @@ struct Resolver<'a> {
     template: &'a GraphTemplate,
     note: &'a Note,
     controls: Option<&'a ControlStore>,
+    audio_inputs: Option<&'a AudioInputLayout>,
     nodes: &'a [FundspNode],
     net: &'a mut Net,
     constants: HashMap<u64, FundspNode>,
@@ -400,6 +606,27 @@ impl Resolver<'_> {
                         let shared = controls.shared(id)?;
                         let node = self.net.push(Box::new(var(shared)));
                         self.control_nodes.insert(id, node);
+                        node
+                    }
+                };
+                Ok((node, 0))
+            }
+            Source::ExternalAudio { input, channel } => {
+                let Some(audio_inputs) = self.audio_inputs else {
+                    // Device identity is host policy. Without an explicit
+                    // binding, the owned declaration's fallback is silence.
+                    return Ok((constant_node(0.0, self.net, &mut self.constants), 0));
+                };
+                let flattened = audio_inputs
+                    .channel_index(input, channel)
+                    .ok_or(LowerError::UnknownAudioInput)?;
+                let channel = self.template.inputs + flattened;
+                let node = match self.input_nodes.get(&channel) {
+                    Some(node) => *node,
+                    None => {
+                        let node = self.net.push(Box::new(pass()));
+                        self.net.connect_input(channel, node, 0);
+                        self.input_nodes.insert(channel, node);
                         node
                     }
                 };
@@ -477,43 +704,285 @@ fn constant_node(x: f64, net: &mut Net, constants: &mut HashMap<u64, FundspNode>
         .or_insert_with(|| net.push(Box::new(dc(x as f32))))
 }
 
-fn unit_for(op: &Op, note: &Note) -> Result<Box<dyn AudioUnit>, LowerError> {
+fn unit_for(
+    op: &Op,
+    note: &Note,
+    template: &GraphTemplate,
+    controls: Option<&ControlStore>,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
     let unit: Box<dyn AudioUnit> = match op {
         Op::Sine => Box::new(sine()),
+        Op::Cosine => Box::new(sine().phase(0.25)),
         Op::Saw => Box::new(saw()),
         Op::Pulse => Box::new(pulse()),
         Op::Noise => Box::new(noise()),
+        Op::Pink => Box::new(pink()),
         Op::Impulse => Box::new(impulse::<U1>()),
-        Op::InitRandom { stream } => {
+        Op::InitRandom { stream, min, max } => {
             let unit = seed_unit(note.seed ^ stream);
-            Box::new(map(move |input: &Frame<f32, U2>| {
-                input[0] + unit * (input[1] - input[0])
-            }))
+            let min = resolve_init_expr(min, note, template)?;
+            let max = resolve_init_expr(max, note, template)?;
+            if !min.is_finite() || !max.is_finite() || min > max {
+                return Err(LowerError::InvalidBreakpointCurve);
+            }
+            Box::new(dc((min + f64::from(unit) * (max - min)) as f32))
+        }
+        Op::Pluck {
+            frequency,
+            gain_per_second,
+            damping,
+            max_delay_seconds,
+        } => {
+            let frequency = resolve_init_scalar(*frequency, note, template)?;
+            let damping = resolve_init_scalar(*damping, note, template)?;
+            if !frequency.is_finite()
+                || frequency < 1.0 / max_delay_seconds
+                || !gain_per_second.is_finite()
+                || *gain_per_second <= 0.0
+                || *gain_per_second >= 1.0
+                || !damping.is_finite()
+                || !(0.0..=1.0).contains(&damping)
+            {
+                return Err(LowerError::InvalidPluckParameter);
+            }
+            Box::new(pluck(
+                frequency as f32,
+                *gain_per_second as f32,
+                damping as f32,
+            ))
         }
 
         Op::Lowpass => Box::new(lowpass()),
         Op::Highpass => Box::new(highpass()),
         Op::Bandpass => Box::new(bandpass()),
+        Op::Peak => Box::new(peak()),
         Op::Moog => Box::new(moog()),
 
-        Op::Shape { kind, amount } => {
-            let a = *amount as f32;
-            match kind {
-                ShapeKind::Tanh => Box::new(shape(Tanh(a))),
-                ShapeKind::Atan => Box::new(shape(Atan(a))),
-                ShapeKind::Softsign => Box::new(shape(Softsign(a))),
-                ShapeKind::Clip => Box::new(shape(Clip(a))),
-                ShapeKind::Crush => Box::new(shape(Crush(a))),
-            }
-        }
+        Op::Shape { kind } => match kind {
+            ShapeKind::Tanh => Box::new(map(|input: &Frame<f32, U2>| (input[0] * input[1]).tanh())),
+            ShapeKind::Atan => Box::new(map(|input: &Frame<f32, U2>| {
+                (input[0] * (input[1] * core::f32::consts::PI * 0.5)).atan()
+                    * (2.0 / core::f32::consts::PI)
+            })),
+            ShapeKind::Softsign => Box::new(map(|input: &Frame<f32, U2>| {
+                let x = input[0] * input[1];
+                x / (1.0 + x.abs())
+            })),
+            ShapeKind::Clip => Box::new(map(|input: &Frame<f32, U2>| {
+                (input[0] * input[1]).clamp(-1.0, 1.0)
+            })),
+            ShapeKind::Crush => Box::new(map(|input: &Frame<f32, U2>| {
+                let levels = input[1].abs().max(f32::EPSILON);
+                (input[0] * levels).round() / levels
+            })),
+        },
         Op::DcBlock => Box::new(dcblock()),
         Op::Delay(range) => Box::new(tap(range.min_seconds() as f32, range.max_seconds() as f32)),
+        Op::Reverb {
+            room_size,
+            time,
+            damping,
+        } => Box::new(reverb_stereo(
+            *room_size as f32,
+            *time as f32,
+            *damping as f32,
+        )),
+        Op::Limiter { attack, release } => {
+            Box::new(limiter_stereo(*attack as f32, *release as f32))
+        }
+        Op::Chorus {
+            seed,
+            separation,
+            variation,
+            frequency,
+        } => Box::new(chorus(
+            *seed,
+            *separation as f32,
+            *variation as f32,
+            *frequency as f32,
+        )),
+        Op::FeedbackDelay {
+            delay_seconds,
+            cutoff_q,
+            amount,
+        } => match cutoff_q {
+            Some((cutoff, q)) => Box::new(
+                pass()
+                    & feedback(
+                        delay(*delay_seconds as f32)
+                            >> (lowpass_hz(*cutoff as f32, *q as f32) * *amount as f32),
+                    ),
+            ),
+            None => Box::new(pass() & feedback(delay(*delay_seconds as f32) * *amount as f32)),
+        },
+        Op::AllpassDelay { seconds, gain } => {
+            Box::new(allnest_c(*gain as f32, delay(*seconds as f32)))
+        }
+        Op::Fdn {
+            delays,
+            damping,
+            modulation_rate,
+            modulation_depth,
+            ..
+        } => Box::new(crate::fdn::FdnUnit::new(
+            delays.clone(),
+            *damping,
+            *modulation_rate,
+            *modulation_depth,
+        )),
+        Op::EnvelopeFollower { attack, release } => Box::new(
+            map(|input: &Frame<f32, U1>| input[0].abs().min(1.0))
+                >> afollow(*attack as f32, *release as f32),
+        ),
+        Op::PitchTracker {
+            min_hz,
+            max_hz,
+            default_hz,
+            hold_seconds,
+        } => Box::new(crate::analyzer::PitchTrackerUnit::new(
+            *min_hz,
+            *max_hz,
+            *default_hz,
+            *hold_seconds,
+        )),
+        Op::OnsetDetector {
+            floor,
+            hold_seconds,
+        } => Box::new(crate::analyzer::OnsetDetectorUnit::new(
+            *floor,
+            *hold_seconds,
+        )),
+        Op::TransportSequence {
+            period_seconds,
+            slots,
+        } => Box::new(crate::analyzer::TransportSequenceUnit::new(
+            *period_seconds,
+            slots.clone(),
+        )),
+        Op::Width => Box::new(crate::analyzer::WidthUnit::new()),
+        Op::Slew {
+            response_time,
+            initial,
+        } => {
+            let seconds = resolve_init_scalar(*response_time, note, template)?;
+            if !seconds.is_finite() || seconds < 0.0 {
+                return Err(LowerError::InvalidSlewTime(seconds));
+            }
+            Box::new(crate::analyzer::SlewUnit::new(seconds, *initial))
+        }
+        Op::GateEnv {
+            attack,
+            decay,
+            sustain,
+            release,
+        } => {
+            let (attack, decay, sustain, release) = (
+                *attack as f32,
+                *decay as f32,
+                *sustain as f32,
+                *release as f32,
+            );
+            let mut high = false;
+            let mut onset = 0.0_f32;
+            let mut release_start = None;
+            let mut release_level = 0.0_f32;
+            let held = move |elapsed: f32| {
+                if elapsed < attack {
+                    if attack == 0.0 { 1.0 } else { elapsed / attack }
+                } else if elapsed < attack + decay {
+                    if decay == 0.0 {
+                        sustain
+                    } else {
+                        1.0 - (1.0 - sustain) * ((elapsed - attack) / decay)
+                    }
+                } else {
+                    sustain
+                }
+            };
+            Box::new(envelope2(move |time, gate| {
+                let next_high = gate > 0.0;
+                if next_high && !high {
+                    onset = time;
+                    release_start = None;
+                } else if !next_high && high {
+                    release_level = held((time - onset).max(0.0));
+                    release_start = Some(time);
+                }
+                high = next_high;
+                if let Some(start) = release_start {
+                    if release == 0.0 {
+                        0.0
+                    } else {
+                        release_level * (1.0 - (time - start) / release).clamp(0.0, 1.0)
+                    }
+                } else if high {
+                    held((time - onset).max(0.0))
+                } else {
+                    0.0
+                }
+            }))
+        }
+        Op::Portamento {
+            target,
+            response_time,
+        } => {
+            let target = resolve_init_scalar(*target, note, template)?;
+            let seconds = resolve_init_scalar(*response_time, note, template)?;
+            if !target.is_finite() || !seconds.is_finite() || seconds < 0.0 {
+                return Err(LowerError::InvalidSlewTime(seconds));
+            }
+            let initial = note.previous_hz.unwrap_or(target);
+            Box::new(envelope(move |time: f32| {
+                if seconds == 0.0 {
+                    return target as f32;
+                }
+                let phase = (f64::from(time) / seconds).clamp(0.0, 1.0);
+                let smooth = phase * phase * (3.0 - 2.0 * phase);
+                (initial + (target - initial) * smooth) as f32
+            }))
+        }
+        Op::RunGate {
+            active_seconds,
+            fade_seconds,
+        } => {
+            let active = *active_seconds as f32;
+            let fade = *fade_seconds as f32;
+            Box::new(envelope(move |time: f32| {
+                if time < 0.0 || time >= active {
+                    return 0.0;
+                }
+                if fade == 0.0 {
+                    return 1.0;
+                }
+                let phase = if time < fade {
+                    time / fade
+                } else if time > active - fade {
+                    (active - time) / fade
+                } else {
+                    return 1.0;
+                }
+                .clamp(0.0, 1.0);
+                phase * phase * phase * (phase * (phase * 6.0 - 15.0) + 10.0)
+            }))
+        }
+        Op::ControlWrite { target } => {
+            let controls = controls.ok_or(LowerError::ControlStoreRequired)?;
+            Box::new(monitor(controls.shared(*target)?, Meter::Sample))
+        }
 
         Op::Add => Box::new(pass() + pass()),
         Op::Sub => Box::new(pass() - pass()),
         Op::Mul => Box::new(pass() * pass()),
         Op::Div => Box::new(map(|input: &Frame<f32, U2>| input[0] / input[1])),
+        Op::Pow => Box::new(map(|input: &Frame<f32, U2>| input[0].powf(input[1]))),
         Op::Neg => Box::new(mul(-1.0)),
+        Op::HzToMidi => Box::new(map(|input: &Frame<f32, U1>| {
+            69.0 + 12.0 * (input[0].max(f32::MIN_POSITIVE) / 440.0).log2()
+        })),
+        Op::Clamp { min, max } => {
+            let (min, max) = (*min as f32, *max as f32);
+            Box::new(map(move |input: &Frame<f32, U1>| input[0].clamp(min, max)))
+        }
 
         // Both envelopes read the note clock, which starts at zero when the
         // sequencer starts the unit. They are pure functions of `t`, so an edit
@@ -523,6 +992,18 @@ fn unit_for(op: &Op, note: &Note) -> Result<Box<dyn AudioUnit>, LowerError> {
             let gate = note.duration;
             Box::new(envelope(move |t: f32| adsr.at(t as f64, gate) as f32))
         }
+        Op::Decay { .. } => Box::new(envelope2(|t, seconds| {
+            if seconds > 0.0 {
+                (-3.0 * t / seconds).exp()
+            } else {
+                0.0
+            }
+        })),
+        Op::Window { .. } => Box::new(envelope3(
+            |t, begin, end| {
+                if t >= begin && t < end { 1.0 } else { 0.0 }
+            },
+        )),
         Op::Curve(curve) => {
             let curve = curve.clone();
             let gate = note.duration;
@@ -535,10 +1016,85 @@ fn unit_for(op: &Op, note: &Note) -> Result<Box<dyn AudioUnit>, LowerError> {
                     .expect("curve and duration validated before lowering") as f32
             }))
         }
+        Op::BreakpointCurve { times, values, .. } => {
+            let times = times
+                .iter()
+                .map(|time| resolve_init_expr(time, note, template))
+                .collect::<Result<Vec<_>, _>>()?;
+            if times.iter().any(|time| !time.is_finite() || *time < 0.0)
+                || times.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(LowerError::InvalidBreakpointCurve);
+            }
+            let values = values.clone();
+            Box::new(envelope(move |time: f32| {
+                breakpoint_value(time as f64, &times, &values) as f32
+            }))
+        }
 
         Op::Pan => Box::new(panner()),
     };
     Ok(unit)
+}
+
+fn resolve_init_scalar(
+    value: InitScalar,
+    note: &Note,
+    template: &GraphTemplate,
+) -> Result<f64, LowerError> {
+    match value {
+        InitScalar::Const(value) => Ok(value),
+        InitScalar::Param(id) => match note.value(id, template)? {
+            ParamValue::Number(value) => Ok(value),
+            ParamValue::Curve(_) => Err(LowerError::InvalidPluckParameter),
+        },
+    }
+}
+
+fn resolve_init_expr(
+    expression: &InitExpr,
+    note: &Note,
+    template: &GraphTemplate,
+) -> Result<f64, LowerError> {
+    let value = match expression {
+        InitExpr::Const(value) => *value,
+        InitExpr::Param(id) => match note.value(*id, template)? {
+            ParamValue::Number(value) => value,
+            ParamValue::Curve(_) => return Err(LowerError::InvalidBreakpointCurve),
+        },
+        InitExpr::Add(left, right) => {
+            resolve_init_expr(left, note, template)? + resolve_init_expr(right, note, template)?
+        }
+        InitExpr::Sub(left, right) => {
+            resolve_init_expr(left, note, template)? - resolve_init_expr(right, note, template)?
+        }
+        InitExpr::Mul(left, right) => {
+            resolve_init_expr(left, note, template)? * resolve_init_expr(right, note, template)?
+        }
+        InitExpr::Div(left, right) => {
+            resolve_init_expr(left, note, template)? / resolve_init_expr(right, note, template)?
+        }
+        InitExpr::Neg(inner) => -resolve_init_expr(inner, note, template)?,
+    };
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or(LowerError::InvalidBreakpointCurve)
+}
+
+fn breakpoint_value(time: f64, times: &[f64], values: &[f64]) -> f64 {
+    if time <= times[0] {
+        return values[0];
+    }
+    for index in 1..times.len() {
+        if time < times[index] {
+            let phase = (time - times[index - 1]) / (times[index] - times[index - 1]);
+            return values[index - 1] + (values[index] - values[index - 1]) * phase;
+        }
+    }
+    *values
+        .last()
+        .expect("validated breakpoint curve has values")
 }
 
 fn seed_unit(mut seed: u64) -> f32 {

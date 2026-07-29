@@ -7,6 +7,7 @@ members = [
     "crates/music",
     "crates/pattern",
     "crates/synth",
+    "crates/transport",
 ]
 # `live` is excluded: it is the only crate that links the host audio stack.
 # Its scheduler tests are offline, but the lower crates need no cpal/alsa build
@@ -16,6 +17,7 @@ default-members = [
     "crates/music",
     "crates/pattern",
     "crates/synth",
+    "crates/transport",
 ]
 
 [workspace.package]

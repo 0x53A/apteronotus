@@ -109,35 +109,35 @@ end
 -- the onset query carries each curve whole into the patch rather than sampling
 -- it to a scalar. `phase` is legal here because `hold` makes duration known;
 -- a live note instead uses absolute note-clock curves and an explicit gate.
-local function performed_note(start, duration, pitch, pressure, bend)
+local function performed_note(start, duration, pitch, pressure_amount, bend_amount)
   return at(start,
     note(pitch)
       >> hold(duration)
-      >> pressure(curve {
+      >> ribbon_lead.pressure(curve {
            { phase(0.00), 0.12 },
-           { phase(0.18), pressure },
-           { phase(0.68), pressure * 0.82 },
+           { phase(0.18), pressure_amount },
+           { phase(0.68), pressure_amount * 0.82 },
            { phase(1.00), 0.08 },
          })
-      >> bend(curve {
+      >> ribbon_lead.bend(curve {
            { phase(0.00), -0.08 },
            { phase(0.10),  0.00 },
-           { phase(0.72),  bend },
+           { phase(0.72),  bend_amount },
            { phase(1.00),  0.00 },
          })
-      >> expression(lead_expression))
+      >> ribbon_lead.expression(lead_expression))
 end
 
-local function held_chord(start, duration, symbol, anchor_note, shape, pressure)
+local function held_chord(start, duration, symbol, anchor_note, shape, pressure_amount, pressure_setter)
   return at(start,
     chord(symbol)
       >> anchor(anchor_note)
       >> voicing(shape)
       >> hold(duration)
-      >> pressure(curve {
+      >> pressure_setter(curve {
            { phase(0.00), 0.08 },
-           { phase(0.24), pressure },
-           { phase(0.72), pressure * 0.76 },
+           { phase(0.24), pressure_amount },
+           { phase(0.72), pressure_amount * 0.76 },
            { phase(1.00), 0.05 },
          }))
 end
@@ -176,7 +176,7 @@ ribbon_lead = patch {
     gate       = gate_control(false),
     pressure   = control { range = { 0, 1 }, default = 0.18 },
     bend       = control { range = { -24, 24 }, default = 0, unit = "st" },
-    expression = control { range = { 0, 1 }, default = 0.58 },
+    expression = control { range = { 0, 1.2 }, default = 0.58 },
     brightness = control { range = { 180, 12000 }, default = 2100, unit = "hz" },
   },
 
@@ -205,8 +205,9 @@ ribbon_lead = patch {
 -- formants, then a three-line ensemble. No recordings are involved.
 breath_choir = voice {
   params = {
-    vowel = { 0, 1, 0.42 },
-    air   = { 0, 0.2, 0.045 },
+    vowel    = { 0, 1, 0.42 },
+    air      = { 0, 0.2, 0.045 },
+    pressure = { 0, 1, 0.24 },
   },
 
   graph = function(n)
@@ -223,7 +224,8 @@ breath_choir = voice {
                      + ((source | dc(2750) | dc(10.0)) >> bandpass()) * 0.18
 
     return mix(low_vowel, high_vowel, n.vowel)
-        >> mul(adsr(secs(2.8), secs(1.5), 0.88, secs(5.2)) * n.velocity)
+        >> mul(adsr(secs(2.8), secs(1.5), 0.88, secs(5.2))
+               * n.velocity * scale(0.55, 1.0, n.pressure))
         >> ensemble {
              delays = { ms(13), ms(19), ms(27) },
              rates  = { 0.47, 0.71, 0.93 },
@@ -268,17 +270,21 @@ rain_field = patch {
 
     return synthetic * (0.08 + 0.13 * swell)
          + city * 0.16
-        >> (pan(-0.82) ~ pan(0.82))
+        >> (pan(-0.82) & pan(0.82))
         >> chorus(1, 0.034, 0.012, 0.18)
   end,
 }
 
 low_current = voice {
+  params = {
+    pressure = { 0, 1, 0.22 },
+  },
   graph = function(n)
     local source = sine(n.hz) + pulse(n.hz, 0.46) * 0.16
     local motion = 0.78 + 0.22 * sine(0.09)
     return (source | dc(420 * motion) | dc(0.22)) >> lowpass()
-        >> mul(adsr(ms(18), secs(1.2), 0.72, secs(2.6)) * n.velocity)
+        >> mul(adsr(ms(18), secs(1.2), 0.72, secs(2.6))
+               * n.velocity * scale(0.62, 1.0, n.pressure))
         >> shape("soft", 1.2)
         >> pan(0)
   end,
@@ -325,7 +331,7 @@ neon_hall = send {
             modulation = { rate = 0.11, depth = ms(1.7) },
           }
        >> highpass(85)
-       >> gain(0.82),
+       >> mul(0.82),
 
   level = 0.48,
 }
@@ -344,29 +350,29 @@ echoes = send {
 -- chord/anchor/voicing expand at construction time; the resulting pitches and
 -- grouped chord identity survive into the finite timeline.
 pad_score = timeline {
-  held_chord(bars(0),  bars(6), "Dm(add9)",       "d3", "open-5", 0.42),
-  held_chord(bars(6),  bars(6), "Cmaj9/E",        "e3", "wide-5", 0.36),
-  held_chord(bars(12), bars(5), "G6(add9)",       "d3", "open-6", 0.48),
-  held_chord(bars(17), bars(3), "A7sus4(b9)",     "e3", "wide-5", 0.62),
-  held_chord(bars(20), bars(7), "Dm6/9",          "a3", "open-6", 0.56),
-  held_chord(bars(27), bars(5), "Bbmaj7(#11)/D",  "d3", "wide-6", 0.51),
-  held_chord(bars(32), bars(6), "Em11",           "b3", "open-5", 0.58),
-  held_chord(bars(38), bars(4), "Gm(maj9)/D",     "d3", "wide-5", 0.68),
-  held_chord(bars(42), bars(6), "Dm(add9)/A",     "a3", "open-6", 0.61),
-  held_chord(bars(48), bars(4), "Cmaj9(#11)",     "g3", "wide-6", 0.54),
-  held_chord(bars(52), bars(4), "A7sus4(b9)",     "e3", "open-5", 0.72),
-  held_chord(bars(56), bars(7), "Dm6/9",          "d3", "wide-6", 0.52),
-  held_chord(bars(63), bars(5), "G6(add9)/D",     "d3", "open-6", 0.38),
-  held_chord(bars(68), bars(4), "Dm(add9)",       "d3", "close-5", 0.24),
+  held_chord(bars(0),  bars(6), "Dm(add9)",       "d3", "open-5", 0.42, neon_pad.pressure),
+  held_chord(bars(6),  bars(6), "Cmaj9/E",        "e3", "wide-5", 0.36, neon_pad.pressure),
+  held_chord(bars(12), bars(5), "G6(add9)",       "d3", "open-6", 0.48, neon_pad.pressure),
+  held_chord(bars(17), bars(3), "A7sus4(b9)",     "e3", "wide-5", 0.62, neon_pad.pressure),
+  held_chord(bars(20), bars(7), "Dm6/9",          "a3", "open-6", 0.56, neon_pad.pressure),
+  held_chord(bars(27), bars(5), "Bbmaj7(#11)/D",  "d3", "wide-6", 0.51, neon_pad.pressure),
+  held_chord(bars(32), bars(6), "Em11",           "b3", "open-5", 0.58, neon_pad.pressure),
+  held_chord(bars(38), bars(4), "Gm(maj9)/D",     "d3", "wide-5", 0.68, neon_pad.pressure),
+  held_chord(bars(42), bars(6), "Dm(add9)/A",     "a3", "open-6", 0.61, neon_pad.pressure),
+  held_chord(bars(48), bars(4), "Cmaj9(#11)",     "g3", "wide-6", 0.54, neon_pad.pressure),
+  held_chord(bars(52), bars(4), "A7sus4(b9)",     "e3", "open-5", 0.72, neon_pad.pressure),
+  held_chord(bars(56), bars(7), "Dm6/9",          "d3", "wide-6", 0.52, neon_pad.pressure),
+  held_chord(bars(63), bars(5), "G6(add9)/D",     "d3", "open-6", 0.38, neon_pad.pressure),
+  held_chord(bars(68), bars(4), "Dm(add9)",       "d3", "close-5", 0.24, neon_pad.pressure),
 }
 
 choir_score = timeline {
-  held_chord(bars(12), bars(8), "G6(add9)",      "g4", "close-4", 0.34),
-  held_chord(bars(20), bars(7), "Dm6/9",         "a4", "close-5", 0.42),
-  held_chord(bars(32), bars(10), "Em11",         "b4", "close-5", 0.48),
-  held_chord(bars(42), bars(10), "Dm(add9)/A",   "a4", "close-5", 0.55),
-  held_chord(bars(52), bars(11), "A7sus4(b9)",   "e4", "close-5", 0.62),
-  held_chord(bars(63), bars(9), "Dm(add9)",      "a4", "close-5", 0.28),
+  held_chord(bars(12), bars(8), "G6(add9)",      "g4", "close-4", 0.34, breath_choir.pressure),
+  held_chord(bars(20), bars(7), "Dm6/9",         "a4", "close-5", 0.42, breath_choir.pressure),
+  held_chord(bars(32), bars(10), "Em11",         "b4", "close-5", 0.48, breath_choir.pressure),
+  held_chord(bars(42), bars(10), "Dm(add9)/A",   "a4", "close-5", 0.55, breath_choir.pressure),
+  held_chord(bars(52), bars(11), "A7sus4(b9)",   "e4", "close-5", 0.62, breath_choir.pressure),
+  held_chord(bars(63), bars(9), "Dm(add9)",      "a4", "close-5", 0.28, breath_choir.pressure),
 }
 
 -- Root extraction is a typed music operation, not string slicing in Lua.
@@ -430,16 +436,16 @@ lead_score = timeline {
 run(rain_field, sections.rain)
 
 play(neon_pad, pad_score
-      >> brightness(1420)
-      >> resonance(0.34)
-      >> drift(0.0045)
+      >> neon_pad.brightness(1420)
+      >> neon_pad.resonance(0.34)
+      >> neon_pad.drift(0.0045)
       >> velocity(0.36)
       >> pan("-0.24 0.22")
       >> to(neon_hall, 0.72))
 
 play(breath_choir, choir_score
-      >> vowel(line(0.28, 0.68, bars(44)) >> shift(bars(12)))
-      >> air(0.052)
+      >> breath_choir.vowel(line(0.28, 0.68, bars(44)) >> shift(bars(12)))
+      >> breath_choir.air(0.052)
       >> velocity(0.27)
       >> pan("0.28 -0.30")
       >> to(neon_hall, 0.84))
@@ -448,13 +454,13 @@ play(low_current, bass_score
       >> to(neon_hall, 0.22))
 
 play(glass_keys, keys_score
-      >> tine("2.8 2.2 3.6 2.5 4.2")
+      >> glass_keys.tine("2.8 2.2 3.6 2.5 4.2")
       >> pan("-0.38 0.31")
       >> to(echoes, 0.44)
       >> to(neon_hall, 0.52))
 
 play(ribbon_lead, lead_score
-      >> brightness(2050)
+      >> ribbon_lead.brightness(2050)
       >> to(echoes, 0.24)
       >> to(neon_hall, 0.78))
 
@@ -469,5 +475,5 @@ master(
     highpass(24)
     >> shape("soft", 1.04)
     >> limiter(0.012, 0.48)
-    >> gain(0.82)
+    >> mul(0.82)
 )

@@ -1,6 +1,6 @@
 use apteronotus_pattern::{
     Basis, ControlMap, ControlPattern, ControlValue, Curve, CurveClock, Frac, GroupNode, Pattern,
-    Span, SrcSpan, Value, ValueLimitError, ValueLimits, mini,
+    PatternMathOp, Signal, Span, SrcSpan, Value, ValueLimitError, ValueLimits, mini,
 };
 
 fn velocity(value: f64) -> Pattern {
@@ -219,4 +219,64 @@ fn structural_first_is_stable_through_rev_every_and_sliced_queries() {
             .iter()
             .all(|event| { field_number(&event.value, "velocity") == 0.25 })
     );
+}
+
+#[test]
+fn event_signal_arithmetic_samples_the_transport_signal_at_each_merge_onset() {
+    let values = mini::parse("1 2")
+        .unwrap()
+        .math(
+            PatternMathOp::Mul,
+            Pattern::signal(Signal::Line {
+                from: 0.0,
+                to: 1.0,
+                length: Frac::ONE,
+            }),
+        )
+        .unwrap()
+        .named("gain")
+        .unwrap();
+    let notes = mini::parse("60*4").unwrap().merge(values).unwrap();
+    let gains = notes
+        .onsets(Span::cycle(0))
+        .into_iter()
+        .map(|event| field_number(&event.value, "gain"))
+        .collect::<Vec<_>>();
+
+    // The second note remains inside the first `1` control slot, but the line
+    // is sampled at that note's onset, not the control slot's beginning.
+    assert_eq!(gains, vec![0.0, 0.25, 1.0, 1.5]);
+}
+
+#[test]
+fn arithmetic_between_two_event_patterns_waits_for_explicit_join_semantics() {
+    let error = mini::parse("1 2")
+        .unwrap()
+        .math(PatternMathOp::Add, mini::parse("3 4").unwrap())
+        .unwrap_err();
+    assert!(error.to_string().contains("explicit temporal join"));
+}
+
+#[test]
+fn arithmetic_rejects_nonnumeric_events_with_their_source_span() {
+    let error = mini::parse("c4 e4")
+        .unwrap()
+        .math(PatternMathOp::Mul, Pattern::signal(Signal::Constant(2.0)))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("numeric event values"));
+    assert!(error.to_string().contains("source bytes 0..2"));
+}
+
+#[test]
+fn continuous_arithmetic_preserves_signal_source_attribution() {
+    let src = SrcSpan::new(12, 16);
+    let expression = Pattern::signal(Signal::Constant(0.5))
+        .math(
+            PatternMathOp::Mul,
+            Pattern::signal_at(Signal::Step { at: Frac::ZERO }, src),
+        )
+        .unwrap();
+
+    assert_eq!(expression.query(Span::cycle(0))[0].src, Some(src));
 }

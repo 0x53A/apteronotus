@@ -1,0 +1,9 @@
+[package]
+name = "apteronotus-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure cycle/seconds and tempo-map data for Apteronotus"
+
+[dependencies]
+apteronotus-pattern = { version = "0.1.0", path = "../pattern" }

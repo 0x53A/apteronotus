@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 apteronotus-live = { version = "0.1.0", path = "../live" }
 apteronotus-lua = { version = "0.1.0", path = "../lua" }
 apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
+apteronotus-synth = { version = "0.1.0", path = "../synth" }
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

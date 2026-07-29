@@ -183,6 +183,18 @@ impl ControlMap {
         merged
     }
 
+    pub fn offset_primary(&self, amount: f64) -> Option<ControlMap> {
+        let value = self.get(PRIMARY_FIELD)?.as_f64()?;
+        let mut result = self.clone();
+        let src = self.field(PRIMARY_FIELD).and_then(ControlField::src);
+        result.insert_internal(
+            PRIMARY_FIELD.to_string(),
+            ControlValue::Number(value + amount),
+            src,
+        );
+        Some(result)
+    }
+
     pub fn curve_terms(&self) -> usize {
         self.fields
             .iter()
@@ -499,21 +511,33 @@ pub struct GroupProvenance {
     /// Original member index, zero-based in the IR.
     pub index: u32,
     pub count: u32,
+    /// Optional construction-time leader within the group.
+    ///
+    /// Pattern gives this no musical meaning. The chord builder uses it for
+    /// the harmonic root; other group constructors leave it absent.
+    pub primary: Option<u32>,
     node: GroupNode,
 }
 
 impl GroupProvenance {
-    pub(crate) fn new(node: GroupNode, occurrence: Span, index: u32, count: u32) -> Self {
+    pub(crate) fn new(
+        node: GroupNode,
+        occurrence: Span,
+        index: u32,
+        count: u32,
+        primary: Option<u32>,
+    ) -> Self {
         GroupProvenance {
             key: group_key(node, occurrence),
             index,
             count,
+            primary,
             node,
         }
     }
 
     pub(crate) fn at_occurrence(self, occurrence: Span) -> GroupProvenance {
-        GroupProvenance::new(self.node, occurrence, self.index, self.count)
+        GroupProvenance::new(self.node, occurrence, self.index, self.count, self.primary)
     }
 }
 

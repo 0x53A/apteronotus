@@ -32,6 +32,7 @@
 //! wants, so lowering is a walk rather than a translation.
 
 use crate::control::ControlId;
+use crate::input::AudioInputId;
 use crate::note::{Note, ParamValue, ParamValueError};
 use crate::routing::BusId;
 pub use apteronotus_pattern::{Basis, Curve, CurveClock, CurveTerm};
@@ -119,6 +120,21 @@ pub struct ParamSpec {
     pub max_curve_seconds: Option<f64>,
 }
 
+/// One program control sampled at a realtime onset and bound into the new
+/// voice as an init-rate parameter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InitControlBinding {
+    pub param: ParamId,
+    pub control: crate::ControlId,
+}
+
+/// Duration of the host-visible pulse emitted by [`Op::OnsetDetector`].
+///
+/// The detector's `hold_seconds` is a refractory interval, not this pulse
+/// length. Keeping the two names and lifetimes separate prevents host polling
+/// policy from silently changing retrigger behavior.
+pub const ONSET_PULSE_SECONDS: f64 = 0.030;
+
 impl ParamSpec {
     pub fn new(name: &str, min: f64, max: f64, default: f64) -> ParamSpec {
         ParamSpec {
@@ -162,6 +178,11 @@ pub enum Source {
     Control(ControlId),
     /// One channel supplied by the host of this graph instance.
     Input(usize),
+    /// One channel of a program-scope optional host input.
+    ExternalAudio {
+        input: AudioInputId,
+        channel: usize,
+    },
     /// Channel `channel` of node `node`.
     Port {
         node: NodeId,
@@ -196,6 +217,67 @@ impl From<f64> for Source {
         Source::Const(x)
     }
 }
+
+/// A scalar resolved once when a voice is instantiated.
+///
+/// Stateful algorithms whose allocation depends on a parameter cannot accept
+/// arbitrary audio-rate modulation. Constants and note parameters make that
+/// rate boundary explicit in the data-only graph.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum InitScalar {
+    Const(f64),
+    Param(ParamId),
+}
+
+/// A scalar expression resolved once when a voice is instantiated.
+///
+/// Unlike [`InitScalar`], this retains the small arithmetic tree needed by
+/// symbolic breakpoint times such as `n.duration + 2.4`. It is deliberately
+/// not a general graph: only scalar arithmetic over constants and note
+/// parameters is representable.
+#[derive(Clone, PartialEq, Debug)]
+pub enum InitExpr {
+    Const(f64),
+    Param(ParamId),
+    Add(Box<InitExpr>, Box<InitExpr>),
+    Sub(Box<InitExpr>, Box<InitExpr>),
+    Mul(Box<InitExpr>, Box<InitExpr>),
+    Div(Box<InitExpr>, Box<InitExpr>),
+    Neg(Box<InitExpr>),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BreakpointHorizon {
+    Absolute(f64),
+    GateTail(f64),
+    GateBounded,
+}
+
+impl InitScalar {
+    pub fn from_source(source: Source) -> Result<InitScalar, InitScalarError> {
+        match source {
+            Source::Const(value) => Ok(InitScalar::Const(value)),
+            Source::Param(id) => Ok(InitScalar::Param(id)),
+            Source::Control(_)
+            | Source::Input(_)
+            | Source::ExternalAudio { .. }
+            | Source::Port { .. } => Err(InitScalarError::Dynamic),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InitScalarError {
+    Dynamic,
+}
+
+impl core::fmt::Display for InitScalarError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "value must be constant or bound once per note")
+    }
+}
+
+impl core::error::Error for InitScalarError {}
 
 /// Waveshaper transfer curves, named rather than given as a function, because a
 /// host-language closure may never reach a graph.
@@ -359,24 +441,56 @@ impl Adsr {
 /// keeps this list from becoming the ceiling. `ring`, `supersaw`, `formant` and
 /// the whole reverb network are stdlib; only the irreducibly stateful pieces
 /// and the ones needing a per-sample feedback path are primitives.
+/// One left-closed slot in a compiled transport sequence.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TransportSlot {
+    pub begin_seconds: f64,
+    pub end_seconds: f64,
+    pub value: f64,
+}
+
+impl TransportSlot {
+    fn valid(&self) -> bool {
+        self.begin_seconds.is_finite()
+            && self.end_seconds.is_finite()
+            && self.value.is_finite()
+            && self.begin_seconds >= 0.0
+            && self.end_seconds > self.begin_seconds
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Op {
     // ------------------------------------------------------------ generators
     /// (hz) → audio
     Sine,
+    /// (hz) → audio, with a quarter-cycle initial phase
+    Cosine,
     /// (hz) → audio. Band-limited.
     Saw,
     /// (hz, duty) → audio
     Pulse,
     /// () → audio. White.
     Noise,
+    /// () → audio. Pink, with approximately 3 dB/octave spectral falloff.
+    Pink,
     /// () → audio. A unit sample, once, at onset. δ, and the reason percussion
     /// in `poles.eod` is pole placement: the impulse response of a resonant
     /// second-order section is a struck bar.
     Impulse,
-    /// (min, max) → one deterministic scalar per voice.
+    /// () → one deterministic scalar per voice in the init-rate range.
     InitRandom {
         stream: u64,
+        min: InitExpr,
+        max: InitExpr,
+    },
+    /// (excitation) → Karplus–Strong string. Pitch and damping are init-rate
+    /// values because they determine the internal delay-line state.
+    Pluck {
+        frequency: InitScalar,
+        gain_per_second: f64,
+        damping: InitScalar,
+        max_delay_seconds: f64,
     },
 
     // --------------------------------------------------------------- filters
@@ -384,6 +498,7 @@ pub enum Op {
     Lowpass,
     Highpass,
     Bandpass,
+    Peak,
     /// (audio, cutoff, q) → audio. The ladder.
     Moog,
 
@@ -391,7 +506,6 @@ pub enum Op {
     /// (audio) → audio
     Shape {
         kind: ShapeKind,
-        amount: f64,
     },
     /// (audio) → audio
     DcBlock,
@@ -400,6 +514,112 @@ pub enum Op {
     /// (audio, delay_seconds) → audio. Cubic-interpolating, with allocation
     /// bounds fixed when the graph is staged.
     Delay(DelayRange),
+    /// (left, right) → (wet_left, wet_right). Stateful stereo FDN.
+    Reverb {
+        room_size: f64,
+        time: f64,
+        damping: f64,
+    },
+    /// (left, right) → limited stereo, with lookahead equal to `attack`.
+    Limiter {
+        attack: f64,
+        release: f64,
+    },
+    /// (audio) → chorused audio, including the dry signal.
+    Chorus {
+        seed: u64,
+        separation: f64,
+        variation: f64,
+        frequency: f64,
+    },
+    /// (audio) → dry plus a bounded delay/optional-lowpass feedback loop.
+    FeedbackDelay {
+        delay_seconds: f64,
+        cutoff_q: Option<(f64, f64)>,
+        amount: f64,
+    },
+    /// (audio) → Schroeder allpass diffusion stage.
+    AllpassDelay {
+        seconds: f64,
+        gain: f64,
+    },
+    /// (audio, t60_seconds) → wet audio. The matrix is a normalized
+    /// power-of-two Hadamard transform and each line owns a bounded,
+    /// optionally modulated delay buffer.
+    Fdn {
+        delays: Vec<f64>,
+        damping: f64,
+        modulation_rate: f64,
+        modulation_depth: f64,
+        max_t60: f64,
+    },
+    /// (audio) → unipolar amplitude control.
+    EnvelopeFollower {
+        attack: f64,
+        release: f64,
+    },
+    /// (audio) → monophonic frequency control in Hz.
+    PitchTracker {
+        min_hz: f64,
+        max_hz: f64,
+        default_hz: f64,
+        hold_seconds: f64,
+    },
+    /// (audio) → a short unipolar pulse on a bounded transient threshold
+    /// crossing. The pulse is published to the host as an external event
+    /// source; it is not queryable pattern structure.
+    OnsetDetector {
+        floor: f64,
+        hold_seconds: f64,
+    },
+    /// () → a repeating scalar compiled from one bounded transport-pattern
+    /// period. This is persistent-clock data, never note-clock automation.
+    TransportSequence {
+        period_seconds: f64,
+        slots: Vec<TransportSlot>,
+    },
+    /// (left, right) → mid/side-scaled stereo. `amount = 0` is mono and one
+    /// preserves the input width.
+    Width,
+    /// (signal) → smoothed signal. The response time is resolved once per
+    /// voice; the signal itself remains live.
+    Slew {
+        response_time: InitScalar,
+        initial: f64,
+    },
+    /// (gate) → persistent attack/decay/sustain/release envelope.
+    GateEnv {
+        attack: f64,
+        decay: f64,
+        sustain: f64,
+        release: f64,
+    },
+    /// () → onset-relative pitch glide from the preceding track event to the
+    /// current note. Kept distinct from `Slew`: a per-note constant `n.hz`
+    /// has no edge for an ordinary follower to smooth.
+    Portamento {
+        target: InitScalar,
+        response_time: InitScalar,
+    },
+    /// Runtime-inserted lifecycle gate for a finite persistent run.
+    ///
+    /// It is placed before nonterminating activity sources, not at the graph
+    /// output, so downstream state receives silence at the boundary and may
+    /// drain its declared response tail.
+    RunGate {
+        active_seconds: f64,
+        fade_seconds: f64,
+    },
+    /// (signal) → signal while publishing the current sample to one
+    /// program-scope shared control.
+    ///
+    /// This is emitted only by the language/runtime's persistent signal
+    /// arena. Passing the signal through keeps it in the ordinary graph
+    /// dependency order; the arena multiplies its output by zero before
+    /// routing so the writer itself is inaudible.
+    ControlWrite {
+        target: crate::ControlId,
+    },
 
     // ------------------------------------------------------------ arithmetic
     /// (a, b) → a + b. Mix.
@@ -410,14 +630,40 @@ pub enum Op {
     Mul,
     /// (a, b) → a ÷ b
     Div,
+    /// (base, exponent) → base raised to exponent
+    Pow,
     /// (a) → −a
     Neg,
+    /// (hz) → fractional MIDI. Used at the typed boundary between a scheduled
+    /// pitch event and a persistent note control.
+    HzToMidi,
+    /// (a) → a constrained to a fixed finite range
+    Clamp {
+        min: f64,
+        max: f64,
+    },
 
     // ------------------------------------------------------------- envelopes
     /// () → control. Reads the note clock.
     Adsr(Adsr),
+    /// (seconds) → control. Exponential note-clock decay with a
+    /// construction-time retention bound.
+    Decay {
+        max_seconds: f64,
+    },
+    /// (begin_seconds, end_seconds) → control. A bounded note-clock gate.
+    Window {
+        max_seconds: f64,
+    },
     /// () → control. Reads the note clock. See [`Curve`] on placement.
     Curve(Curve),
+    /// A piecewise-linear note-clock curve whose breakpoint times are
+    /// instantiation-rate scalar expressions.
+    BreakpointCurve {
+        times: Vec<InitExpr>,
+        values: Vec<f64>,
+        horizon: BreakpointHorizon,
+    },
 
     // ---------------------------------------------------------------- output
     /// (audio, position) → (left, right). The one node in this set with two
@@ -428,23 +674,54 @@ pub enum Op {
 impl Op {
     pub fn inputs(&self) -> usize {
         match self {
-            Op::Noise | Op::Impulse | Op::Adsr(_) | Op::Curve(_) => 0,
-            Op::Sine | Op::Saw | Op::Shape { .. } | Op::DcBlock | Op::Neg => 1,
-            Op::Pulse
+            Op::Noise
+            | Op::Pink
+            | Op::Impulse
             | Op::InitRandom { .. }
+            | Op::Adsr(_)
+            | Op::Curve(_)
+            | Op::BreakpointCurve { .. }
+            | Op::TransportSequence { .. }
+            | Op::Portamento { .. }
+            | Op::RunGate { .. } => 0,
+            Op::Sine
+            | Op::Cosine
+            | Op::Saw
+            | Op::Pluck { .. }
+            | Op::DcBlock
+            | Op::Neg
+            | Op::HzToMidi
+            | Op::Clamp { .. }
+            | Op::Decay { .. }
+            | Op::Chorus { .. }
+            | Op::FeedbackDelay { .. }
+            | Op::AllpassDelay { .. }
+            | Op::EnvelopeFollower { .. }
+            | Op::PitchTracker { .. }
+            | Op::OnsetDetector { .. }
+            | Op::Slew { .. }
+            | Op::GateEnv { .. }
+            | Op::ControlWrite { .. } => 1,
+            Op::Pulse
             | Op::Delay(_)
             | Op::Add
             | Op::Sub
             | Op::Mul
             | Op::Div
-            | Op::Pan => 2,
-            Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Moog => 3,
+            | Op::Pow
+            | Op::Shape { .. }
+            | Op::Window { .. }
+            | Op::Pan
+            | Op::Fdn { .. } => 2,
+            Op::Width => 3,
+            Op::Reverb { .. } | Op::Limiter { .. } => 2,
+            Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak | Op::Moog => 3,
         }
     }
 
     pub fn outputs(&self) -> usize {
         match self {
-            Op::Pan => 2,
+            Op::Pan | Op::Width | Op::Reverb { .. } | Op::Limiter { .. } => 2,
             _ => 1,
         }
     }
@@ -459,17 +736,44 @@ impl Op {
     /// delayed signal multiplied by a short envelope is the safe direction.
     pub fn activity_input(&self, port: usize) -> bool {
         match self {
-            Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Moog => port == 0,
-            Op::Shape { .. } | Op::DcBlock | Op::Delay(_) | Op::Neg | Op::Pan => port == 0,
-            Op::Add | Op::Sub | Op::Mul | Op::Div => port < 2,
+            Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak | Op::Moog => port == 0,
+            Op::Shape { .. }
+            | Op::DcBlock
+            | Op::Delay(_)
+            | Op::Neg
+            | Op::HzToMidi
+            | Op::Clamp { .. }
+            | Op::Chorus { .. }
+            | Op::FeedbackDelay { .. }
+            | Op::AllpassDelay { .. }
+            | Op::Fdn { .. }
+            | Op::EnvelopeFollower { .. }
+            | Op::PitchTracker { .. }
+            | Op::OnsetDetector { .. }
+            | Op::Width
+            | Op::Slew { .. }
+            | Op::GateEnv { .. }
+            | Op::ControlWrite { .. }
+            | Op::Pluck { .. }
+            | Op::Pan => port == 0,
+            Op::Reverb { .. } | Op::Limiter { .. } => port < 2,
+            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => port < 2,
             Op::Sine
+            | Op::Cosine
             | Op::Saw
             | Op::Pulse
             | Op::Noise
+            | Op::Pink
             | Op::Impulse
             | Op::InitRandom { .. }
             | Op::Adsr(_)
-            | Op::Curve(_) => false,
+            | Op::Decay { .. }
+            | Op::Window { .. }
+            | Op::Curve(_)
+            | Op::BreakpointCurve { .. }
+            | Op::TransportSequence { .. }
+            | Op::Portamento { .. }
+            | Op::RunGate { .. } => false,
         }
     }
 
@@ -477,8 +781,62 @@ impl Op {
     fn response_tail(&self) -> f64 {
         match self {
             Op::Delay(range) => range.max_seconds(),
+            Op::Reverb { time, .. } => *time,
+            Op::Limiter { attack, .. } => *attack,
+            Op::Chorus {
+                separation,
+                variation,
+                ..
+            } => separation * 4.0 + variation,
+            Op::FeedbackDelay {
+                delay_seconds,
+                amount,
+                ..
+            } => {
+                let repeats = (0.05_f64.ln() / amount.abs().ln()).ceil().max(1.0);
+                delay_seconds * repeats
+            }
+            Op::AllpassDelay { seconds, gain } => {
+                if *gain == 0.0 {
+                    *seconds
+                } else {
+                    seconds * (0.001_f64.ln() / gain.abs().ln()).ceil().max(1.0)
+                }
+            }
+            Op::Fdn { max_t60, .. } => *max_t60,
+            Op::EnvelopeFollower { release, .. } => *release,
+            Op::OnsetDetector { .. } => ONSET_PULSE_SECONDS,
+            Op::Pluck {
+                gain_per_second, ..
+            } => (0.05_f64.ln() / gain_per_second.ln()).max(0.0),
+            Op::GateEnv { release, .. } => *release,
             _ => 0.0,
         }
+    }
+
+    /// Warm-up window requested when replacing a retained analyser.
+    ///
+    /// This is not an audible voice tail. It describes recent-input state that
+    /// should be rebuilt before an incompatible persistent analyser becomes
+    /// authoritative. Exponential followers have infinite mathematical
+    /// support, so their authored response time is the explicit practical
+    /// convention rather than a claim of exact finite memory.
+    pub fn warmup_seconds(&self) -> f64 {
+        match self {
+            Op::EnvelopeFollower { attack, release } => attack.max(*release),
+            Op::PitchTracker { hold_seconds, .. } => *hold_seconds,
+            Op::OnsetDetector { hold_seconds, .. } => hold_seconds.max(ONSET_PULSE_SECONDS),
+            _ => 0.0,
+        }
+    }
+
+    /// Whether this node begins nonterminating audio activity that a finite
+    /// patch lifecycle must stop before downstream state can drain.
+    pub(crate) fn begins_audio_activity(&self) -> bool {
+        matches!(
+            self,
+            Op::Sine | Op::Cosine | Op::Saw | Op::Pulse | Op::Noise | Op::Pink
+        )
     }
 }
 
@@ -607,6 +965,50 @@ impl GraphTemplate {
         self.outputs.len()
     }
 
+    /// Whether this staged graph reads a particular per-note parameter.
+    ///
+    /// The language/runtime boundary uses this to distinguish fixed-frequency
+    /// trigger voices from pitched voices without teaching the pattern crate
+    /// any musical domain knowledge.
+    pub fn uses_param(&self, target: ParamId) -> bool {
+        let source_uses = |source: Source| matches!(source, Source::Param(id) if id == target);
+        self.nodes
+            .iter()
+            .flat_map(|node| node.inputs.iter().map(|input| input.source))
+            .chain(self.outputs.iter().copied())
+            .chain(
+                self.sends
+                    .iter()
+                    .flat_map(|send| send.outputs.iter().map(|input| input.source)),
+            )
+            .any(source_uses)
+            || self.nodes.iter().any(|node| match node.op {
+                Op::Pluck {
+                    frequency, damping, ..
+                } => {
+                    matches!(frequency, InitScalar::Param(id) if id == target)
+                        || matches!(damping, InitScalar::Param(id) if id == target)
+                }
+                Op::InitRandom {
+                    ref min, ref max, ..
+                } => init_expr_uses_param(min, target) || init_expr_uses_param(max, target),
+                Op::BreakpointCurve { ref times, .. } => {
+                    times.iter().any(|time| init_expr_uses_param(time, target))
+                }
+                Op::Slew { response_time, .. } => {
+                    matches!(response_time, InitScalar::Param(id) if id == target)
+                }
+                Op::Portamento {
+                    target: glide_target,
+                    response_time,
+                } => {
+                    matches!(glide_target, InitScalar::Param(id) if id == target)
+                        || matches!(response_time, InitScalar::Param(id) if id == target)
+                }
+                _ => false,
+            })
+    }
+
     pub fn cost(&self) -> GraphCost {
         GraphCost {
             nodes: self.nodes.len(),
@@ -629,11 +1031,42 @@ impl GraphTemplate {
                     .map(|send| send.outputs.len())
                     .sum::<usize>(),
             declared_parameters: self.params.len(),
+            data_entries: self
+                .nodes
+                .iter()
+                .map(|node| match &node.op {
+                    Op::Curve(curve) => curve.terms.len(),
+                    Op::BreakpointCurve { times, values, .. } => times.len() + values.len(),
+                    Op::TransportSequence { slots, .. } => slots.len(),
+                    Op::Fdn { delays, .. } => delays.len(),
+                    _ => 0,
+                })
+                .sum(),
             delay_buffer_seconds: self
                 .nodes
                 .iter()
                 .map(|node| match node.op {
                     Op::Delay(range) => range.max_seconds(),
+                    // fundsp's stereo reverb owns 32 delay lines whose
+                    // maximum propagation time is bounded by room diameter
+                    // over the speed of sound.
+                    Op::Reverb { room_size, .. } => 32.0 * room_size / 343.0,
+                    Op::Limiter { attack, .. } => 2.0 * attack,
+                    Op::Chorus {
+                        separation,
+                        variation,
+                        ..
+                    } => separation * 10.0 + variation * 5.0,
+                    Op::FeedbackDelay { delay_seconds, .. } => delay_seconds,
+                    Op::AllpassDelay { seconds, .. } => seconds,
+                    Op::Fdn {
+                        ref delays,
+                        modulation_depth,
+                        ..
+                    } => delays.iter().sum::<f64>() + delays.len() as f64 * modulation_depth,
+                    Op::Pluck {
+                        max_delay_seconds, ..
+                    } => max_delay_seconds,
                     _ => 0.0,
                 })
                 .sum(),
@@ -670,6 +1103,12 @@ impl GraphTemplate {
             return Err(GraphLimitError::OutputChannels {
                 found: cost.output_channels,
                 limit: limits.output_channels,
+            });
+        }
+        if cost.data_entries > limits.data_entries {
+            return Err(GraphLimitError::DataEntries {
+                found: cost.data_entries,
+                limit: limits.data_entries,
             });
         }
         if cost.delay_buffer_seconds > limits.delay_buffer_seconds {
@@ -723,6 +1162,14 @@ impl GraphTemplate {
                     gate_tail: adsr.tail(),
                     absolute_horizon: 0.0,
                 },
+                Op::Decay { max_seconds } => Lifetime {
+                    gate_tail: 0.0,
+                    absolute_horizon: *max_seconds,
+                },
+                Op::Window { max_seconds } => Lifetime {
+                    gate_tail: 0.0,
+                    absolute_horizon: *max_seconds,
+                },
                 Op::Curve(curve) => match curve.activity() {
                     Ok(CurveActivity::Finite(horizon))
                         if curve.clock == CurveClock::NoteSeconds =>
@@ -737,6 +1184,21 @@ impl GraphTemplate {
                         absolute_horizon: 0.0,
                     },
                     Ok(CurveActivity::GateBounded) | Err(_) => Lifetime::default(),
+                },
+                Op::BreakpointCurve { horizon, .. } => match horizon {
+                    BreakpointHorizon::Absolute(seconds) => Lifetime {
+                        gate_tail: 0.0,
+                        absolute_horizon: *seconds,
+                    },
+                    BreakpointHorizon::GateTail(seconds) => Lifetime {
+                        gate_tail: *seconds,
+                        absolute_horizon: 0.0,
+                    },
+                    BreakpointHorizon::GateBounded => Lifetime::default(),
+                },
+                Op::RunGate { active_seconds, .. } => Lifetime {
+                    gate_tail: 0.0,
+                    absolute_horizon: *active_seconds,
                 },
                 _ => upstream,
             };
@@ -848,6 +1310,193 @@ impl GraphTemplate {
                     .validate()
                     .map_err(|source| TemplateError::InvalidCurve { node: id, source })?;
             }
+            let valid_effect = match node.op {
+                Op::Reverb {
+                    room_size,
+                    time,
+                    damping,
+                } => {
+                    room_size.is_finite()
+                        && room_size > 0.0
+                        && time.is_finite()
+                        && time >= 0.0
+                        && damping.is_finite()
+                        && (0.0..=1.0).contains(&damping)
+                }
+                Op::Limiter { attack, release } => {
+                    attack.is_finite() && attack >= 0.0 && release.is_finite() && release >= 0.0
+                }
+                Op::Clamp { min, max } => min.is_finite() && max.is_finite() && min <= max,
+                Op::Decay { max_seconds } => max_seconds.is_finite() && max_seconds > 0.0,
+                Op::Window { max_seconds } => max_seconds.is_finite() && max_seconds >= 0.0,
+                Op::BreakpointCurve {
+                    ref times,
+                    ref values,
+                    horizon,
+                } => {
+                    !times.is_empty()
+                        && times.len() == values.len()
+                        && values.iter().all(|value| value.is_finite())
+                        && times.iter().all(|time| valid_init_expr(time, &self.params))
+                        && match horizon {
+                            BreakpointHorizon::Absolute(seconds)
+                            | BreakpointHorizon::GateTail(seconds) => {
+                                seconds.is_finite() && seconds >= 0.0
+                            }
+                            BreakpointHorizon::GateBounded => true,
+                        }
+                }
+                Op::Chorus {
+                    separation,
+                    variation,
+                    frequency,
+                    ..
+                } => {
+                    separation.is_finite()
+                        && separation >= 0.0
+                        && variation.is_finite()
+                        && variation >= 0.0
+                        && frequency.is_finite()
+                        && frequency > 0.0
+                }
+                Op::FeedbackDelay {
+                    delay_seconds,
+                    cutoff_q,
+                    amount,
+                } => {
+                    delay_seconds.is_finite()
+                        && delay_seconds > 0.0
+                        && amount.is_finite()
+                        && amount.abs() > 0.0
+                        && amount.abs() < 1.0
+                        && cutoff_q.is_none_or(|(cutoff, q)| {
+                            cutoff.is_finite() && cutoff > 0.0 && q.is_finite() && q > 0.0
+                        })
+                }
+                Op::AllpassDelay { seconds, gain } => {
+                    seconds.is_finite() && seconds > 0.0 && gain.is_finite() && gain.abs() < 1.0
+                }
+                Op::Fdn {
+                    ref delays,
+                    damping,
+                    modulation_rate,
+                    modulation_depth,
+                    max_t60,
+                } => {
+                    !delays.is_empty()
+                        && delays.len().is_power_of_two()
+                        && delays.len() <= 32
+                        && delays.iter().all(|delay| {
+                            delay.is_finite() && *delay > modulation_depth && *delay > 0.0
+                        })
+                        && damping.is_finite()
+                        && (0.0..1.0).contains(&damping)
+                        && modulation_rate.is_finite()
+                        && modulation_rate >= 0.0
+                        && modulation_depth.is_finite()
+                        && modulation_depth >= 0.0
+                        && max_t60.is_finite()
+                        && max_t60 > 0.0
+                }
+                Op::EnvelopeFollower { attack, release } => {
+                    attack.is_finite() && attack >= 0.0 && release.is_finite() && release >= 0.0
+                }
+                Op::PitchTracker {
+                    min_hz,
+                    max_hz,
+                    default_hz,
+                    hold_seconds,
+                } => {
+                    min_hz.is_finite()
+                        && min_hz > 0.0
+                        && max_hz.is_finite()
+                        && max_hz >= min_hz
+                        && default_hz.is_finite()
+                        && (min_hz..=max_hz).contains(&default_hz)
+                        && hold_seconds.is_finite()
+                        && hold_seconds >= 0.0
+                }
+                Op::OnsetDetector {
+                    floor,
+                    hold_seconds,
+                } => {
+                    floor.is_finite()
+                        && floor > 0.0
+                        && hold_seconds.is_finite()
+                        && hold_seconds >= 0.0
+                }
+                Op::TransportSequence {
+                    period_seconds,
+                    ref slots,
+                } => {
+                    period_seconds.is_finite()
+                        && period_seconds > 0.0
+                        && !slots.is_empty()
+                        && slots.iter().all(TransportSlot::valid)
+                        && slots
+                            .windows(2)
+                            .all(|pair| pair[0].end_seconds == pair[1].begin_seconds)
+                        && slots[0].begin_seconds == 0.0
+                        && slots
+                            .last()
+                            .is_some_and(|slot| slot.end_seconds == period_seconds)
+                }
+                Op::Width => true,
+                Op::Pluck {
+                    frequency,
+                    gain_per_second,
+                    damping,
+                    max_delay_seconds,
+                } => {
+                    init_scalar_valid(frequency, &self.params)
+                        && init_scalar_valid(damping, &self.params)
+                        && gain_per_second.is_finite()
+                        && gain_per_second > 0.0
+                        && gain_per_second < 1.0
+                        && max_delay_seconds.is_finite()
+                        && max_delay_seconds > 0.0
+                }
+                Op::Slew {
+                    response_time,
+                    initial,
+                } => init_scalar_valid(response_time, &self.params) && initial.is_finite(),
+                Op::GateEnv {
+                    attack,
+                    decay,
+                    sustain,
+                    release,
+                } => {
+                    attack.is_finite()
+                        && attack >= 0.0
+                        && decay.is_finite()
+                        && decay >= 0.0
+                        && sustain.is_finite()
+                        && (0.0..=1.0).contains(&sustain)
+                        && release.is_finite()
+                        && release >= 0.0
+                }
+                Op::Portamento {
+                    target,
+                    response_time,
+                } => {
+                    init_scalar_valid(target, &self.params)
+                        && init_scalar_valid(response_time, &self.params)
+                }
+                Op::RunGate {
+                    active_seconds,
+                    fade_seconds,
+                } => {
+                    active_seconds.is_finite()
+                        && active_seconds > 0.0
+                        && fade_seconds.is_finite()
+                        && fade_seconds >= 0.0
+                        && fade_seconds * 2.0 <= active_seconds
+                }
+                _ => true,
+            };
+            if !valid_effect {
+                return Err(TemplateError::InvalidEffect { node: id });
+            }
             if !node.tail.is_finite() || node.tail < 0.0 {
                 return Err(TemplateError::InvalidTail {
                     node: id,
@@ -860,16 +1509,6 @@ impl GraphTemplate {
                     expected: node.op.inputs(),
                     found: node.inputs.len(),
                 });
-            }
-            if matches!(node.op, Op::InitRandom { .. }) {
-                for (port, input) in node.inputs.iter().enumerate() {
-                    if matches!(
-                        input.source,
-                        Source::Port { .. } | Source::Control(_) | Source::Input(_)
-                    ) {
-                        return Err(TemplateError::DynamicInitRandom { node: id, port });
-                    }
-                }
             }
             for (port, input) in node.inputs.iter().enumerate() {
                 self.check_source(input.source, Some((id, port)))?;
@@ -910,6 +1549,7 @@ impl GraphTemplate {
             }
             Source::Param(_) => Ok(()),
             Source::Control(_) => Ok(()),
+            Source::ExternalAudio { .. } => Ok(()),
             Source::Input(channel) => {
                 if channel < self.inputs {
                     Ok(())
@@ -938,6 +1578,43 @@ impl GraphTemplate {
                 Ok(())
             }
         }
+    }
+}
+
+fn init_scalar_valid(value: InitScalar, params: &[ParamSpec]) -> bool {
+    match value {
+        InitScalar::Const(value) => value.is_finite(),
+        InitScalar::Param(ParamId::Implicit(_)) => true,
+        InitScalar::Param(ParamId::Declared(index)) => index < params.len(),
+    }
+}
+
+fn valid_init_expr(value: &InitExpr, params: &[ParamSpec]) -> bool {
+    match value {
+        InitExpr::Const(value) => value.is_finite(),
+        InitExpr::Param(ParamId::Implicit(_)) => true,
+        InitExpr::Param(ParamId::Declared(index)) => *index < params.len(),
+        InitExpr::Add(left, right)
+        | InitExpr::Sub(left, right)
+        | InitExpr::Mul(left, right)
+        | InitExpr::Div(left, right) => {
+            valid_init_expr(left, params) && valid_init_expr(right, params)
+        }
+        InitExpr::Neg(inner) => valid_init_expr(inner, params),
+    }
+}
+
+fn init_expr_uses_param(value: &InitExpr, target: ParamId) -> bool {
+    match value {
+        InitExpr::Const(_) => false,
+        InitExpr::Param(id) => *id == target,
+        InitExpr::Add(left, right)
+        | InitExpr::Sub(left, right)
+        | InitExpr::Mul(left, right)
+        | InitExpr::Div(left, right) => {
+            init_expr_uses_param(left, target) || init_expr_uses_param(right, target)
+        }
+        InitExpr::Neg(inner) => init_expr_uses_param(inner, target),
     }
 }
 
@@ -989,6 +1666,9 @@ pub enum TemplateError {
         node: NodeId,
         source: apteronotus_pattern::CurveError,
     },
+    InvalidEffect {
+        node: NodeId,
+    },
 }
 
 impl core::fmt::Display for TemplateError {
@@ -1037,6 +1717,9 @@ impl core::fmt::Display for TemplateError {
             TemplateError::InvalidCurve { node, source } => {
                 write!(f, "node {node} has an invalid curve: {source}")
             }
+            TemplateError::InvalidEffect { node } => {
+                write!(f, "node {node} has invalid effect parameters")
+            }
         }
     }
 }
@@ -1051,6 +1734,9 @@ pub struct GraphCost {
     /// Main outputs plus graph-send stem channels.
     pub output_channels: usize,
     pub declared_parameters: usize,
+    /// Flat data stored by bounded table-driven nodes such as transport
+    /// sequences, curves, breakpoint envelopes, and FDN delay layouts.
+    pub data_entries: usize,
     /// Sum of maximum delay-line lengths. At a known sample rate this converts
     /// directly to the dominant state-memory allocation.
     pub delay_buffer_seconds: f64,
@@ -1063,6 +1749,7 @@ pub struct GraphLimits {
     pub connections: usize,
     pub input_channels: usize,
     pub output_channels: usize,
+    pub data_entries: usize,
     pub delay_buffer_seconds: f64,
     pub tail_seconds: f64,
 }
@@ -1073,6 +1760,7 @@ pub enum GraphLimitError {
     Connections { found: usize, limit: usize },
     InputChannels { found: usize, limit: usize },
     OutputChannels { found: usize, limit: usize },
+    DataEntries { found: usize, limit: usize },
     DelayBuffer { found: f64, limit: f64 },
     Tail { found: f64, limit: f64 },
 }
@@ -1094,6 +1782,10 @@ impl core::fmt::Display for GraphLimitError {
             GraphLimitError::OutputChannels { found, limit } => write!(
                 f,
                 "graph has {found} output channels, more than the limit of {limit}"
+            ),
+            GraphLimitError::DataEntries { found, limit } => write!(
+                f,
+                "graph stores {found} table entries, more than the limit of {limit}"
             ),
             GraphLimitError::DelayBuffer { found, limit } => write!(
                 f,

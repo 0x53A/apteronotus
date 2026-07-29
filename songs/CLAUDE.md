@@ -34,24 +34,45 @@ The current Lua/runtime path can play multiple polyphonic tracks with
 mini-notation; `fast`, `slow`, `shift`/`late`, `early`, `rev`, `every`, `off`,
 `sometimes`, `degrade`, `segment`, and `range`; scalar or note-clock curve
 event controls; staged graph arithmetic and filters; and persistent patches,
-controls, buses, and graph sends. Those features reach both measured offline
-audio and the native player.
+controls, buses, graph sends, mapped tempo, finite `timeline { at(...) }`
+placement, and transport-signal arithmetic sampled through numeric setters.
+Literal chord symbols, anchors and the first named voicings now expand at
+evaluation into grouped pitch events; `root_notes`, integer `octave`, and
+derived or typed-beat `arp` spacing operate on that owned data.
+Those features reach both measured offline audio and the native player.
 
-No complete song in this directory runs yet. The dominant remaining seams are
-tempo/timeline and transport-signal bindings; key/music theory and `arp`;
-score-level sends and `duck`; typed non-pitch trigger events; symbolic graph
-curve arguments; feedback/reverb and the rest of the DSP/stdlib vocabulary;
-and live external inputs. The native player currently uses 120 BPM, and a
-persistent/layout edit performs an explicit cycle-zero hard reset unless its
-persistent data is compatible with the live arena. Compatible edits retain that
-arena and activate at the ordinary frontier; changed persistent topology still
-needs replacement crossfade.
+All seven songs now evaluate as complete owned programs and reach routed
+persistent measured audio. This
+includes score ducking, bounded filtered-feedback delay, gated reverb,
+graph-rate cosine and pink noise, init-rate Karplus–Strong strings, peak
+filtering, deterministic per-voice `rand`, previous-onset pitch glide,
+graph/event sends, breakpoint gestures, finite mapped-tempo timelines, shared
+analysers, compiled transport controls, external-trigger ownership, the
+modulated diffusion/FDN hall, and master processing. Send handles remain lexical: a send
+used while staging a voice is declared before that voice rather than being
+secretly hoisted.
 
-`supersaws.eod` adds two independent pattern gaps at its final hat line:
-`ply(...)` event repetition and mini-notation `|` random-choice alternation.
-Implementing one does not make the other implicit. Its three weighted and
-polymetric notation strings are already parse-guarded in
-`crates/pattern/tests/mini.rs`.
+The optional-input base is implemented: declarations have owned lexical
+identity, can feed multiple staged graphs, survive compatible persistent edits,
+and use silence/shared-default fallbacks for unavailable lanes. The native
+player binds the first logical input to a same-rate default input device; the
+browser still falls back pending permission/device integration. The shared
+analyser graph, transport-pattern control compiler, realtime onset edge,
+transport-sampled trigger controls, ordinal-derived degradation and `at_onset`
+init bindings are connected. The jamming acceptance feeds a deterministic host
+signal through that complete path; real microphone capture uses the same native
+processor path. Pattern-varying send levels and arbitrary
+feedback graph causality remain separate from the fixed filtered-delay loop
+now implemented. A
+tempo-map edit or incompatible persistent/layout edit performs an explicit
+cycle-zero hard reset. Compatible edits retain the live arena and activate at
+the ordinary frontier; changed persistent topology still needs replacement
+crossfade, and tempo edits need clock-map reconciliation.
+
+`supersaws.eod` established `ply(...)` event repetition and mini-notation `|`
+random-choice alternation as separate pattern operations. Both are now
+implemented and query-idempotent; its weighted and polymetric notation remains
+parse-guarded in `crates/pattern/tests/mini.rs`.
 
 **Top level** — `tempo`, `play`, `voice`, `send`, `master`, and from session 3
 `patch` (persistent lifetime), `run` (activate an autonomous rack), `timeline`
@@ -62,6 +83,13 @@ Declarations are inert. `play(x, notes)` is the same call whether `x` is a
 instrument between polyphonic and persistent does not touch the score.
 `run(patch, span)` is for a rack with no notes to drive it.
 
+There are currently two explicit exceptions to declaration-order inertness.
+`at(secs(...), ...)` and `beats(...)` require `tempo(...)` earlier because
+they resolve through that map during evaluation, and input-bearing `run(...)`
+patches process stems serially in run order. Both are provisional and
+load-bearing: the intended replacements are a hoisted program clock and
+explicit patch inputs.
+
 `tempo(72)` is sugar for a one-entry tempo map; missing `over` steps, explicit
 `over` interpolates.
 
@@ -71,7 +99,8 @@ and absolute are different things and guessing is the classic sequencer bug.
 **Pattern transforms**, chained with `>>` — `fast` `slow` `rev` `every` `off`
 `sometimes` `degrade` `arp` `shift` `duck` `to`, plus **one setter per declared
 parameter**. `cutoff(...)` exists because `supersaw` declares `cutoff`; that is
-the whole payoff of `params` being data.
+the whole payoff of `params` being data. `velocity(...)` is the sole implicit
+event-amplitude setter; graph and master amplitude use `mul(...)`.
 
 **Signals and curves share arithmetic, not placement semantics.** A transport
 signal merged through a setter is sampled at the note onset. A
@@ -119,19 +148,31 @@ combinatorial blowup, and continuous signals fall out correctly — which suits 
 model where a voice is instantiated at onset with its parameters baked in.
 Ratcheting is then something you write in the notation instead.
 
-**3. `slew(n.hz, n.glide)` in `techno.eod` has no way to work as an ordinary
-polyphonic voice.** Portamento
-needs the *previous* note's pitch, and a voice instantiated per note has never
-heard of one. The persistent `PatchTemplate` and program controls now provide
-the honest monosynth lifetime, but the score-to-control driver that turns note
-events into pitch/gate changes is still unwritten. Passing `n.prev_hz` and
-`n.legato` remains the alternative; the song-level choice is unresolved.
+**3. `slew(n.hz, n.glide)` needs event-to-event state. Resolved for scheduled
+voices.** The scheduler retains the preceding pitch independently per track and
+hands it to voice instantiation. The graph lowers this exact spelling to a
+finite smoothstep from that pitch to the current `n.hz`; the first onset starts
+at its target. Simultaneous chord members share the same preceding pitch, and
+stable structural order selects the member remembered for the next onset.
+History commits transactionally with the scheduling window. It is deliberately
+cleared at an edit boundary because track reconciliation is not implemented;
+silently borrowing the pitch of a newly reordered track would be worse than one
+unglided onset.
 
-**4. `duck(pattern, amount)` is not a per-note parameter.** It modulates a
-whole line's output from a rhythm. Bus/stem routing now exists, but **a pattern
-must still be convertible into a control signal** — sample and hold, with a
-shaped release. New score-level concept, needed by two of the original four
-songs.
+This does not claim oscillator phase continuity. A graph that must preserve
+oscillator/filter state across note boundaries remains a persistent patch.
+`control_signal(pattern, period)` now supplies the explicit, bounded
+transport-pattern driver used by those racks: it compiles one complete numeric
+period at evaluation and retains no pattern callback. For other live signals,
+`signal >> slew(seconds)` is an ordinary fixed-response follower and does not
+consult score history.
+
+**4. `duck(pattern, amount)` is not a per-note parameter. Resolved.** The
+scheduler queries the trigger rhythm on the control thread and compiles its
+numeric onsets into transport-aligned, allocation-free smoothstep release
+segments spanning each trigger event. That envelope multiplies every completed
+routed lane of the line, including sends. No Lua callback or pattern query runs
+on the audio thread, and tempo projection remains the scheduler's job.
 
 **5. `to(send, x)` is used at two different levels and they are not the same.**
 Inside a graph (`glass`, `cowbell`) it is a fixed patch; in a score
@@ -139,15 +180,17 @@ Inside a graph (`glass`, `cowbell`) it is a fixed patch; in a score
 graph send taps internal graph channels and its level may itself be a signal;
 an event send copies the completed voice channels with a scalar bound at the
 onset. Both resolve a lexical bus binding to an opaque `BusId`, and routed
-lowering sums them into the same program-wide stem layout. Graph sends are
-bound in Lua; the score-level event-send constructor remains to be connected.
+lowering sums them into the same program-wide stem layout. Both forms are
+bound in Lua; pattern-varying event-send levels remain separate work.
 
-**6. `arp("up")` needs chords to survive as chords. Initial identity slice
-implemented.** `[a3,c4,e4]` now becomes a `Group`, not a plain `Stack`, and its
-events carry immutable group key, original member index and original count.
-Unrelated coincident layers remain a `Stack`. The arpeggiator itself is still
-unwritten: it must consume grouped events and choose an explicit pitch/order
-policy rather than infer grouping from coincidence.
+**6. `arp("up")` needs chords to survive as chords. Resolved and implemented
+for literal construction.** `[a3,c4,e4]` and literal voicings become `Group`s,
+not plain `Stack`s, and their events carry immutable group key, original member
+index and original count. Literal chord groups additionally mark their root as
+a domain-neutral primary member. Unrelated coincident layers remain a `Stack`.
+`arp` consumes the group and uses its stable indices; explicit spacing clips
+slots to the group's existing extent rather than silently extending a timeline
+placement.
 
 **7. Every voice has implicit parameters it never declares. Resolved and
 implemented in synth/Lua.** The fixed symbolic set is `n.hz`, `n.velocity`,
@@ -202,20 +245,28 @@ member coordinates. The future music-layer voicing builder must create the same
 metadata; `arp` will consume it.
 
 **12. The first four songs were all cyclic, and that was an accident of the
-author. Initial engine slice implemented.** `waves.eod` and `synthwave.eod`
+author. Implemented.** `waves.eod` and `synthwave.eod`
 fake linear time by gating gains with curve windows over cyclic material, which
 works because their material *is* cyclic. `Pattern::Timeline` now supplies
-finite, non-repeating material and `live::TempoMap` supplies step/ramped tempo
-conversion. Their Lua song-level constructors remain to be bound.
+finite, non-repeating material and `transport::TempoMap` supplies step/ramped tempo
+conversion. Lua `timeline { at(...) }`, typed durations and mapped seconds
+placement own those shared types rather than maintaining a language-only clock.
 
-**13. External triggers are not patterns. Initial live boundary implemented.**
+**13. External triggers are not patterns. Native live boundary implemented.**
 `jamming.eod` fires bells from an audio onset detector, and you cannot query the
 future of a live stream. `live::ExternalTrigger` deliberately has no query
 contract; `TriggerRecorder` captures arrival ordinals and converts recordings
-to a finite `Timeline`, recovering queryability and reproducibility. The audio
-detector/device binding is still absent.
+to a finite `Timeline`, recovering queryability and reproducibility. The Lua
+binding retains an `onset_detector` control identity in the owned track; the
+app detects rising edges, assigns arrival ordinals and schedules the voice
+without pattern lookahead. Ordinary setter patterns are sampled at the observed
+transport cycle, while `degrade` derives from the arrival ordinal. The detector
+exists and is allocation-free. The native host maps the first logical input to
+the same-rate default device through a bounded lock-free capture ring; missing
+lanes and the browser host retain the explicit silence fallback.
 
-**14. A stateful signal read from several graphs must lower to one node.**
+**14. A stateful signal read from several graphs must lower to one node.
+Implemented.**
 `their_hz` in `jamming.eod` is a pitch tracker referenced by two racks and the
 score. Copying that subgraph per graph is not merely wasteful: two trackers can
 disagree. But this is **identity preservation, not common-subexpression
@@ -225,13 +276,17 @@ thing to write. The rule is that the *binding* carries the identity: bound once
 and referenced twice is one node, written twice is two. No earlier song shared a
 stateful signal, which is why this took five songs to surface.
 
-**15. `at_onset` cannot be implicit at the graph/live-signal boundary.** The same tracked pitch feeds the rack
+**15. `at_onset` cannot be implicit at the graph/live-signal boundary.
+Implemented.** The same tracked pitch feeds the rack
 live and the bells frozen-at-strike, eight lines apart in one file. A struck
 resonator that kept tracking would slide for its whole ring. It is a typed rate
-boundary, `Signal<T> → Init<T>`, and the only legal collapse from signal to
-init — enforced by the rate checker, not by documentation. Pattern `Merge` is
-the separate pattern-layer signal-to-init boundary: a setter explicitly asks
-for its RHS to be sampled at each left onset.
+boundary, `Signal<T> → Init<T>`, and the only legal collapse from a live graph
+signal to a voice init value — enforced by the rate checker, not by
+documentation. Voice-scoped setters own `InitControlBinding`s, and
+`voice.hz(at_onset(signal))` samples literal Hertz without MIDI
+canonicalisation. Pattern `Merge` is the separate pattern-layer signal-to-init
+boundary: a setter explicitly asks for its RHS to be sampled at each left
+onset.
 
 **16. Anything a voice seeds from must be derived, never counted. Implemented
 through the first graph initializer.**

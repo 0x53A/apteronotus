@@ -167,8 +167,7 @@ fn the_poles_cowbell_is_two_differently_damped_modes() {
             node.op,
             Op::Shape {
                 kind: ShapeKind::Tanh,
-                amount
-            } if amount == 1.3
+            }
         )
     }));
 

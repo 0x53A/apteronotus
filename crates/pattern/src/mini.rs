@@ -11,6 +11,7 @@
 //! | `~` | a rest |
 //! | `[a b]` | a subsequence, one step of the enclosing sequence |
 //! | `<a b>` | alternation — one per cycle |
+//! | `a | b` | random choice — one reproducible branch per cycle |
 //! | `a, b` | stacked, both at once |
 //! | `a*2` `a/2` | faster, slower |
 //! | `a!3` | repeated as three steps |
@@ -224,8 +225,17 @@ impl Parser {
 
     /// Whitespace-separated steps sharing one cycle.
     fn sequence(&mut self, closers: &[char]) -> Result<Pattern, ParseError> {
-        let steps = self.steps(closers)?;
-        Ok(weighted(steps))
+        let mut choices = vec![weighted(self.steps(closers)?)];
+        while self.eat('|') {
+            let start = self.pos();
+            self.spend(1, start)?;
+            choices.push(weighted(self.steps(closers)?));
+        }
+        let seed = self
+            .binding
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(self.pos() as u64);
+        Ok(Pattern::choose(seed, choices))
     }
 
     /// The same, but each step gets a whole cycle in turn.
@@ -247,6 +257,7 @@ impl Parser {
             match self.peek() {
                 None => break,
                 Some(',') => break,
+                Some('|') => break,
                 Some(c) if closers.contains(&c) => break,
                 Some(_) => {}
             }

@@ -111,6 +111,41 @@ fn group_identity_is_query_idempotent_and_member_seeds_are_distinct() {
 }
 
 #[test]
+fn a_timeline_preserves_captured_group_membership_at_its_new_occurrence() {
+    let captured = mini::parse("[c4,e4,g4]")
+        .unwrap()
+        .onsets(Span::cycle(0))
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, event)| {
+            let whole = event.whole.unwrap();
+            TimelineEvent::new(
+                Span::new(whole.begin + Frac::int(3), whole.end + Frac::int(3)),
+                event.value,
+                ordinal as u64,
+            )
+            .in_group(event.group.unwrap())
+        })
+        .collect();
+    let timeline =
+        Pattern::timeline(Timeline::new(TimelineId::new(42), Span::cycle(3), captured).unwrap());
+
+    let events = timeline.onsets(Span::cycle(3));
+    let group = events[0].group.unwrap();
+    assert!(events.iter().all(|event| {
+        let member = event.group.unwrap();
+        member.key == group.key && member.count == 3
+    }));
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.group.unwrap().index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+}
+
+#[test]
 fn degrade_preserves_original_group_coordinates_when_it_makes_holes() {
     let group = mini::parse("[a,c,e,g]").unwrap();
     let mut found = None;

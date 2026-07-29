@@ -7,10 +7,11 @@
 //! scheduler windows.
 
 use apteronotus_synth::{
-    BusLayout, ControlLayout, ControlStore, LowerError, PatchTemplate, instantiate_patch_routed,
+    AudioInputLayout, BusLayout, ControlLayout, ControlStore, LowerError, PatchTemplate,
+    instantiate_patch_routed, instantiate_patch_routed_with_audio_inputs,
 };
 use fundsp::net::Net;
-use fundsp::prelude32::{AudioUnit, ReplayMode, Sequencer, pass};
+use fundsp::prelude32::{AudioUnit, ReplayMode, Sequencer, pass, zero};
 
 /// One instantiated persistent arena for an evaluated program.
 ///
@@ -22,6 +23,7 @@ pub struct PersistentRuntime {
     controls: ControlStore,
     processor: Option<Box<dyn AudioUnit>>,
     runs: usize,
+    external_channels: usize,
 }
 
 impl PersistentRuntime {
@@ -30,8 +32,29 @@ impl PersistentRuntime {
         controls: &ControlLayout,
         patches: impl IntoIterator<Item = &'a PatchTemplate>,
     ) -> Result<PersistentRuntime, PersistentError> {
+        Self::new_inner(layout, controls, None, patches)
+    }
+
+    /// Construct a persistent arena whose processor exposes the program's
+    /// flattened logical audio inputs after the routed stem lanes.
+    pub fn with_audio_inputs<'a>(
+        layout: &BusLayout,
+        controls: &ControlLayout,
+        audio_inputs: &AudioInputLayout,
+        patches: impl IntoIterator<Item = &'a PatchTemplate>,
+    ) -> Result<PersistentRuntime, PersistentError> {
+        Self::new_inner(layout, controls, Some(audio_inputs), patches)
+    }
+
+    fn new_inner<'a>(
+        layout: &BusLayout,
+        controls: &ControlLayout,
+        audio_inputs: Option<&AudioInputLayout>,
+        patches: impl IntoIterator<Item = &'a PatchTemplate>,
+    ) -> Result<PersistentRuntime, PersistentError> {
         let controls = ControlStore::new(controls);
         let lanes = layout.total_channels();
+        let external_channels = audio_inputs.map_or(0, AudioInputLayout::total_channels);
         let mut sources = Vec::new();
         let mut processors = Vec::new();
         let mut runs = 0;
@@ -45,8 +68,16 @@ impl PersistentRuntime {
                     found: inputs,
                 });
             }
-            let unit = instantiate_patch_routed(patch, layout, &controls)
-                .map_err(|source| PersistentError::Lower { index, source })?;
+            let unit = match audio_inputs {
+                Some(audio_inputs) => instantiate_patch_routed_with_audio_inputs(
+                    patch,
+                    layout,
+                    &controls,
+                    audio_inputs,
+                ),
+                None => instantiate_patch_routed(patch, layout, &controls),
+            }
+            .map_err(|source| PersistentError::Lower { index, source })?;
             if inputs == 0 {
                 sources.push(unit);
             } else {
@@ -55,12 +86,13 @@ impl PersistentRuntime {
             runs += 1;
         }
 
-        let processor = build_processor(lanes, sources, processors);
+        let processor = build_processor(lanes, external_channels, sources, processors);
         Ok(PersistentRuntime {
             layout: layout.clone(),
             controls,
             processor: Some(Box::new(processor)),
             runs,
+            external_channels,
         })
     }
 
@@ -80,11 +112,47 @@ impl PersistentRuntime {
         Sequencer::new(0, self.layout.total_channels(), ReplayMode::None)
     }
 
-    /// Move the realtime unit into the output graph.
+    pub fn external_channels(&self) -> usize {
+        self.external_channels
+    }
+
+    /// Move the realtime unit into an offline/fallback graph.
+    ///
+    /// Logical audio inputs are supplied with their declared silence fallback.
+    /// The native host uses [`take_processor_with_audio_inputs`](Self::take_processor_with_audio_inputs)
+    /// instead.
     ///
     /// A runtime represents one persistent program generation, so taking its
     /// processor twice is a host bug rather than a recoverable edit error.
     pub fn take_processor(&mut self) -> Box<dyn AudioUnit> {
+        let processor = self
+            .processor
+            .take()
+            .expect("a persistent processor can only be installed once");
+        if self.external_channels == 0 {
+            return processor;
+        }
+
+        let lanes = self.layout.total_channels();
+        let mut net = Net::new(lanes, lanes);
+        let processor = net.push(processor);
+        for lane in 0..lanes {
+            let input = net.push(Box::new(pass()));
+            net.connect_input(lane, input, 0);
+            net.connect(input, 0, processor, lane);
+        }
+        for channel in 0..self.external_channels {
+            let fallback = net.push(Box::new(zero()));
+            net.connect(fallback, 0, processor, lanes + channel);
+        }
+        for lane in 0..lanes {
+            net.connect_output(processor, lane, lane);
+        }
+        Box::new(net)
+    }
+
+    /// Move the realtime unit into a host graph that supplies live audio lanes.
+    pub fn take_processor_with_audio_inputs(&mut self) -> Box<dyn AudioUnit> {
         self.processor
             .take()
             .expect("a persistent processor can only be installed once")
@@ -93,10 +161,11 @@ impl PersistentRuntime {
 
 fn build_processor(
     lanes: usize,
+    external_channels: usize,
     sources: Vec<Box<dyn AudioUnit>>,
     processors: Vec<Box<dyn AudioUnit>>,
 ) -> Net {
-    let mut net = Net::new(lanes, lanes);
+    let mut net = Net::new(lanes + external_channels, lanes);
 
     // Start each lane as an exact pass-through from the voice sequencer.
     let mut current = Vec::with_capacity(lanes);
@@ -110,6 +179,9 @@ fn build_processor(
     // routed lanes. Their graph sends have already been flattened by synth.
     for source in sources {
         let source = net.push(source);
+        for channel in 0..external_channels {
+            net.connect_input(lanes + channel, source, channel);
+        }
         for (lane, current) in current.iter_mut().enumerate() {
             let sum = net.push(Box::new(pass() + pass()));
             let (prior, port) = *current;
@@ -125,6 +197,9 @@ fn build_processor(
         let processor = net.push(processor);
         for (lane, &(source, port)) in current.iter().enumerate() {
             net.connect(source, port, processor, lane);
+        }
+        for channel in 0..external_channels {
+            net.connect_input(lanes + channel, processor, lanes + channel);
         }
         current = (0..lanes).map(|lane| (processor, lane)).collect();
     }

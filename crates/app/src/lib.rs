@@ -9,10 +9,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 use style::Edge;
 
-/// The player's transport is fixed for this slice; the readout says so rather
-/// than pretending to be a control.
-const TRANSPORT_BPM: f64 = 120.0;
-
 /// Launch the native desktop application.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
@@ -62,6 +58,7 @@ enum Status {
         generation: u64,
         boundary: String,
         voices: usize,
+        warning: Option<String>,
     },
     Stopped,
     Error(String),
@@ -152,12 +149,14 @@ impl ApteronotusApp {
                     boundary,
                     voices,
                     controls,
+                    warning,
                 } if request >= self.latest_request => {
                     self.latest_request = request;
                     self.status = Status::Active {
                         generation,
                         boundary,
                         voices,
+                        warning,
                     };
                     self.controls = controls;
                     self.sounding = true;
@@ -248,9 +247,9 @@ impl ApteronotusApp {
                     self.example_picker(ui);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        style::readout(ui, "BPM", format!("{TRANSPORT_BPM:.0}"));
+                        style::readout(ui, "TEMPO", "score");
                         style::divider(ui);
-                        style::readout(ui, "TRANSPORT", "fixed");
+                        style::readout(ui, "CLOCK", "mapped");
                     });
                 });
             });
@@ -364,10 +363,14 @@ impl ApteronotusApp {
     }
 
     fn diagnostics(&mut self, ui: &mut egui::Ui) {
-        let Status::Error(message) = &self.status else {
-            return;
+        let (label, message, color) = match &self.status {
+            Status::Error(message) => ("diagnostic", message.clone(), style::ALERT),
+            Status::Active {
+                warning: Some(message),
+                ..
+            } => ("input fallback", message.clone(), style::CAUTION),
+            _ => return,
         };
-        let message = message.clone();
         egui::Panel::bottom("diagnostics")
             .frame(style::chrome(Edge::Top))
             .resizable(true)
@@ -375,8 +378,8 @@ impl ApteronotusApp {
             .max_size(280.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    style::tick(ui, style::ALERT);
-                    style::field_label(ui, "diagnostic");
+                    style::tick(ui, color);
+                    style::field_label(ui, label);
                 });
                 ui.add_space(style::UNIT * 0.5);
                 style::scrollbars(ui);
@@ -387,7 +390,7 @@ impl ApteronotusApp {
                             egui::Label::new(
                                 egui::RichText::new(message)
                                     .text_style(egui::TextStyle::Monospace)
-                                    .color(style::ALERT),
+                                    .color(color),
                             )
                             .selectable(true),
                         );

@@ -49,6 +49,9 @@ pub use event::{
 };
 pub use frac::Frac;
 pub use mini::{ParseError, parse, parse_at};
-pub use pattern::{ControlPattern, ControlPatternError, Pattern, Signal, bjorklund};
+pub use pattern::{
+    ArpMode, ControlPattern, ControlPatternError, Pattern, PatternMathError, PatternMathOp, Signal,
+    bjorklund,
+};
 pub use span::Span;
 pub use timeline::{Timeline, TimelineError, TimelineEvent, TimelineId};

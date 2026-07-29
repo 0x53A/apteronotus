@@ -1,6 +1,6 @@
 //! Query semantics, and the invariants the scheduler will lean on.
 
-use apteronotus_pattern::{Frac, Pattern, Signal, Span, mini};
+use apteronotus_pattern::{ArpMode, ControlValue, Frac, GroupNode, Pattern, Signal, Span, mini};
 
 fn f(n: i64, d: i64) -> Frac {
     Frac::new(n, d)
@@ -59,6 +59,113 @@ fn splitting_a_window_does_not_change_the_onsets() {
     a.sort();
     b.sort();
     assert_eq!(a, b);
+}
+
+#[test]
+fn patterned_ply_is_deterministic_across_query_slices() {
+    let pattern = Pattern::word("x").ply(vec![2, 6], 0x51ce);
+    let whole = Span::new(Frac::ZERO, Frac::int(8));
+    let identity = |events: Vec<apteronotus_pattern::Event>| {
+        events
+            .into_iter()
+            .map(|event| {
+                let seed = event.seed();
+                (event.whole.unwrap(), event.value, seed)
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = identity(pattern.onsets(whole));
+    let mut sliced = Vec::new();
+    let mut begin = whole.begin;
+    while begin < whole.end {
+        let end = (begin + Frac::new(3, 7)).min(whole.end);
+        sliced.extend(pattern.onsets(Span::new(begin, end)));
+        begin = end;
+    }
+    assert_eq!(identity(sliced), expected);
+    assert!(expected.len() >= 16);
+    assert!(expected.len() <= 48);
+}
+
+#[test]
+fn primary_selection_and_both_spaced_arp_clipping_branches_are_idempotent() {
+    let chord = Pattern::group_with_primary(
+        GroupNode::new(91),
+        vec![
+            Pattern::primary(ControlValue::Number(60.0)),
+            Pattern::primary(ControlValue::Number(62.0)),
+            Pattern::primary(ControlValue::Number(67.0)),
+        ],
+        Some(1),
+    );
+    let root = chord.clone().group_primary().onsets(Span::cycle(0));
+    assert_eq!(root.len(), 1);
+    assert!(root[0].group.is_none());
+    assert_eq!(
+        root[0].value.as_map().unwrap().get("value"),
+        Some(&ControlValue::Number(62.0))
+    );
+
+    let arp = chord.arp_spaced(ArpMode::Up, f(3, 5));
+    let all = arp.onsets(Span::cycle(0));
+    assert_eq!(
+        all.len(),
+        2,
+        "a member beginning at or beyond the group end must be dropped"
+    );
+    assert_eq!(
+        all[1].whole.unwrap(),
+        Span::new(f(3, 5), Frac::ONE),
+        "the final admitted member must be truncated at the group end"
+    );
+
+    let expected = all
+        .iter()
+        .map(|event| (event.whole.unwrap().begin, event.value.clone()))
+        .collect::<Vec<_>>();
+    let mut sliced = Vec::new();
+    for part in [
+        Span::new(Frac::ZERO, f(1, 7)),
+        Span::new(f(1, 7), f(4, 7)),
+        Span::new(f(4, 7), Frac::ONE),
+    ] {
+        sliced.extend(
+            arp.onsets(part)
+                .into_iter()
+                .map(|event| (event.whole.unwrap().begin, event.value)),
+        );
+    }
+    assert_eq!(sliced, expected);
+}
+
+#[test]
+fn hold_extends_across_cycle_and_query_boundaries_without_retriggering() {
+    let held = Pattern::word("c4").hold(Frac::new(3, 2));
+    let whole = held.query(Span::new(Frac::ZERO, Frac::int(2)));
+
+    assert_eq!(whole.len(), 3);
+    assert_eq!(
+        whole[0].whole,
+        Some(Span::new(Frac::int(-1), Frac::new(1, 2)))
+    );
+    assert_eq!(whole[1].whole, Some(Span::new(Frac::ZERO, Frac::new(3, 2))));
+    assert_eq!(whole[2].whole, Some(Span::new(Frac::ONE, Frac::new(5, 2))));
+
+    let split = Frac::new(7, 6);
+    let mut sliced = held.query(Span::new(Frac::ZERO, split));
+    sliced.extend(held.query(Span::new(split, Frac::int(2))));
+    let onset_spans = |events: Vec<apteronotus_pattern::Event>| {
+        events
+            .into_iter()
+            .filter(apteronotus_pattern::Event::has_onset)
+            .map(|event| event.whole.unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(onset_spans(sliced), onset_spans(whole));
+
+    let continuation = held.query(Span::new(Frac::new(5, 4), Frac::new(4, 3)));
+    assert_eq!(continuation.len(), 2);
+    assert!(continuation.iter().all(|event| !event.has_onset()));
 }
 
 #[test]
@@ -315,4 +422,36 @@ fn a_stack_of_a_line_on_itself_keeps_both_onsets() {
     let one = mini::parse("bd").unwrap();
     let two = Pattern::stack(vec![one.clone(), one]);
     assert_eq!(two.onsets(Span::cycle(0)).len(), 2);
+}
+
+#[test]
+fn arp_consumes_group_order_into_stable_serial_events() {
+    let chord = mini::parse("[c4,e4,g4]").unwrap();
+    let up = chord.clone().arp(ArpMode::Up).onsets(Span::cycle(0));
+    let down = chord.arp(ArpMode::Down);
+
+    assert_eq!(
+        up.iter()
+            .map(|event| event.whole.unwrap().begin)
+            .collect::<Vec<_>>(),
+        vec![Frac::ZERO, Frac::new(1, 3), Frac::new(2, 3)]
+    );
+    assert!(up.iter().all(|event| event.group.is_none()));
+    assert_eq!(
+        down.onsets(Span::cycle(0))
+            .iter()
+            .map(|event| event.value.to_string())
+            .collect::<Vec<_>>(),
+        vec!["g4", "e4", "c4"]
+    );
+
+    let mut sliced = down.onsets(Span::new(Frac::ZERO, Frac::new(1, 2)));
+    sliced.extend(down.onsets(Span::new(Frac::new(1, 2), Frac::ONE)));
+    let identity = |events: Vec<apteronotus_pattern::Event>| {
+        events
+            .into_iter()
+            .map(|event| (event.whole, event.value, event.src, event.origin))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identity(sliced), identity(down.onsets(Span::cycle(0))));
 }

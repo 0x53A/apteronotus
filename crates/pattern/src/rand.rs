@@ -13,8 +13,12 @@
 
 use crate::frac::Frac;
 
-/// Mix a 64-bit word. This is the finaliser from splitmix64.
-pub(crate) fn mix(mut z: u64) -> u64 {
+/// Mix one structural identity word into a reproducible seed.
+///
+/// This is the finaliser from splitmix64. It is public so hosts deriving
+/// identity for events that cannot be queried ahead—such as captured live
+/// edges—use the same pinned algorithm as pattern-owned events.
+pub fn mix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

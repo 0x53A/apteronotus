@@ -1,9 +1,10 @@
 use apteronotus_live::{
-    AudioOutput, PersistentRuntime, PitchScheduler, ProgramScheduler, RevisionSlot, ScheduledTrack,
-    Transport,
+    AudioOutput, ExternalOnset, InputBinding, PersistentRuntime, PitchScheduler, ProgramScheduler,
+    RevisionSlot, RoutedRuntime, ScheduledRun, ScheduledTrack, schedule_external_routed,
 };
-use apteronotus_lua::{Evaluator, Program};
-use apteronotus_pattern::Frac;
+use apteronotus_lua::{Evaluator, Program, Track};
+use apteronotus_pattern::{ControlValue, Frac, Span, Value};
+use apteronotus_synth::{ParamId, ParamValue};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,6 +17,7 @@ use web_time::Instant;
 
 const LOOKAHEAD_SECONDS: f64 = 0.20;
 const MIN_REVISION_WINDOW_SECONDS: f64 = 0.05;
+const MIN_EXTERNAL_LATENCY_SECONDS: f64 = 0.03;
 #[cfg(not(target_arch = "wasm32"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -41,6 +43,7 @@ pub enum PlayerEvent {
         boundary: String,
         voices: usize,
         controls: Vec<ControlView>,
+        warning: Option<String>,
     },
     Error {
         request: u64,
@@ -48,6 +51,14 @@ pub enum PlayerEvent {
     },
     Stopped,
     RuntimeError(String),
+}
+
+struct Activation {
+    generation: u64,
+    boundary: String,
+    voices: usize,
+    controls: Vec<ControlView>,
+    warning: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -121,12 +132,13 @@ impl PlayerWorker {
                         .map_err(|error| error.to_string())
                         .and_then(|candidate| self.player.activate(candidate))
                     {
-                        Ok((generation, boundary, voices, controls)) => PlayerEvent::Active {
+                        Ok(activation) => PlayerEvent::Active {
                             request,
-                            generation,
-                            boundary,
-                            voices,
-                            controls,
+                            generation: activation.generation,
+                            boundary: activation.boundary,
+                            voices: activation.voices,
+                            controls: activation.controls,
+                            warning: activation.warning,
                         },
                         Err(message) => PlayerEvent::Error { request, message },
                     }
@@ -161,12 +173,13 @@ struct Player {
     evaluator: Evaluator,
     revisions: RevisionSlot<Program>,
     scheduler: ProgramScheduler,
-    transport: Transport,
     output: Option<AudioOutput>,
     output_channels: Option<usize>,
     clock_started: Option<Instant>,
     fallback: Option<Arc<Program>>,
     persistent: Option<PersistentRuntime>,
+    external_levels: Vec<bool>,
+    external_ordinal: u64,
     activation_generation: u64,
 }
 
@@ -176,24 +189,25 @@ impl Player {
             evaluator: Evaluator::default(),
             revisions: RevisionSlot::new(Program::default(), Frac::ZERO),
             scheduler: ProgramScheduler::default(),
-            transport: Transport::default(),
             output: None,
             output_channels: None,
             clock_started: None,
             fallback: None,
             persistent: None,
+            external_levels: Vec::new(),
+            external_ordinal: 0,
             activation_generation: 0,
         }
     }
 
-    fn activate(
-        &mut self,
-        mut candidate: Program,
-    ) -> Result<(u64, String, usize, Vec<ControlView>), String> {
+    fn activate(&mut self, mut candidate: Program) -> Result<Activation, String> {
         let channels = playable_channels(&candidate)?;
         let needs_persistent = needs_persistent_runtime(&candidate);
         let active_persistent = self.persistent.is_some();
+        let tempo_changed =
+            self.output.is_some() && candidate.tempo != self.revisions.active().program.tempo;
         let reuse_persistent = self.output.is_some()
+            && !tempo_changed
             && active_persistent
             && needs_persistent
             && self.output_channels == Some(channels)
@@ -206,6 +220,7 @@ impl Player {
             active_persistent,
             needs_persistent,
             reuse_persistent,
+            tempo_changed,
             self.output_channels,
             channels,
         );
@@ -226,7 +241,7 @@ impl Player {
             .clock_started
             .map(|started| started.elapsed().as_secs_f64())
             .unwrap_or(0.0);
-        let boundary_seconds = self.transport.cycle_to_seconds(boundary);
+        let boundary_seconds = candidate.tempo.cycle_to_seconds(boundary);
         let target_seconds =
             (clock_seconds + LOOKAHEAD_SECONDS).max(boundary_seconds + MIN_REVISION_WINDOW_SECONDS);
 
@@ -248,31 +263,33 @@ impl Player {
         };
         let mut preview_scheduler = ProgramScheduler::new(boundary);
         let preview_tracks = scheduled_tracks(&candidate)?;
+        let preview_runs = scheduled_runs(&candidate)?;
         let preview_report = if let Some(runtime) = preview_runtime {
             preview_scheduler
-                .fill_routed_to_seconds(
+                .fill_routed_program_to_seconds_tempo_map(
                     target_seconds,
                     preview_tracks,
-                    self.transport,
+                    preview_runs,
+                    &candidate.tempo,
                     &mut preview,
-                    runtime.layout(),
-                    runtime.controls(),
+                    RoutedRuntime::new(runtime.layout(), runtime.controls()),
                 )
                 .map_err(|error| error.to_string())?
         } else {
             preview_scheduler
-                .fill_to_seconds(target_seconds, preview_tracks, self.transport, &mut preview)
+                .fill_to_seconds_tempo_map(
+                    target_seconds,
+                    preview_tracks,
+                    &candidate.tempo,
+                    &mut preview,
+                )
                 .map_err(|error| error.to_string())?
         };
 
         if self.output.is_none() {
             self.output = Some(
                 match &mut persistent {
-                    Some(runtime) => AudioOutput::open_processed(
-                        runtime.layout().total_channels(),
-                        runtime.layout().main_channels(),
-                        runtime.take_processor(),
-                    ),
+                    Some(runtime) => open_persistent_output(&candidate, runtime),
                     None => AudioOutput::open(channels),
                 }
                 .map_err(|error| error.to_string())?,
@@ -291,7 +308,16 @@ impl Player {
         if !reuse_persistent {
             self.persistent = persistent;
         }
+        self.sync_external_levels(&revision.program);
+        // Track positions are not yet reconciled across source evaluations.
+        // Starting the next glide at its target is preferable to carrying a
+        // previous pitch from an unrelated track that moved in declaration
+        // order. Preserve the old history until the candidate has proved it
+        // can fill, so rollback remains faithful.
+        let previous_scheduler = self.scheduler.clone();
+        self.scheduler.clear_track_history();
         if let Err(error) = self.fill_revision_to(target_seconds, revision.program) {
+            self.scheduler = previous_scheduler;
             self.restore_fallback(target_seconds, &error)?;
             return Err(error);
         }
@@ -307,12 +333,13 @@ impl Player {
 
         self.activation_generation = self.activation_generation.saturating_add(1);
         let controls = control_views(&self.revisions.active().program, self.persistent.as_ref());
-        Ok((
-            self.activation_generation.max(generation.get()),
-            boundary.to_string(),
-            preview_report.voices,
+        Ok(Activation {
+            generation: self.activation_generation.max(generation.get()),
+            boundary: boundary.to_string(),
+            voices: preview_report.voices,
             controls,
-        ))
+            warning: self.input_warning(),
+        })
     }
 
     fn hard_reset(
@@ -320,7 +347,7 @@ impl Player {
         candidate: Program,
         channels: usize,
         mut persistent: Option<PersistentRuntime>,
-    ) -> Result<(u64, String, usize, Vec<ControlView>), String> {
+    ) -> Result<Activation, String> {
         let target_seconds = LOOKAHEAD_SECONDS.max(MIN_REVISION_WINDOW_SECONDS);
         let mut preview = if let Some(runtime) = &persistent {
             runtime.sequencer()
@@ -334,19 +361,25 @@ impl Player {
         };
         let mut preview_scheduler = ProgramScheduler::default();
         let preview_tracks = scheduled_tracks(&candidate)?;
+        let preview_runs = scheduled_runs(&candidate)?;
         let report = match &persistent {
             Some(runtime) => preview_scheduler
-                .fill_routed_to_seconds(
+                .fill_routed_program_to_seconds_tempo_map(
                     target_seconds,
                     preview_tracks,
-                    self.transport,
+                    preview_runs,
+                    &candidate.tempo,
                     &mut preview,
-                    runtime.layout(),
-                    runtime.controls(),
+                    RoutedRuntime::new(runtime.layout(), runtime.controls()),
                 )
                 .map_err(|error| error.to_string())?,
             None => preview_scheduler
-                .fill_to_seconds(target_seconds, preview_tracks, self.transport, &mut preview)
+                .fill_to_seconds_tempo_map(
+                    target_seconds,
+                    preview_tracks,
+                    &candidate.tempo,
+                    &mut preview,
+                )
                 .map_err(|error| error.to_string())?,
         };
 
@@ -354,32 +387,29 @@ impl Player {
         // still playing. Only a fully lowered, filled, and opened candidate is
         // allowed to interrupt the active program.
         let mut output = match &mut persistent {
-            Some(runtime) => AudioOutput::open_processed(
-                runtime.layout().total_channels(),
-                runtime.layout().main_channels(),
-                runtime.take_processor(),
-            ),
+            Some(runtime) => open_persistent_output(&candidate, runtime),
             None => AudioOutput::open(channels),
         }
         .map_err(|error| error.to_string())?;
         let mut scheduler = ProgramScheduler::default();
         let tracks = scheduled_tracks(&candidate)?;
+        let runs = scheduled_runs(&candidate)?;
         match &persistent {
             Some(runtime) => scheduler
-                .fill_routed_to_seconds(
+                .fill_routed_program_to_seconds_tempo_map(
                     target_seconds,
                     tracks,
-                    self.transport,
+                    runs,
+                    &candidate.tempo,
                     output.sequencer_mut(),
-                    runtime.layout(),
-                    runtime.controls(),
+                    RoutedRuntime::new(runtime.layout(), runtime.controls()),
                 )
                 .map_err(|error| error.to_string())?,
             None => scheduler
-                .fill_to_seconds(
+                .fill_to_seconds_tempo_map(
                     target_seconds,
                     tracks,
-                    self.transport,
+                    &candidate.tempo,
                     output.sequencer_mut(),
                 )
                 .map_err(|error| error.to_string())?,
@@ -404,13 +434,33 @@ impl Player {
         self.clock_started = Some(Instant::now());
         self.fallback = None;
         self.persistent = persistent;
+        let active = Arc::clone(&self.revisions.active().program);
+        self.sync_external_levels(&active);
 
-        Ok((
-            self.activation_generation,
-            Frac::ZERO.to_string(),
-            report.voices,
+        Ok(Activation {
+            generation: self.activation_generation,
+            boundary: Frac::ZERO.to_string(),
+            voices: report.voices,
             controls,
-        ))
+            warning: self.input_warning(),
+        })
+    }
+
+    fn input_warning(&self) -> Option<String> {
+        match self.output.as_ref().map(AudioOutput::input_binding) {
+            Some(InputBinding::Fallback { reason }) => Some(reason.clone()),
+            Some(InputBinding::Live {
+                device,
+                channels,
+                requested_channels,
+                external_channels,
+            }) if channels < requested_channels || channels < external_channels => Some(format!(
+                "{device:?} supplies {channels} of {external_channels} declared input lanes \
+                 ({requested_channels} requested for the selected logical input); the remaining \
+                 lanes use the declared silence fallback"
+            )),
+            _ => None,
+        }
     }
 
     /// Silence everything and return to the pre-audio state.
@@ -433,6 +483,8 @@ impl Player {
         self.clock_started = None;
         self.fallback = None;
         self.persistent = None;
+        self.external_levels.clear();
+        self.external_ordinal = 0;
         paused
     }
 
@@ -459,7 +511,14 @@ impl Player {
             return Ok(());
         };
         let target_seconds = started.elapsed().as_secs_f64() + LOOKAHEAD_SECONDS;
-        if target_seconds <= self.transport.cycle_to_seconds(self.scheduler.frontier()) {
+        if target_seconds
+            <= self
+                .revisions
+                .active()
+                .program
+                .tempo
+                .cycle_to_seconds(self.scheduler.frontier())
+        {
             return Ok(());
         }
         let program = Arc::clone(&self.revisions.active().program);
@@ -476,31 +535,114 @@ impl Player {
     ) -> Result<(), String> {
         let tracks = scheduled_tracks(&program)?;
         if let Some(runtime) = &self.persistent {
+            let runs = scheduled_runs(&program)?;
             self.scheduler
-                .fill_routed_to_seconds(
+                .fill_routed_program_to_seconds_tempo_map(
                     target_seconds,
                     tracks,
-                    self.transport,
+                    runs,
+                    &program.tempo,
                     self.output
                         .as_mut()
                         .expect("revision filling requires an audio output")
                         .sequencer_mut(),
-                    runtime.layout(),
-                    runtime.controls(),
+                    RoutedRuntime::new(runtime.layout(), runtime.controls()),
                 )
                 .map_err(|error| error.to_string())?;
         } else {
             self.scheduler
-                .fill_to_seconds(
+                .fill_to_seconds_tempo_map(
                     target_seconds,
                     tracks,
-                    self.transport,
+                    &program.tempo,
                     self.output
                         .as_mut()
                         .expect("revision filling requires an audio output")
                         .sequencer_mut(),
                 )
                 .map_err(|error| error.to_string())?;
+        }
+        self.poll_external_triggers(&program)?;
+        Ok(())
+    }
+
+    fn sync_external_levels(&mut self, program: &Program) {
+        let Some(runtime) = &self.persistent else {
+            self.external_levels.clear();
+            return;
+        };
+        self.external_levels = program
+            .tracks
+            .iter()
+            .map(|track| {
+                track
+                    .external_trigger
+                    .and_then(|trigger| runtime.controls().value(trigger).ok())
+                    .is_some_and(|value| value >= 0.5)
+            })
+            .collect();
+    }
+
+    fn poll_external_triggers(&mut self, program: &Program) -> Result<(), String> {
+        let (Some(runtime), Some(started)) = (&self.persistent, self.clock_started) else {
+            return Ok(());
+        };
+        self.external_levels.resize(program.tracks.len(), false);
+        let mut fired = Vec::new();
+        for (index, track) in program.tracks.iter().enumerate() {
+            let Some(trigger) = track.external_trigger else {
+                self.external_levels[index] = false;
+                continue;
+            };
+            let high = runtime
+                .controls()
+                .value(trigger)
+                .map_err(|error| error.to_string())?
+                >= 0.5;
+            if high && !self.external_levels[index] {
+                fired.push(index);
+            }
+            self.external_levels[index] = high;
+        }
+        if fired.is_empty() {
+            return Ok(());
+        }
+
+        let observed_seconds = started.elapsed().as_secs_f64();
+        let at_seconds = observed_seconds + MIN_EXTERNAL_LATENCY_SECONDS;
+        let at_cycle = program
+            .tempo
+            .seconds_to_cycle(observed_seconds)
+            .map_err(|error| error.to_string())?;
+        for index in fired {
+            let track = &program.tracks[index];
+            let template = program
+                .voice(track.voice)
+                .ok_or_else(|| format!("track {index} refers to a missing voice"))?;
+            let ordinal = self.external_ordinal;
+            let seed = external_event_seed(index, track, ordinal);
+            self.external_ordinal = self.external_ordinal.wrapping_add(1);
+            if !external_event_passes(track, seed) {
+                continue;
+            }
+            let event_bindings = external_event_bindings(track, at_cycle)?;
+            schedule_external_routed(
+                ExternalOnset {
+                    at_seconds,
+                    gate_seconds: 0.01,
+                    event_seed: seed,
+                },
+                template,
+                &track.routing,
+                &track.onset_bindings,
+                &event_bindings,
+                self.output
+                    .as_mut()
+                    .expect("external triggering requires an open output")
+                    .sequencer_mut(),
+                RoutedRuntime::new(runtime.layout(), runtime.controls()),
+            )
+            .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -559,7 +701,14 @@ pub(crate) fn playable_channels(program: &Program) -> Result<usize, String> {
             return Err(format!("track {index} has no audio outputs"));
         }
         match channels {
-            Some(expected) if graph.channels() != expected => {
+            // Routed lowering deliberately broadcasts a mono voice across the
+            // persistent main layout. Keep the player preflight aligned with
+            // that production rule; main-only scheduling still requires every
+            // track to have the same width because its Sequencer is created
+            // from the first voice template.
+            Some(expected)
+                if graph.channels() != expected && !(persistent && graph.channels() == 1) =>
+            {
                 return Err(format!(
                     "track {index} outputs {} channels, but earlier tracks output {expected}",
                     graph.channels()
@@ -584,11 +733,13 @@ fn needs_hard_reset(
     active_persistent: bool,
     candidate_persistent: bool,
     reuse_persistent: bool,
+    tempo_changed: bool,
     active_channels: Option<usize>,
     candidate_channels: usize,
 ) -> bool {
     output_open
-        && (active_channels != Some(candidate_channels)
+        && (tempo_changed
+            || active_channels != Some(candidate_channels)
             || active_persistent != candidate_persistent
             || (active_persistent && candidate_persistent && !reuse_persistent))
 }
@@ -597,15 +748,55 @@ pub(crate) fn persistent_runtime(program: &Program) -> Result<PersistentRuntime,
     let patches = program
         .runs
         .iter()
+        .filter(|run| run.span.is_none())
         .enumerate()
-        .map(|(index, id)| {
+        .map(|(index, run)| {
             program
-                .patch(*id)
+                .patch(run.patch)
                 .ok_or_else(|| format!("run {index} refers to a missing patch"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    PersistentRuntime::new(&program.buses, &program.controls, patches)
-        .map_err(|error| error.to_string())
+    PersistentRuntime::with_audio_inputs(
+        &program.buses,
+        &program.controls,
+        &program.audio_inputs,
+        patches,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn open_persistent_output(
+    program: &Program,
+    runtime: &mut PersistentRuntime,
+) -> Result<AudioOutput, apteronotus_live::OutputError> {
+    let requested_channels = program
+        .audio_inputs
+        .specs()
+        .first()
+        .map_or(0, |spec| spec.channels);
+    AudioOutput::open_processed_with_default_input(
+        runtime.layout().total_channels(),
+        runtime.layout().main_channels(),
+        runtime.take_processor_with_audio_inputs(),
+        runtime.external_channels(),
+        requested_channels,
+    )
+}
+
+fn scheduled_runs(program: &Program) -> Result<Vec<ScheduledRun<'_>>, String> {
+    program
+        .runs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, run)| {
+            run.span.map(|span| {
+                program
+                    .patch(run.patch)
+                    .map(|patch| ScheduledRun::with_routing(patch, span, &run.routing))
+                    .ok_or_else(|| format!("run {index} refers to a missing patch"))
+            })
+        })
+        .collect()
 }
 
 fn control_views(program: &Program, persistent: Option<&PersistentRuntime>) -> Vec<ControlView> {
@@ -613,6 +804,7 @@ fn control_views(program: &Program, persistent: Option<&PersistentRuntime>) -> V
         .controls
         .specs()
         .iter()
+        .filter(|spec| !spec.name.starts_with("__apteronotus."))
         .map(|spec| ControlView {
             name: spec.name.clone(),
             min: spec.min,
@@ -625,6 +817,53 @@ fn control_views(program: &Program, persistent: Option<&PersistentRuntime>) -> V
         .collect()
 }
 
+fn external_event_bindings(track: &Track, at: Frac) -> Result<Vec<(ParamId, ParamValue)>, String> {
+    let sample = Span::new(at, at);
+    track
+        .external_controls
+        .iter()
+        .map(|binding| {
+            let event = binding
+                .pattern
+                .query(sample)
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    format!(
+                        "external-onset control {:?} has no value at cycle {at}",
+                        binding.param
+                    )
+                })?;
+            let value = match event.value {
+                Value::Leaf(ControlValue::Number(value)) => ParamValue::Number(value),
+                Value::Leaf(ControlValue::Curve(curve)) => ParamValue::Curve(curve),
+                Value::Leaf(ControlValue::Text(_))
+                | Value::Leaf(ControlValue::Bool(_))
+                | Value::Map(_) => {
+                    return Err(format!(
+                        "external-onset control {:?} is not numeric or curve-valued at cycle {at}",
+                        binding.param
+                    ));
+                }
+            };
+            Ok((binding.param, value))
+        })
+        .collect()
+}
+
+fn external_event_seed(track_index: usize, track: &Track, ordinal: u64) -> u64 {
+    apteronotus_pattern::rand::mix(0x4558_5445_524e_414c)
+        ^ apteronotus_pattern::rand::mix(0x5452_4143_4b00_0000 ^ track_index as u64)
+        ^ apteronotus_pattern::rand::mix(0x564f_4943_4500_0000 ^ track.voice.index() as u64)
+        ^ apteronotus_pattern::rand::mix(0x4f52_4449_4e41_4c00 ^ ordinal)
+}
+
+fn external_event_passes(track: &Track, event_seed: u64) -> bool {
+    track.external_degrades.iter().all(|degrade| {
+        apteronotus_pattern::rand::at(Frac::ZERO, degrade.seed ^ event_seed) >= degrade.amount
+    })
+}
+
 fn scheduled_tracks(program: &Program) -> Result<Vec<ScheduledTrack<'_>>, String> {
     program
         .tracks
@@ -634,7 +873,12 @@ fn scheduled_tracks(program: &Program) -> Result<Vec<ScheduledTrack<'_>>, String
             let template = program
                 .voice(track.voice)
                 .ok_or_else(|| format!("track {index} refers to a missing voice"))?;
-            Ok(ScheduledTrack::new(&track.pattern, template))
+            Ok(ScheduledTrack::with_routing_and_bindings(
+                &track.pattern,
+                template,
+                &track.routing,
+                &track.onset_bindings,
+            ))
         })
         .collect()
 }
@@ -708,12 +952,13 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
             }
             awaited = None;
             let event = match result.and_then(|candidate| player.activate(candidate)) {
-                Ok((generation, boundary, voices, controls)) => PlayerEvent::Active {
+                Ok(activation) => PlayerEvent::Active {
                     request,
-                    generation,
-                    boundary,
-                    voices,
-                    controls,
+                    generation: activation.generation,
+                    boundary: activation.boundary,
+                    voices: activation.voices,
+                    controls: activation.controls,
+                    warning: activation.warning,
                 },
                 Err(message) => PlayerEvent::Error { request, message },
             };
@@ -735,8 +980,12 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_views, needs_hard_reset, persistent_runtime, playable_channels};
+    use super::{
+        control_views, external_event_bindings, external_event_passes, external_event_seed,
+        needs_hard_reset, persistent_runtime, playable_channels,
+    };
     use apteronotus_lua::evaluate;
+    use apteronotus_pattern::Frac;
 
     #[test]
     fn player_accepts_the_starter_program_shape() {
@@ -768,6 +1017,41 @@ mod tests {
         )
         .unwrap();
         assert!(playable_channels(&program).is_err());
+    }
+
+    #[test]
+    fn shipped_synthwave_accepts_its_mono_pad_in_the_stereo_routed_layout() {
+        let program = evaluate(include_str!("../../../songs/synthwave.eod")).unwrap();
+        assert_eq!(playable_channels(&program).unwrap(), 2);
+    }
+
+    #[test]
+    fn shipped_jamming_live_trigger_keeps_controls_and_degradation() {
+        let program = evaluate(include_str!("../../../songs/jamming.eod")).unwrap();
+        let track = program
+            .tracks
+            .iter()
+            .find(|track| track.external_trigger.is_some())
+            .expect("jamming must contain its live onset-triggered bell");
+
+        assert!(!track.external_controls.is_empty());
+        assert!(
+            !external_event_bindings(track, Frac::ZERO)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!track.external_degrades.is_empty());
+
+        let outcomes: Vec<_> = (0..128)
+            .map(|ordinal| external_event_passes(track, external_event_seed(0, track, ordinal)))
+            .collect();
+        assert!(outcomes.iter().any(|passes| *passes));
+        assert!(outcomes.iter().any(|passes| !*passes));
+        assert_ne!(
+            external_event_seed(0, track, 7),
+            external_event_seed(1, track, 7),
+            "structurally distinct tracks must not share external event seeds"
+        );
     }
 
     #[test]
@@ -820,6 +1104,34 @@ mod tests {
     }
 
     #[test]
+    fn engine_owned_signal_controls_do_not_appear_as_user_faders() {
+        let program = evaluate(
+            r#"
+            local them = audio_input {
+              name = "them",
+              channels = 1,
+              fallback = "silence",
+            }
+            local tracked = them >> envelope_follower(ms(6), ms(120))
+            local field = control {
+              name = "field",
+              range = { 0, 1 },
+              default = 0.2,
+            }
+            local rack = patch {
+              graph = function() return sine(110) * (tracked + field) * 0.01 >> pan(0) end,
+            }
+            run(rack)
+            "#,
+        )
+        .unwrap();
+        let runtime = persistent_runtime(&program).unwrap();
+        let views = control_views(&program, Some(&runtime));
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].name, "field");
+    }
+
+    #[test]
     fn player_rejects_a_run_that_cannot_consume_the_whole_stem_layout() {
         let program = evaluate(
             r#"
@@ -841,12 +1153,53 @@ mod tests {
 
     #[test]
     fn persistent_and_layout_changes_request_a_transport_reset() {
-        assert!(!needs_hard_reset(false, false, true, false, None, 2));
-        assert!(!needs_hard_reset(true, false, false, false, Some(2), 2));
-        assert!(!needs_hard_reset(true, true, true, true, Some(2), 2));
-        assert!(needs_hard_reset(true, true, true, false, Some(2), 2));
-        assert!(needs_hard_reset(true, true, false, false, Some(2), 2));
-        assert!(needs_hard_reset(true, false, true, false, Some(2), 2));
-        assert!(needs_hard_reset(true, false, false, false, Some(1), 2));
+        assert!(!needs_hard_reset(false, false, true, false, false, None, 2));
+        assert!(!needs_hard_reset(
+            true,
+            false,
+            false,
+            false,
+            false,
+            Some(2),
+            2
+        ));
+        assert!(!needs_hard_reset(true, true, true, true, false, Some(2), 2));
+        assert!(needs_hard_reset(true, true, true, false, false, Some(2), 2));
+        assert!(needs_hard_reset(
+            true,
+            true,
+            false,
+            false,
+            false,
+            Some(2),
+            2
+        ));
+        assert!(needs_hard_reset(
+            true,
+            false,
+            true,
+            false,
+            false,
+            Some(2),
+            2
+        ));
+        assert!(needs_hard_reset(
+            true,
+            false,
+            false,
+            false,
+            false,
+            Some(1),
+            2
+        ));
+        assert!(needs_hard_reset(
+            true,
+            false,
+            false,
+            false,
+            true,
+            Some(2),
+            2
+        ));
     }
 }

@@ -95,7 +95,7 @@ tape = send { graph = delay(beats(0.75)) >> lowpass(3200) >> feedback(0.42),
 ---------------------------------------------------------------------- shape
 
 -- i - VI - III - VII, one chord per bar.
-chords = "<[f#2 a2 c#3] [d2 f#2 a2] [a2 c#3 e3] [e2 g#2 b2]>"
+chords = pattern("<[f#2 a2 c#3] [d2 f#2 a2] [a2 c#3 e3] [e2 g#2 b2]>")
 
 -- The arrangement, as one curve reused by everything that has to swell.
 intro  = window(bars(0),  bars(16))
@@ -105,34 +105,34 @@ outro  = 1 - line(0, 1, bars(8)) >> shift(bars(56))
 
 ---------------------------------------------------------------------- score
 
-play(kick,  "bd ~ ~ bd ~ ~ bd ~" >> gain(0.95 * main))
-play(snare, "~ ~ x ~"            >> gain(0.80 * main))
-play(hat,   "x*8" >> gain("0.5 0.25 0.35 0.25" * main)
+play(kick,  "bd ~ ~ bd ~ ~ bd ~" >> velocity(0.95 * main))
+play(snare, "~ ~ x ~"            >> velocity(0.80 * main))
+play(hat,   "x*8" >> velocity("0.5 0.25 0.35 0.25" * main)
                   >> pan("-0.2 0.2")
                   >> degrade(0.1))
 
 play(bass, "f#1*2 ~ f#1 [~ c#2]"
       >> every(4, rev)
-      >> cutoff(scale(380, 1600, sine(0.125)))
-      >> gain(main)
+      >> bass.cutoff(scale(380, 1600, sine(0.125)))
+      >> velocity(main)
       >> duck("1 0 0 0", 0.5))
 
 play(pad, chords
       >> slow(4)
-      >> gain(0.22 * (intro + main))
-      >> cutoff(scale(600, 3000, build))
+      >> velocity(0.22 * (intro + main))
+      >> pad.cutoff(scale(600, 3000, build))
       >> to(verb, 0.5)
       >> duck("1 0 0 0", 0.35))
 
 play(supersaw, chords
       >> arp("up")
       >> fast(4)
-      >> gain(0.5 * (main - outro))
-      >> wet(build)                                -- filter fades in over 8 bars
-      >> cutoff("2200 3400 1800 4200")
+      >> velocity(0.5 * (main - outro))
+      >> supersaw.wet(build)                       -- filter fades in over 8 bars
+      >> supersaw.cutoff("2200 3400 1800 4200")
       >> pan("-0.35 0.35")
-      >> sometimes(0.15, off(beats(0.25), gain(0.4)))
+      >> sometimes(0.15, off(beats(0.25), velocity(0.4)))
       >> to(tape, 0.6)
       >> to(verb, 0.3))
 
-master(limiter(0.003, 0.15) >> gain(0.85))
+master(limiter(0.003, 0.15) >> mul(0.85))

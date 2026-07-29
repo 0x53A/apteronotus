@@ -14,6 +14,10 @@
 
 tempo(96)
 
+---------------------------------------------------------------------- sends
+
+room = send { graph = reverb(18, 1.4, 0.5), level = 0.3 }
+
 ---------------------------------------------------------------------- rack
 
 cowbell = voice {
@@ -70,22 +74,18 @@ cymbal = voice {
   end,
 }
 
----------------------------------------------------------------------- sends
-
-room = send { graph = reverb(18, 1.4, 0.5), level = 0.3 }
-
 ---------------------------------------------------------------------- score
 
-play(rim,     "x(5,8)"      >> gain("0.9 0.5 0.6 0.5"))
-play(cowbell, "~ x ~ ~ x ~ ~ ~" >> ring("0.18 0.3") >> pan("-0.2 0.3"))
+play(rim,     "x(5,8)"      >> velocity("0.9 0.5 0.6 0.5"))
+play(cowbell, "~ x ~ ~ x ~ ~ ~" >> cowbell.ring("0.18 0.3") >> pan("-0.2 0.3"))
 play(tom,     "~ ~ [g2 ~] ~" >> every(4, fast(2)) >> pan("0.3 -0.3"))
-play(cymbal,  "x" >> slow(4) >> gain(0.5))
+play(cymbal,  "x" >> slow(4) >> velocity(0.5))
 
 play(bell, "<c5 g4 d#5 a#4>"
       >> slow(2)
       >> degrade(0.4)
-      >> ring(scale(1.4, 4.0, perlin(0.05)))
-      >> gain(0.35)
+      >> bell.ring(scale(1.4, 4.0, perlin(0.05)))
+      >> velocity(0.35)
       >> pan("-0.4 0.4"))
 
-master(limiter(0.004, 0.2) >> gain(0.8))
+master(limiter(0.004, 0.2) >> mul(0.8))

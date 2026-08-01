@@ -14,30 +14,58 @@
 --
 ---------------------------------------------------------------------- form
 --
--- Nothing here is arranged and nothing fades in. Instead each layer is a loop
--- of its own length, so the *combination* is what varies:
+-- Form here works on two timescales, and it needs both. The first version of
+-- this file had only the second, and the result was a piece that never
+-- repeated and also never went anywhere: the same nine instruments played all
+-- the time, so nothing could arrive.
 --
---   harmony (stab, bass)    8 bars      the spine — these two stay locked
---   kick, backbeat          4 bars
---   hats                    3 bars rhythm, 7 bars of tone over it
---   arp                     5 bars, offset 2
---   ride                    5 bars, offset 2
---   lead                    7 bars
---   perc accent             7 bars, offset 3
---   filter sweeps          11 bars
---   level and drive        13 bars
+-- **Sections, 32 bars.** Each layer carries a `blocks` pattern of eight
+-- four-bar steps that scales its velocity. That is an ordinary pattern rather
+-- than an arrangement curve, so it does not run out — it is the difference
+-- between `line(0, 1, bars(8))` and something the piece can be left playing.
+-- The eight steps are staggered per layer, so instruments enter and leave:
 --
--- lcm(8, 4, 3, 5, 7, 11) = 9240 bars, which at this tempo is four and a half
--- hours before the *notes* come round again; the two 13-bar parameter sweeps
--- push the point where the whole state repeats out to 120120 bars, or a bit
--- under sixty hours. Every bar of that is deterministic and identical on
--- every replay: the pattern algebra derives from cycle position, so a loop of
--- length 5 queried at cycle 4619 answers directly, without anything having
--- had to count its way there.
+--            bars    1-4  5-8  9-12 13-16 17-20 21-24 25-28 29-32
+--   bass             on   on   on   on    on    on    on    on
+--   kick             on   on   on   on    on    on    --    on
+--   snare            --   on   on   on    on    on    --    on
+--   hats             --   --   on   on    on    on    --    on
+--   stabs            on   on   low  low   on    on    on    low
+--   mallet           --   on   on   --    --    on    on    on
+--   lead             --   --   --   on    on    --    --    on
+--   wash (sustain)   on   on   --   --    on    --    on    --
+--
+--   bell             --   --   --   --    on    on    on    on    (fader at 0)
+--
+-- Bar 25 is the one thing in the piece that could be called a drop: the kit
+-- leaves for four bars and the bass, stabs, mallet and pad carry it alone.
+--
+-- Every part also has a live fader — see the desk below. Which layer is the
+-- distracting one is a listening judgement, and the file should not be the
+-- place that judgement is made.
+--
+-- **Phase, 3 to 8 bars.** Underneath that, each layer's own loop is a
+-- different length, so no two passes of the 32-bar form contain the same
+-- detail:
+--
+--   harmony (stabs, bass, wash)   8 bars    the spine — these stay locked
+--   kick, backbeat                4 bars
+--   hats                          3 bars rhythm, 7 bars of tone over it
+--   mallet                        5 bars, offset 2
+--   lead, perc accent             7 bars, offset 3
+--   filter sweeps                11 bars
+--   level and drive              13 bars
+--
+-- The notes repeat at lcm(32, 3, 5, 7) = 3360 bars, or about an hour and a
+-- half. The 11-bar filter sweeps push that to 17½ hours and the 13-bar level
+-- sweeps to 480480 bars, which is nine and a half days. Every bar of it is
+-- deterministic and identical on every replay: the pattern algebra derives
+-- from cycle position, so a loop of length 5 queried at cycle 4619 answers
+-- directly, without anything having had to count its way there.
 --
 -- One layer has to stay still or the result is soup rather than form, and
--- here that is the four-bar drum loop. Everything is heard as early or late
--- against something.
+-- here that is the bass. Everything else is heard as early or late against
+-- it.
 --
 -- The one real constraint this imposes is harmonic. A 5-bar melodic cell
 -- against an 8-bar chord loop means every note lands over a different chord
@@ -67,6 +95,31 @@ echo = send {
   level = 0.2,
 }
 
+---------------------------------------------------------------------- desk
+
+-- One fader per part, because which layer is "the distracting one" is a
+-- listening judgement and guessing at it in the source costs a round trip
+-- each time. A `control` is program-scope and writable while the program
+-- runs, so these are a mixing desk rather than a set of constants.
+--
+-- Each one multiplies into its voice's own output gain, beside `n.velocity`,
+-- so a fader scales a part *within* its arrangement rather than overriding
+-- the section gates. Zero is off; `bell` starts there.
+--
+-- It has to be inside the graph. A control is a graph-rate value and pattern
+-- arithmetic will not take one — which is correct, since a fader that could
+-- be written into a pattern would be a fader the scheduler had to re-query.
+lvl_bass   = control { name = "bass",   range = { 0, 1.5 }, default = 1 }
+lvl_stabs  = control { name = "stabs",  range = { 0, 1.5 }, default = 1 }
+lvl_pad    = control { name = "pad",    range = { 0, 1.5 }, default = 1 }
+lvl_mallet = control { name = "mallet", range = { 0, 1.5 }, default = 1 }
+lvl_lead   = control { name = "lead",   range = { 0, 1.5 }, default = 1 }
+lvl_kick   = control { name = "kick",   range = { 0, 1.5 }, default = 1 }
+lvl_snare  = control { name = "snare",  range = { 0, 1.5 }, default = 1 }
+lvl_hats   = control { name = "hats",   range = { 0, 1.5 }, default = 1 }
+lvl_tom    = control { name = "tom",    range = { 0, 1.5 }, default = 1 }
+lvl_bell   = control { name = "bell",   range = { 0, 1.5 }, default = 0 }
+
 ---------------------------------------------------------------------- rack
 
 -- Six saws over a ladder. The genre's one instrument, but the filter tracks
@@ -83,8 +136,13 @@ stab = voice {
       osc = osc + saw(n.hz * (1 + n.detune * (i - 0.5))) * 0.12
     end
     local env = adsr(ms(14), ms(400), 0.34, secs(1.1))
-    return (osc | n.cutoff * (1 + 2.2 * env) | dc(0.42)) >> moog()
-        >> mul(env * n.velocity)
+    -- Resonance at 0.42 with the cutoff moving 3x per note is a *moving
+    -- formant*: a peak sliding through the harmonics, which the ear reads as
+    -- a vowel. That is the ladder filter's famous quack. It is a sound; it is
+    -- not this sound. 0.16 and a much smaller sweep keep the warmth and lose
+    -- the vowel.
+    return (osc | n.cutoff * (1 + 0.9 * env) | dc(0.16)) >> moog()
+        >> mul(env * n.velocity * lvl_stabs)
         >> shape("tanh", 1.3)
         >> chorus(0, 0.014, 0.006, 0.34)
   end,
@@ -107,25 +165,75 @@ drive = voice {
     local osc = saw(n.hz) * 0.75
               + pulse(n.hz, 0.42) * 0.3
               + sine(n.hz) * 0.28
-    return (osc | n.cutoff * (1 + 3 * env) | dc(0.6)) >> moog()
-        >> mul(env * n.velocity * 0.26)
+    -- The same fault and worse, because it fired on every eighth note: a
+    -- resonant peak sweeping four octaves, 4.7 times a second.
+    return (osc | n.cutoff * (1 + 1.2 * env) | dc(0.22)) >> moog()
+        >> mul(env * n.velocity * 0.26 * lvl_bass)
         >> shape("tanh", n.bite)
         >> dcblock()
         >> pan(0)
   end,
 }
 
--- A plucked bell for the arp: a short saw through a fast filter envelope,
--- hard-panned wide. Two of these an octave apart would be an arpeggiator;
--- one, panned, is a texture.
-pluckt = voice {
-  params = { cutoff = { 400, 9000, 2200, "hz" }, ring = { 0.08, 1.2, 0.34, "s" } },
+-- This was called `ride`, which was a lie: three `ring()` resonators struck
+-- by an impulse, partials at 2.3, 3.4 and 5.2 kHz, decaying over most of a
+-- second. A cymbal is dense inharmonic noise; three clean modes are a struck
+-- bar. So it is a bell, and it is named one now.
+--
+-- Its fader defaults to zero. Three long, loud, pitched partials every few
+-- bars is a strong candidate for the most attention-grabbing thing in the
+-- piece, but that is a listening judgement and this is how it gets made.
+bell = voice {
   graph = function(n)
-    local env = decay(n.ring) * (1 - decay(ms(3)))
-    local tone = saw(n.hz) * 0.5 + pulse(n.hz * 2.002, 0.42) * 0.2
-    return (tone | n.cutoff * (0.35 + 2 * env) | dc(0.5)) >> lowpass()
-        >> mul(env * n.velocity * 0.55)
+    local modes = {
+      ring(2270, secs(0.9)) * 0.5,
+      ring(3410, secs(0.7)) * 0.35,
+      ring(5180, secs(0.5)) * 0.2,
+    }
+    return impulse() >> mix(modes)
+        >> mul(n.velocity * 0.28 * lvl_bell)
+        >> dcblock()
         >> pan(n.pan)
+  end,
+}
+
+-- The arp voice. It was a bright plucked saw and it drew the ear for four
+-- separate reasons, worth listing because they are four different knobs and
+-- "less bell" is not one of them: a 3 ms attack, a filter opening to 9 kHz,
+-- panning past 0.5, and a 0.55 delay send.
+--
+-- It is a wooden mallet now — sine partials instead of a saw, an 18 ms swell
+-- in front of it, and a filter that stays under 2 kHz. The 2.76 ratio is
+-- deliberately not a whole number: struck wood is inharmonic, and that is
+-- most of the difference between a marimba and an organ pipe.
+mallet = voice {
+  params = { cutoff = { 400, 6000, 1500, "hz" }, ring = { 0.08, 1.2, 0.42, "s" } },
+  graph = function(n)
+    local env = decay(n.ring) * (1 - decay(ms(18)))
+    local tone = sine(n.hz) * 0.6
+               + sine(n.hz * 2.76) * 0.16
+               + sine(n.hz * 5.4) * 0.09
+               + saw(n.hz) * 0.12
+    return (tone | n.cutoff * (0.6 + 0.8 * env) | dc(0.4)) >> lowpass()
+        >> mul(env * n.velocity * 0.5 * lvl_mallet)
+        >> pan(n.pan)
+  end,
+}
+
+-- New, and the reason the palette stops sounding like one instrument through
+-- eight filters. This is the only voice here that sustains: everything else
+-- is struck, plucked or stabbed, so a held chord underneath reads as a change
+-- of section rather than as one more layer.
+wash = voice {
+  params = { cutoff = { 300, 5000, 1100, "hz" } },
+  graph = function(n)
+    local osc = soft_saw(n.hz) * 0.3
+              + soft_saw(n.hz * 1.005) * 0.26
+              + pulse(n.hz * 2, 0.3) * 0.07
+    local swell = 1 + 0.22 * sine(0.09)
+    return (osc | n.cutoff * swell | dc(0.5)) >> lowpass()
+        >> mul(adsr(secs(1.4), secs(1.2), 0.8, secs(2.6)) * n.velocity * lvl_pad)
+        >> chorus(2, 0.022, 0.009, 0.19)
   end,
 }
 
@@ -141,7 +249,7 @@ sing = voice {
               + sine(hz * 2) * 0.12
     local env = adsr(ms(120), secs(0.8), 0.72, secs(1.4))
     return (osc | n.bright * (1 + 1.4 * env) | dc(0.4)) >> lowpass()
-        >> mul(env * n.velocity * 0.4)
+        >> mul(env * n.velocity * 0.4 * lvl_lead)
         >> shape("soft", 1.15)
         >> chorus(1, 0.026, 0.011, 0.24)
         >> pan(n.pan)
@@ -159,7 +267,7 @@ kick = voice {
     local click = ((noise() | dc(2200) | dc(1.4)) >> bandpass())
                 * decay(ms(10)) * 0.22
     return (body + click)
-        >> mul(n.velocity * 0.6)
+        >> mul(n.velocity * 0.6 * lvl_kick)
         >> shape("tanh", 1.5)
         >> dcblock()
         >> pan(0)
@@ -177,7 +285,7 @@ snare = voice {
     local hit = (crack + body) * decay(ms(60)) * (1 - decay(ms(2)))
     local tail = hit >> reverb(30, secs(1.9), 0.3)
     return (hit * 0.8 + tail * window(0, n.gate) * 0.9)
-        >> mul(n.velocity * 0.5)
+        >> mul(n.velocity * 0.5 * lvl_snare)
   end,
 }
 
@@ -188,24 +296,7 @@ hat = voice {
   params = { tone = { 2000, 10000, 5200, "hz" }, ring = { 0.01, 0.3, 0.05, "s" } },
   graph = function(n)
     return (noise() | dc(n.tone) | dc(0.9)) >> bandpass()
-        >> mul(decay(n.ring) * (1 - decay(ms(1.5))) * n.velocity * 0.5)
-        >> pan(n.pan)
-  end,
-}
-
--- Struck metal rather than filtered noise, so the 5-bar ride reads as a
--- different instrument from the 3-bar hat instead of as the same one out of
--- phase. Three partials with no integer relation is what a cymbal is.
-ride = voice {
-  graph = function(n)
-    local modes = {
-      ring(2270, secs(0.9)) * 0.5,
-      ring(3410, secs(0.7)) * 0.35,
-      ring(5180, secs(0.5)) * 0.2,
-    }
-    return impulse() >> mix(modes)
-        >> mul(n.velocity * 0.28)
-        >> dcblock()
+        >> mul(decay(n.ring) * (1 - decay(ms(1.5))) * n.velocity * 0.5 * lvl_hats)
         >> pan(n.pan)
   end,
 }
@@ -216,7 +307,7 @@ tom = voice {
   graph = function(n)
     local pitch = n.hz * (1 + 1.1 * decay(ms(70)))
     return (pitch >> sine()) * decay(ms(320)) * (1 - decay(ms(3)))
-        >> mul(n.velocity * 0.5)
+        >> mul(n.velocity * 0.5 * lvl_tom)
         >> shape("tanh", 1.2)
         >> dcblock()
         >> pan(n.pan)
@@ -228,6 +319,17 @@ tom = voice {
 -- i - VI - III - VII in C# minor as C#m9, Amaj9, E6, B7sus-ish, two bars
 -- each. The top three voices barely move; only the bottom one walks.
 chords = pattern("<[c#3,g#3,b3,d#4] [a2,g#3,b3,c#4] [e3,g#3,b3,c#4] [b2,f#3,a3,c#4]>")
+      >> slow(2)
+
+-- The sustained pad's own voicing, written out rather than derived from
+-- `chords`. `octave(n)` would have been the obvious move and does not apply:
+-- it adds to a *numeric* primary value, and a mini-notation note name is not
+-- one. It is for chord/voicing-constructed data.
+--
+-- Three notes, sitting in the gap between the bass and the stabs, and moving
+-- by at most a whole tone. A pad that doubles the stabs is not a pad, it is a
+-- longer stab.
+wash_chords = pattern("<[g#2,c#3,e3] [a2,c#3,e3] [g#2,b2,e3] [f#2,b2,d#3]>")
       >> slow(2)
 
 -- Roots, straight eighths, for the whole eight bars. This is the pulse and it
@@ -261,9 +363,31 @@ sweep  = scale(850, 2500, sine(1 / 11))
 grit   = scale(1.9, 3.4, sine(1 / 13))
 weight = scale(0.9, 1.0, sine(1 / 13))
 
+-- The section gates. `slow` stretches a whole cycle, not a step, so eight
+-- steps over `slow(32)` is four bars per step and a 32-bar cycle. Multiplied
+-- into a velocity, a zero is an absent instrument rather than a quiet one,
+-- because every graph here applies `n.velocity`.
+--
+-- These are patterns, not curves, which is the whole point: a curve has an
+-- end and this does not.
+local function blocks(spec)
+  return pattern(spec) >> slow(32)
+end
+
+kick_blocks   = blocks("1 1 1 1 1 1 0 1")
+snare_blocks  = blocks("0 1 1 1 1 1 0 1")
+hat_blocks    = blocks("0 0 1 1 1 1 0 1")
+stab_blocks   = blocks("1 1 0.4 0.4 1 1 1 0.45")
+mallet_blocks = blocks("0 1 1 0 0 1 1 1")
+bell_blocks   = blocks("0 0 0 0 1 1 1 1")
+lead_blocks   = blocks("0 0 0 1 1 0 0 1")
+wash_blocks   = blocks("1 1 0 0 1 0 1 0")
+
 ---------------------------------------------------------------------- score
 
 ------------------------------------------------------ 8 bars: the spine
+-- The one layer with no section gate. If the bass goes, there is nothing to
+-- hear the rest as early or late against.
 play(drive, roots
       >> velocity(0.66 * weight)
       >> drive.cutoff(scale(460, 1500, sine(1 / 11)))
@@ -271,7 +395,7 @@ play(drive, roots
       >> duck("1 0 1 0", 0.18))
 
 play(stab, chords
-      >> velocity(0.62 * weight)
+      >> velocity(0.52 * weight * stab_blocks)
       >> stab.cutoff(sweep)
       >> pan("-0.4 0.4")
       >> to(hall, 0.5)
@@ -279,10 +403,10 @@ play(stab, chords
 
 ------------------------------------------------------ 4 bars: the beat
 play(kick, pattern("<[bd ~ ~ ~ bd ~ ~ ~] [bd ~ ~ ~ bd ~ ~ ~] [bd ~ ~ ~ bd ~ ~ ~] [bd ~ ~ bd bd ~ ~ [~ bd]]>")
-      >> velocity(0.78 * weight))
+      >> velocity(0.78 * weight * kick_blocks))
 
 play(snare, pattern("<[~ ~ x ~] [~ ~ x ~] [~ ~ x ~] [~ ~ x [~ x]]>")
-      >> velocity(0.85)
+      >> velocity(0.85 * snare_blocks)
       >> snare.gate("0.14 0.22")
       >> to(hall, 0.3))
 
@@ -290,29 +414,46 @@ play(snare, pattern("<[~ ~ x ~] [~ ~ x ~] [~ ~ x ~] [~ ~ x [~ x]]>")
 -- Offbeat only. Eighths on the beat would double the kick and the bass and
 -- turn a pulse into a wall.
 play(hat, pattern("<[~ x ~ x ~ x ~ x] [~ x ~ x ~ x ~ [x x]] [~ x ~ x ~ [x x] ~ x]>")
-      >> velocity("0.4 0.27")
+      -- The accent has to be a *signal*, not a second pattern: two event
+      -- patterns cannot be multiplied without an explicit temporal join, and
+      -- rightly so. `sine(2)` has a half-bar period, so at the offbeat
+      -- eighths this piece actually plays it alternates between its extremes
+      -- — the same two-value accent, expressed at a rate rather than as a
+      -- list.
+      >> velocity(scale(0.30, 0.46, sine(2)) * hat_blocks)
       >> hat.tone(scale(3000, 4800, sine(1 / 7)))
       >> hat.ring("0.04 0.03 0.05 0.03")
       >> pan("-0.3 0.35"))
 
 ------------------------------------------------------ 5 bars, offset 2
-play(pluckt, arp_cell
+play(mallet, arp_cell
       >> shift(bars(2))
-      >> velocity(0.46 * weight)
-      >> pluckt.cutoff(sweep)
-      >> pluckt.ring("0.3 0.22 0.42 0.26")
-      >> pan("-0.55 0.5 -0.35 0.6")
-      >> to(echo, 0.55)
-      >> to(hall, 0.35))
+      >> velocity(0.5 * weight * mallet_blocks)
+      >> mallet.cutoff(scale(900, 1900, sine(1 / 11)))
+      >> mallet.ring("0.4 0.3 0.5 0.34")
+      >> pan("-0.3 0.28 -0.18 0.34")
+      >> to(echo, 0.28)
+      >> to(hall, 0.4))
 
-play(ride, pattern("<[~ ~ x ~ ~ ~ x ~] [~ ~ x ~ ~ ~ ~ ~] [~ ~ x ~ ~ x ~ ~] ~ [~ ~ x ~ ~ ~ x [x ~]]>")
+play(bell, pattern("<[~ ~ x ~ ~ ~ x ~] [~ ~ x ~ ~ ~ ~ ~] [~ ~ x ~ ~ x ~ ~] ~ [~ ~ x ~ ~ ~ x [x ~]]>")
       >> shift(bars(2))
-      >> velocity(0.4)
+      >> velocity(0.55 * bell_blocks)
       >> pan("0.45 -0.4"))
+
+------------------------------------------------------ 8 bars: the sustain
+-- Same chords as the stabs, an octave apart in register and a world apart in
+-- envelope. In the sections where the stabs drop to 0.4 this is what is left
+-- holding the harmony, which is what makes those four bars read as a
+-- different place rather than as a quieter version of the same one.
+play(wash, wash_chords
+      >> velocity(0.2 * weight * wash_blocks)
+      >> wash.cutoff(scale(800, 1800, sine(1 / 13)))
+      >> pan("0.35 -0.35")
+      >> to(hall, 0.8))
 
 ------------------------------------------------------ 7 bars
 play(sing, lead_cell
-      >> velocity(0.66 * weight)
+      >> velocity(0.66 * weight * lead_blocks)
       >> sing.bright(scale(1300, 2900, sine(1 / 11)))
       >> pan(scale(-0.25, 0.25, sine(1 / 13)))
       >> to(echo, 0.4)
@@ -332,7 +473,7 @@ play(tom, pattern("<~ [~ ~ ~ [g#2 ~]] ~ [~ ~ c#3 ~] ~ ~ [~ [g#2 c#3] ~ ~]>")
 master(
     highpass(46)
     >> width(3.2)
-    >> lowpass(9000, 0.5)
+    >> lowpass(10000, 0.5)
     >> shape("soft", 1.06)
     >> limiter(0.004, 0.18)
     >> mul(1.35)

@@ -23,16 +23,16 @@ feature.
 | | |
 |---|---|
 | `crates/pattern` | **foundational and structured-control slices complete.** No dependencies. Mini-notation, cyclic algebra, finite timelines, exact event holds, continuous signals and numeric event/signal arithmetic, group/event provenance, group-aware arpeggiation, source spans, parse limits, scalar/curve control maps, validated map-producing merge inputs, stable structural order and left-closed onset sampling. Event/event arithmetic remains behind explicit select/join semantics. |
-| `songs/*.eod` | **written as the specification; all seven songs run whole.** Every shipped document reaches routed persistent measured audio. `jamming.eod` additionally has host-fed acceptance through its shared analysers, transport control, external trigger, trigger-side modifiers and onset-bound voice scheduling; the native player attaches its first logical input to a compatible default device. |
+| `songs/*.eod` | **the original seven specifications and later engine-written pieces all run whole.** Every shipped document reaches routed persistent measured audio. `jamming.eod` additionally has host-fed acceptance through its shared analysers, transport control, external trigger, trigger-side modifiers and onset-bound voice scheduling; the native player attaches its first logical input to a compatible default device. |
 | `songs/neon.eod`, `songs/jamming.eod` | session 3, covering free time + gestures and live input respectively. See below. |
 | the Strudel corpus audit | **done.** 723 snippets, 249 k chars. See `LOG.md` and `corpus/`. |
 | the synthesis corpus audit | **not started.** This is the one that bears on the graph model. |
 | `crates/music` | **typed pitch, key and literal-chord slices written.** Scientific pitch notation, fractional MIDI, accidentals, pitch ↔ frequency, enharmonic tonic classes, major/minor/dorian context, chord-symbol parsing and deterministic literal voicing shapes are data-only. Patterned theory inputs, scale degrees and automatic voice leading remain. |
 | `crates/synth` | **voice, curve-valued parameters, routing and persistent analysis slices written.** Data-only `GraphTemplate`, range-checked scalar/curve `ParamValue`, two-coordinate lifetime analysis, spans, validation/budgets, graph inputs, per-note and program controls, routed stems, `PatchTemplate`, deterministic per-voice initialization, allocation-bounded interpolating delay, shared envelope/pitch/onset analysis, flat transport sequences, diffusion/FDN, stereo width/reverb/limiter, symbolic pow/clamp/decay and fundsp lowering. |
 | `crates/transport` | **pure score clock written.** Device-free constant/step/ramped tempo maps and exact cycle↔seconds conversion are shared by Lua-owned programs and live scheduling. |
-| `crates/live` | **voice, persistent and external-onset runtime paths written.** Monotonic-frontier single- and multi-track schedulers consume constant/ramped tempo maps, routed main/bus stems, persistent source/whole-stem processing, shared controls, transactional generations, trigger recording, onset-sampled init bindings, native default-device input through a preallocated capture ring, and cpal frontend/backend output. Multi-track windows lower completely before any voice is pushed; persistent state survives those windows. Replacement crossfade, browser input attachment, native input selection and MIDI binding remain. |
+| `crates/live` | **voice, persistent, external-onset and rebased-runtime paths written.** Monotonic-frontier single- and multi-track schedulers consume constant/ramped tempo maps, routed main/bus stems, persistent source/whole-stem processing, shared controls, transactional generations, trigger recording, onset-sampled init bindings, native default-device input through a preallocated capture ring, and cpal frontend/backend output. A new backend may explicitly place local sequencer zero at a nonzero absolute transport coordinate. Multi-track windows lower completely before any voice is pushed; persistent state survives those windows. Browser replacement/input attachment, retained-input pre-roll, native input selection and MIDI binding remain. |
 | `crates/lua` | **the external `supersaws.eod` song and ordinary voice/finite-score paths are connected end to end.** Lua evaluates to an owned program; tempo maps, stored-but-not-yet-consumed tonal context and `timeline { at(...) }` use shared Rust types. Literal chord symbols, anchors and named voicings expand during evaluation to grouped fractional-MIDI events; root selection survives finite capture through a domain-neutral primary-member marker. Exact cycle/beat holds live in the pattern AST under a distinct host-selected query-look-back ceiling, seconds holds resolve through mapped finite placement, and `phase(...)` breakpoint curves remain live for the declared note duration. Score signals are sampled through setters at note onset. Routed voices, typed beat durations, clipped explicit-spacing arpeggiation, deterministic ply/random choice, per-track scalar sends, program-scope send returns/master finalization, fixed-frequency trigger labels, persistent patches/controls/buses, symbolic pow/clamp/decay and stereo reverb/limiter reach the live executor. `velocity` is the sole score-level amplitude setter, graph/master amplitude uses `mul`, and `n.velocity`/`n.duration` match synth exactly while declared `gate` remains distinct. |
-| `crates/app` | **native and wasm voice and compatible-persistent GUI paths written.** The lexically highlighted Lua editor and explicit Run/Stop commands drive the production evaluator, tempo-mapped scheduler, persistent arena, fundsp and cpal. Native owns that work on a player thread; the reusable wasm custom element evaluates explicitly and advances lookahead on the browser event loop, with wasm-pack packaging and a GitHub Pages workflow. Program controls appear as live faders. Voice-only and persistent-compatible edits retain frontier activation and fader/DSP state; incompatible persistent/layout or tempo-map changes transactionally prepare a replacement and then hard-reset at cycle zero. Parser diagnostics while typing, files, transport controls, threaded browser evaluation, clock-map reconciliation and replacement crossfade remain. |
+| `crates/app` | **native and wasm voice, compatible-persistent and sounding-highlight GUI paths written.** The lexically highlighted Lua editor and explicit Run/Stop commands drive the production evaluator, tempo-mapped scheduler, persistent arena, fundsp and cpal. Native owns that work on a player thread; the reusable wasm custom element evaluates explicitly and advances lookahead on the browser event loop, with wasm-pack packaging and a GitHub Pages workflow. Program controls appear as live faders. Voice-only and persistent-compatible edits retain frontier activation and fader/DSP state; the UI mirrors queued revision boundaries and derives sounding mini-token spans only from the latency-adjusted audible revision while the buffer is byte-identical. Native incompatible persistent edits with unchanged tempo/layout prepare a future-frontier stream and crossfade for a bounded interval without rewinding transport. Layout/tempo changes and browser incompatibility still hard-reset at cycle zero. Debounced compile-only syntax diagnostics, source-line navigation, the shared song library, native source Open/Save and browser import/download are connected. Graph/type diagnostics while typing, recent files, autosave, transport controls, threaded browser evaluation, retained-input pre-roll and clock-map reconciliation remain. |
 
 Lua-boundary decisions, provisional policy, and explicit non-decisions are
 catalogued in [`crates/lua/DESIGN.md`](../../crates/lua/DESIGN.md). Keep that
@@ -46,16 +46,33 @@ Lua-built programs through pattern → scheduler → synth → sequencer, measur
 pitch and stereo energy, proves held-note curves remain live, and exercises
 shared persistent controls. None needs a sound card.
 
+The offline renderer can list, solo and mute zero-based tracks after evaluation.
+Those filters retain the original pattern/source data and the persistent routed
+processor layout, so an isolated render makes the same provenance-derived
+random decisions as that track made in the full program. Stem renders also
+report per-lane RMS, peak and DC, including exact silence, over the
+authoritative flattened layout. `--stems` observes that layout after persistent
+processing; `--raw-stems` exposes sequencer lanes before bus returns and master
+processing. Scheduler fill reports retain per-track voice
+counts, distinct onset groups and every tempo-projected onset interval; the
+renderer maps those back to original program indices after track filtering and
+can emit the complete measurement as versioned JSON. Nonzero cycle/second
+windows pre-roll from transport zero before discarding their prefix, preserving
+voice and persistent-processor history at the retained boundary.
+
 The native and browser GUIs are the same path with a device at the end, not
 second players. Their host policies and transactional ordering are documented in
 [`crates/app/README.md`](../../crates/app/README.md). Persistent sources, routed
 stems, whole-layout processors and controls are connected. Candidates with the
 same persistent controls, buses and activated `run` patch graphs are rebound to
 the live arena and continue at the scheduling frontier with shared-control and
-DSP state intact; inert patch declarations may change. Incompatible persistent
-or output-layout replacement prepares a complete new stream and then performs
-an explicit cycle-zero hard reset. Crossfade remains required rather than
-allowing that reset policy to become a permanent substitute.
+DSP state intact; inert patch declarations may change. Native incompatible
+persistent replacement with the same tempo and layout prepares a complete
+stream at a future frontier and overlaps the two device-edge gain stages before
+dropping the incumbent. Changed tempo/layout and browser replacement retain the
+explicit cycle-zero reset. Candidate stateful DSP starts empty;
+analyser/input-history pre-roll remains required before replacement is fully
+continuous for history-dependent racks.
 
 The current wasm host also evaluates explicit Runs and advances lookahead on
 the browser main thread, where CPAL schedules its WebAudio buffers. The
@@ -64,6 +81,68 @@ cannot guarantee an uninterrupted deadline during an expensive evaluation.
 Moving evaluation behind an owned/transferable worker boundary or replacing
 CPAL's main-thread scheduler with an AudioWorklet remains browser-host work,
 separate from the pure evaluator and graph contracts.
+
+## Composition TODOs — sample-free guitar (2026-09-07)
+
+Exposed while writing `songs/rust-and-voltage.eod`; not implemented:
+
+- [ ] Accept bounded init expressions in `pluck` pitch/damping. Currently
+  `n.hz` works but `n.hz * 1.5` fails (`GraphBuilder::pluck` uses
+  `InitScalar::from_source`). Tuned string banks should not need this workaround.
+- [ ] Allow onset-bound ADSR parameters, with declared bounds feeding lifetime
+  validation. Lua `adsr` currently reads literal times/sustain, making per-note
+  release articulation awkward even though symbolic `decay(n.ring)` works.
+- [ ] Expose oversampled nonlinear processing with explicit CPU/state budgets.
+  fundsp has an oversampler; the staged graph/Lua API does not expose it.
+- [ ] Investigate a bounded, bendable string primitive. Current `Pluck` binds
+  pitch at instantiation; bends and re-excitation of a retained string need an
+  explicit pitch/allocation/lifetime contract, not interpreter callbacks.
+  [Persistent strings proposal](../006-persistent-strings/README.md) specifies
+  six retained resonators, addressed fret/pick/mute gestures, and a proposed
+  score interface (2026-09-08); these features are not implemented yet.
+- [ ] Preserve honest mini-token source attribution through plain Lua string
+  variables/tables. Currently only direct literals have exact editor offsets;
+  `pattern(notes)` cannot recover the string's origin. The rock score now
+  stores `pattern("...")` values in its tables as the supported workaround.
+
+**Shared amp demonstrated (2026-09-08):** `songs/seven-teeth.eod` routes its
+overlapping strings and lead into a persistent amp return, so distortion acts
+on their sum. This uses existing buses/processors and keeps the expensive
+effect out of individual voices. Longer gates, decay and release already work;
+the first guitar's short sustain was a score choice.
+
+**Fixed during the live-performance pass:** a final ADSR multiplication now
+caps upstream lifetime once its output is provably zero. The backend enforces
+the terminal zero at the sample boundary; ordinary gain/decay multiplication
+keeps conservative retention, downstream responses still drain, and ungated
+outputs retain their history. This stops the guitar's eight-second declared
+decay bound from keeping already-muted voices alive. The score also replaces
+21 sine oscillators per guitar with two filtered saws and a plucked attack.
+
+Release-render measurement on the development machine (48 kHz, first 16 bars,
+30 seconds of music, no tail, including evaluation/scheduling/WAV write):
+22.695 s before; 2.574 s with only the lifetime fix; 1.503 s with the cheaper
+guitar as well. The complete 120 s score plus 4 s tail renders in 6.095 s.
+These are offline wall times, not guarantees about OS audio callback deadlines.
+Regression tests pin the guitar's gate-relative release and bounded graph size,
+plus exact ADSR silence, downstream tails and retained ungated outputs.
+
+Strudel comparison ([synths](https://strudel.cc/learn/synths/),
+[effects](https://strudel.cc/learn/effects/), checked 2026-09-07):
+
+- [ ] Add a bounded generated-waveform oscillator from owned partial/phase
+  coefficients, compiled to band-limited tables at staging/instantiation. This
+  could replace large sine banks without using recorded samples; table size,
+  sharing, normalization and pitch-band selection need explicit budgets.
+- [x] Expose a band-limited triangle oscillator (2026-09-08): `triangle(hz)`
+  and `hz >> triangle()` in graphs, including persistent patches. Spectrum,
+  high-pitch alias suppression, modulation and finite-run shutdown are tested.
+  Square/rectangle already use `pulse(hz, duty)`; saw and soft saw are available.
+- [ ] Consider deterministic brown/crackle noise sources when a song needs
+  them; ordinary white and pink noise already exist.
+- [ ] Supply reusable compressor and phaser helpers, composing existing nodes
+  where possible and adding only necessary stateful primitives. FM/vibrato
+  already compose from modulatable oscillators and need no new DSP primitive.
 
 ## Roadmap and completed slices
 
@@ -128,8 +207,10 @@ integration work, not a language-feasibility question.
    Equivalent persistent program data is compared across arena-scoped handles
    and reused across edits; changed tracks and voice graphs bind into the
    retained arena. Explicit `control_signal(pattern, period)` compiles a
-   bounded numeric period into persistent transport-clock data. Replacement
-   crossfade and host audio-lane binding remain deliberately separate.
+   bounded numeric period into persistent transport-clock data. Native
+   same-clock/same-layout replacement now rebases that data and crossfades;
+   retained-input pre-roll, browser handoff and host audio-lane binding remain
+   deliberately separate.
 9. **Also complete because their contracts were settled:** finite `Timeline`
    querying with captured external-event ordinals; group provenance and
    event-derived seeds; `init_random`; piecewise step/ramped `TempoMap`
@@ -319,12 +400,14 @@ graphs need either resolution at instantiation or prohibition. Note that a tempo
 map and rubato are different mechanisms — the first is composed and
 reproducible, the second is `late` fed a seeded signal.
 
-**Graph oscillator phase is an accumulator, and the transport-clock curve is
-what fixes it.** `Op::Sine` and `Op::Pulse` lower to free-running fundsp
+**Graph oscillator phase is an accumulator, while transport sequences derive
+their phase.** `Op::Sine` and `Op::Pulse` lower to free-running fundsp
 oscillators. In a per-note voice the note clock is the correct coordinate, so
 nothing is wrong; in a persistent `patch` the phase starts when the instance
 does and a hard reset re-phases it. Compatible-edit arena reuse masks this
-rather than resolving it, which is why it has not yet been felt.
+rather than resolving it. Compiled `TransportSequence` controls are different:
+persistent lowering supplies an absolute start in seconds, so replacement at a
+nonzero frontier resumes their periodic phase without migrating state.
 
 The shape of the fix is settled and recorded in `/CLAUDE.md`: a `Curve` gains a
 transport clock with a period and is evaluated at `t mod period`, so a repeating

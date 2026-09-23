@@ -20,6 +20,6 @@ pub use persistent::{PersistentError, PersistentRuntime};
 pub use revision::{Generation, Revision, RevisionSlot, SubmitError};
 pub use scheduler::{
     ExternalOnset, FillReport, PitchScheduler, ProgramScheduler, RoutedRuntime, ScheduleError,
-    ScheduledRun, ScheduledTrack, schedule_external_routed,
+    ScheduledRun, ScheduledTrack, TrackFillReport, schedule_external_routed,
 };
 pub use trigger::{ExternalTrigger, TriggerRecordError, TriggerRecorder};

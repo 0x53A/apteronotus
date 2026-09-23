@@ -1,6 +1,6 @@
 //! Mini-notation: what the text means.
 
-use apteronotus_pattern::{Frac, Pattern, Span, mini};
+use apteronotus_pattern::{Frac, Pattern, Span, SrcSpan, mini};
 
 fn f(n: i64, d: i64) -> Frac {
     Frac::new(n, d)
@@ -191,6 +191,67 @@ fn source_spans_point_at_the_text() {
 }
 
 #[test]
+fn document_bases_shift_spans_without_shifting_provenance_or_randomness() {
+    let source = "[a,c] b? | d";
+    let local = mini::parse_in(source, 91, Some(0)).unwrap();
+    let rebased = mini::parse_in(source, 91, Some(37)).unwrap();
+    let unattributed = mini::parse_in(source, 91, None).unwrap();
+
+    for cycle in -8..8 {
+        let local_events = local.onsets(Span::cycle(cycle));
+        let rebased_events = rebased.onsets(Span::cycle(cycle));
+        let unattributed_events = unattributed.onsets(Span::cycle(cycle));
+        assert_eq!(local_events.len(), rebased_events.len());
+        assert_eq!(local_events.len(), unattributed_events.len());
+        for ((local, rebased), unattributed) in local_events
+            .iter()
+            .zip(&rebased_events)
+            .zip(&unattributed_events)
+        {
+            assert_eq!(local.value, rebased.value);
+            assert_eq!(local.value, unattributed.value);
+            assert_eq!(local.whole, rebased.whole);
+            assert_eq!(local.part, rebased.part);
+            assert_eq!(local.origin, rebased.origin);
+            assert_eq!(local.origin, unattributed.origin);
+            assert_eq!(local.seed(), rebased.seed());
+            assert_eq!(local.seed(), unattributed.seed());
+            assert_eq!(local.group, rebased.group);
+            assert_eq!(local.group, unattributed.group);
+            assert_eq!(
+                rebased.src,
+                local.src.and_then(|span| span.offset(37)),
+                "only editor coordinates may move"
+            );
+            assert_eq!(unattributed.src, None);
+        }
+    }
+}
+
+#[test]
+fn checked_source_offsets_never_wrap_or_saturate() {
+    assert_eq!(SrcSpan::new(2, 5).offset(10), Some(SrcSpan::new(12, 15)));
+    assert_eq!(SrcSpan::new(2, 5).offset(u32::MAX as usize), None);
+    assert_eq!(SrcSpan::new(2, 5).offset(usize::MAX), None);
+}
+
+#[test]
+fn rebased_spans_remain_document_char_boundaries() {
+    let prefix = "λ = \"";
+    let source = "café bd";
+    let document = format!("{prefix}{source}\"");
+    let pattern = mini::parse_in(source, 7, Some(prefix.len())).unwrap();
+    for event in pattern.onsets(Span::cycle(0)) {
+        let span = event.src.unwrap();
+        let start = span.start as usize;
+        let end = span.end as usize;
+        assert!(document.is_char_boundary(start));
+        assert!(document.is_char_boundary(end));
+        assert!(matches!(&document[start..end], "café" | "bd"));
+    }
+}
+
+#[test]
 fn spans_survive_transformation() {
     // Highlighting has to keep working through the combinators, or the editor
     // lights up the wrong word the moment anyone writes `every`.
@@ -228,6 +289,17 @@ fn errors_carry_a_position() {
         );
         assert!(!e.message.is_empty(), "{bad:?} gave an empty message");
     }
+}
+
+#[test]
+fn errors_distinguish_local_and_document_coordinates() {
+    let document = mini::parse_in("[bd", 0, Some(40)).unwrap_err();
+    assert_eq!(document.document, document.span.offset(40));
+    assert!(document.to_string().contains("at byte 40"));
+
+    let local = mini::parse_in("[bd", 0, None).unwrap_err();
+    assert_eq!(local.document, None);
+    assert!(local.to_string().contains("of the pattern text"));
 }
 
 #[test]

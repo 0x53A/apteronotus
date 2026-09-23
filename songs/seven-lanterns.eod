@@ -1,0 +1,129 @@
+-- seven-lanterns.eod — a procession that keeps an extra step
+-- Thirty-two measures of 7/8: plucked strings, breathy reeds and clay drums.
+-- The 2 + 2 + 3 gait stays exact while a tempo map gently lifts and settles.
+-- One engine cycle is still four quarter notes. Each placement captures
+-- exactly 7/8 of a cycle, so a shortened cyclic cell cannot sneak its next
+-- first note into the following measure. Release tails remain free to ring.
+-- Render: cargo run -p apteronotus-render -- --song seven-lanterns --cycles 28 --tail 7
+
+tempo {
+  { at = bars(0), bpm = 112 },
+  { at = bars(7), bpm = 124, over = bars(7) },
+  { at = bars(21), bpm = 96, over = bars(7) },
+}
+local hall = send {
+  graph = reverb(34, secs(2.9), 0.68) >> highpass(210) >> lowpass(4200),
+  level = 0.26,
+}
+-- This echo is explicitly in seconds: it does not accelerate with the feet.
+local echo = send {
+  graph = delay(secs(0.31)) >> lowpass(2700) >> feedback(0.27),
+  level = 0.18,
+}
+local strings_level = control { name = "strings", range = {0, 1.5}, default = 1 }
+local reed_level = control { name = "reed", range = {0, 1.5}, default = 1 }
+local drum_level = control { name = "clay", range = {0, 1.5}, default = 1 }
+
+local strings = voice {
+  graph = function(n)
+    local pick = (noise() >> lowpass(3900, 0.65)) * decay(ms(7))
+    local body = pick >> pluck(n.hz, 0.1, 0.32)
+    local tine = sine(n.hz * 2.001) * decay(ms(140)) * 0.11
+    return (body * 2.8 + tine) >> highpass(120)
+      >> mul(adsr(ms(2), ms(170), 0.65, ms(430)) * n.velocity * 0.24 * strings_level)
+      >> pan(n.pan)
+  end,
+}
+local reed = voice {
+  graph = function(n)
+    local breath = (noise() >> bandpass(n.hz * 2, 1.1)) * 0.055
+    local hz = n.hz * (1 + sine(5.1) * 0.003 * (1 - decay(ms(400))))
+    local body = sine(hz) + sine(hz * 3) * 0.25 + sine(hz * 5) * 0.08
+    return (body + breath) >> lowpass(2600, 0.6)
+      >> mul(adsr(ms(65), ms(130), 0.8, ms(270)) * n.velocity * 0.18 * reed_level)
+      >> pan(0.2)
+  end,
+}
+local drone = voice {
+  graph = function(n)
+    return (sine(n.hz) * 0.7 + soft_saw(n.hz * 1.0015) * 0.24)
+      >> lowpass(1200, 0.6)
+      >> mul(adsr(ms(350), ms(500), 0.6, ms(850)) * n.velocity * 0.095)
+      >> pan(-0.2)
+  end,
+}
+local bass = voice {
+  graph = function(n)
+    return (sine(n.hz) + sine(n.hz * 2) * 0.2)
+      * adsr(ms(8), ms(210), 0.4, ms(150)) * n.velocity * 0.24 >> pan(0)
+  end,
+}
+local clay = voice {
+  graph = function(n)
+    local body = sine(n.hz * (1 + decay(ms(20)) * 0.28)) * decay(ms(180))
+      + sine(n.hz * 2.37) * decay(ms(65)) * 0.25
+    local hand = (noise() >> bandpass(1200, 1.1)) * decay(ms(11)) * 0.13
+    return (body + hand) * (1 - decay(ms(2))) * n.velocity * 0.34 * drum_level >> pan(n.pan)
+  end,
+}
+local shaker = voice {
+  graph = function(n)
+    return noise() >> bandpass(5700, 0.7)
+      >> mul(decay(ms(32)) * (1 - decay(ms(3))) * n.velocity * 0.07 * drum_level)
+      >> pan(n.pan)
+  end,
+}
+
+local figures = {
+  "a3 ~ e4 ~ b3 c4 e4", "g3 ~ d4 ~ a3 b3 d4",
+  "d4 ~ a3 ~ e4 f#4 a3", "e3 ~ b3 ~ d4 g3 b3",
+}
+local chords = {"[a2,e3,b3,c4]", "[g2,d3,a3,b3]", "[d3,a3,c4,f#4]", "[e3,b3,d4,g4]"}
+local roots = {"a1", "g1", "d2", "e2"}
+local melodies = {
+  "e4 ~ ~ g4 a4 ~ ~", "~ c5 ~ b4 ~ a4 ~",
+  "g4 ~ ~ e4 ~ d4 ~", "~ b4 a4 ~ g4 ~ ~",
+  "f#4 ~ ~ a4 ~ e4 ~", "~ d5 ~ c5 a4 ~ ~",
+  "g4 ~ ~ b4 ~ a4 ~", "e4 ~ ~ ~ ~ ~ ~",
+}
+local function place(measure, material)
+  return at(bars(measure * 7 / 8), material >> slow(7 / 8), bars(7 / 8))
+end
+local picked, reeds, pads, lows, pots, sand = {}, {}, {}, {}, {}, {}
+for measure = 0, 31 do
+  local row = math.floor(measure / 4) % 4 + 1
+  local quiet = measure >= 16 and measure < 20
+  local ending = measure >= 28
+  local figure = figures[row]
+  if quiet or ending then figure = roots[row] .. " ~ ~ ~ e4 ~ ~" end
+  table.insert(picked, place(measure, pattern(figure)
+    >> hold(beats(0.42)) >> velocity(ending and 0.48 or 0.76)
+    >> pan("-0.3 0.24 -0.12 0.34")))
+  if measure % 2 == 0 and measure < 30 then
+    table.insert(pads, place(measure, pattern(chords[row])
+      >> hold(bars(1.65)) >> velocity(0.6)))
+    table.insert(lows, place(measure, pattern(roots[row] .. " ~ ~ ~ " .. roots[row] .. " ~ ~")
+      >> hold(beats(0.9)) >> velocity(0.75)))
+  end
+  if measure >= 4 and measure < 28 and not quiet then
+    table.insert(reeds, place(measure, pattern(melodies[(measure - 4) % 8 + 1])
+      >> hold(beats(0.75)) >> velocity(0.64)))
+  end
+  if not quiet and not ending then
+    table.insert(pots, place(measure, pattern("a2 ~ e3 ~ a2 ~ e3")
+      >> velocity("0.82 0.45 0.65 0.4 0.72 0.38 0.48") >> pan("-0.12 0.18")))
+    table.insert(sand, place(measure, pattern("~ x ~ x ~ x x")
+      >> velocity("0.5 0.32 0.62 0.36") >> pan("0.4 -0.35")))
+  end
+end
+table.insert(reeds, place(29, pattern("b4 ~ a4 ~ e4 ~ ~")
+  >> hold(beats(1)) >> velocity(0.4)))
+table.insert(reeds, place(31, pattern("a4 ~ ~ ~ ~ ~ ~")
+  >> hold(beats(1.5)) >> velocity(0.3)))
+play(strings, timeline(picked) >> to(hall, 0.38) >> to(echo, 0.35))
+play(reed, timeline(reeds) >> to(hall, 0.55))
+play(drone, timeline(pads) >> to(hall, 0.7))
+play(bass, timeline(lows))
+play(clay, timeline(pots) >> to(hall, 0.16))
+play(shaker, timeline(sand))
+master(highpass(32) >> lowpass(10000, 0.65) >> limiter(ms(5), ms(180)) >> mul(0.96))

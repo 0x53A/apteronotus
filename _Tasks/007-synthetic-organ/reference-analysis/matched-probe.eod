@@ -1,0 +1,21 @@
+-- Spectral probe, not a score transcription. Approximate pitch components of
+-- Empires Will Fall at 108 s: G#3, B3, D#4. Registration copied from Iron Choir.
+-- 0–3 s dry chord; 4–7 s same chord into the same shared hall. No pedal.
+tempo(120)
+local hall = send {
+  graph = reverb(38, secs(4.8), .68) >> highpass(110) >> lowpass(5600),
+  level = .30,
+}
+local instrument = voice { graph=function(n)
+  return organ(n.hz, {
+    {kind="flute",feet=16,level=.24,cents=-1.3},
+    {kind="principal",feet=8,level=.70},
+    {kind="principal",feet=4,level=.38,cents=1.1},
+    {kind="string",feet=8,level=.20,cents=-2.4},
+    {kind="reed",feet=8,level=.32,cents=.7},
+    {kind="principal",feet=2,level=.20,cents=-.6},
+    {kind="principal",feet=8/3,level=.11,cents=.9},
+  }) * .16 >> pan(0)
+end }
+play(instrument, timeline {at(secs(0), pattern("[g#3,b3,d#4]") >> hold(beats(6)))})
+play(instrument, timeline {at(secs(4), pattern("[g#3,b3,d#4]") >> hold(beats(6)))} >> to(hall,.75))

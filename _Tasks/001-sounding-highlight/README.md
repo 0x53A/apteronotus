@@ -1,5 +1,14 @@
 # Sounding-source highlighting
 
+**Implemented 2026-08-27.** All six stages below are connected on native and
+wasm: exact document coordinates with provenance invariance, an audible-revision
+queue mirroring runtime activation boundaries, coordinate-derived flash
+windows, equality gating, active-range normalisation and the editor wash. The
+focused suite covers multiple queued revisions, hard-reset origins, runtime
+uncertainty, activation clamping, timeline span survival, cap behaviour and
+layout splitting. The remaining hard-bound debt is the bounded/visiting pattern
+query API described in stage 3.1; the current cap stops between tracks.
+
 Light the mini-notation token that is sounding right now, the way Strudel does,
 without giving up the two rules the rest of the system is built on: a query is a
 pure function of its window, and evaluation is an explicit boundary.

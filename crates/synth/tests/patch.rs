@@ -2,11 +2,48 @@ use apteronotus_synth::lower::{render, zero_crossing_hz};
 use apteronotus_synth::{
     Adsr, AudioInputLayout, AudioInputSpec, BusLayout, ControlError, ControlLayout, ControlSpec,
     ControlStore, DelayRange, GraphBuilder, LowerError, Note, PatchError, PatchTemplate, Source,
-    instantiate, instantiate_patch, instantiate_patch_routed_with_audio_inputs,
-    instantiate_with_controls, n,
+    TransportSlot, instantiate, instantiate_patch, instantiate_patch_routed_at,
+    instantiate_patch_routed_with_audio_inputs, instantiate_with_controls, n,
 };
 
 const SR: f64 = 48_000.0;
+
+#[test]
+fn persistent_transport_sequences_derive_phase_from_the_absolute_start() {
+    let mut graph = GraphBuilder::new();
+    let sequence = graph.transport_sequence(
+        0.1,
+        vec![
+            TransportSlot {
+                begin_seconds: 0.0,
+                end_seconds: 0.05,
+                value: 0.2,
+            },
+            TransportSlot {
+                begin_seconds: 0.05,
+                end_seconds: 0.1,
+                value: 0.8,
+            },
+        ],
+    );
+    let patch = PatchTemplate::new(graph.out_mono(sequence).unwrap()).unwrap();
+    let buses = BusLayout::new(1).unwrap();
+    let controls = ControlLayout::new();
+    let store = ControlStore::new(&controls);
+
+    let mut late = instantiate_patch_routed_at(&patch, &buses, &store, 0.075).unwrap();
+    let late = render(late.as_mut(), SR, 0.001);
+    assert!((late[0][0] - 0.8).abs() < 1.0e-6);
+
+    let mut wrapped = instantiate_patch_routed_at(&patch, &buses, &store, 0.125).unwrap();
+    let wrapped = render(wrapped.as_mut(), SR, 0.001);
+    assert!((wrapped[0][0] - 0.2).abs() < 1.0e-6);
+
+    assert!(matches!(
+        instantiate_patch_routed_at(&patch, &buses, &store, f64::NAN),
+        Err(LowerError::InvalidTransportTime(value)) if value.is_nan()
+    ));
+}
 
 #[test]
 fn logical_audio_input_can_be_supplied_as_a_live_host_lane() {

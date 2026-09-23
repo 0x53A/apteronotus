@@ -1,0 +1,50 @@
+-- Change variant to 0/1/2/3/4: baseline / bright / spatial / driven / trumpet.
+-- Every version plays the same original phrase. 0–4 s held G# minor;
+-- 4–8 s changing chords; 8–12 s rhythmic keys; then room tail.
+local variant = 0
+-- TRUMPET_HELPER: prepend trumpet-voice.lua when rendering.
+tempo(120)
+local wide = variant >= 2
+local hall = send {
+  graph = reverb(38, secs(wide and 3.2 or 4.8), .68)
+    >> highpass(wide and 180 or 110) >> lowpass(wide and 7800 or 5600),
+  level = wide and .85 or .30,
+}
+local original = {
+  {"flute",16,.24,-1.3,0}, {"principal",8,.70,0,0},
+  {"principal",4,.38,1.1,0}, {"string",8,.20,-2.4,0},
+  {"reed",8,.32,.7,0}, {"principal",2,.20,-.6,0},
+  {"principal",8/3,.11,.9,0},
+}
+local bright = {
+  {"flute",16,.10,-1.3,0}, {"principal",8,.50,0,-.15},
+  {"reed",8,.80,-1.8,-.55}, {"reed",4,.60,1.8,.55},
+  {"principal",4,.48,1.1,.25}, {"principal",2,.65,-.6,-.35},
+  {"principal",8/3,.36,.9,.5}, {"principal",4/3,.25,-1.5,-.6},
+  {"principal",1,.30,1.5,.6},
+}
+local instrument = voice { graph=function(n)
+  local ranks = variant == 0 and original or bright
+  local sum = dc(0) >> pan(0)
+  for _, r in ipairs(ranks) do
+    local pipe = organ_pipe(n.hz, {kind=r[1],feet=r[2],level=r[3],cents=r[4]})
+    if variant == 4 and r[1] == "reed" then
+      pipe = trumpet_trial(n.hz,r[2],r[3],r[4])
+    end
+    if variant == 3 then
+      -- Gentle per-rank saturation: no chord-wide intermodulation. Ordinary
+      -- shaper, not oversampled; low-pass limits output bandwidth, not aliasing.
+      pipe = pipe >> shape("tanh",2.8) >> dcblock() >> lowpass(7200)
+    end
+    sum = sum + (pipe >> pan(wide and r[5] or 0))
+  end
+  return sum * (variant == 3 and .045 or .08)
+end }
+local phrase = timeline {
+  at(secs(0), pattern("[g#3,b3,d#4]") >> hold(beats(7))),
+  at(secs(4), pattern("[e3,g#3,b3]") >> hold(beats(3.5))),
+  at(secs(6), pattern("[f#3,a#3,c#4]") >> hold(beats(3.5))),
+  at(secs(8), pattern("g#3 d#4 b3 g#4") >> hold(beats(.55))),
+  at(secs(10), pattern("[g#3,b3,d#4] ~ [f#3,a#3,c#4] [g#3,b3,d#4]") >> hold(beats(.65))),
+}
+play(instrument, phrase >> to(hall,wide and 1.2 or .75))

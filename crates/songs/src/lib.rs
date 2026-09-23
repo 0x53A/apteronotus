@@ -2,9 +2,9 @@
 //!
 //! `songs/` at the repository root is the target: the first seven documents
 //! were written before the runtime, and the implementation is finished when
-//! they play. `drift.eod` came afterwards and is the other direction — a
-//! piece written against the working backend, which is what the corpus is
-//! for once it stops being a specification. This crate is only their
+//! they play. The remaining pieces came afterwards and are the other
+//! direction — songs written against the working backend, which is what the
+//! corpus is for once it stops being a specification. This crate is only their
 //! delivery mechanism — it makes the corpus
 //! available to any program that links Apteronotus, so a host application
 //! (`crates/app`, the study app in `~/src/idiosepius`, a renderer, a test
@@ -51,10 +51,41 @@ pub const SUPERSAWS: &str = include_str!("../../../songs/supersaws.eod");
 pub const DRIFT: &str = include_str!("../../../songs/drift.eod");
 /// `outbound.eod` — polymetric layers, so the combination is the form.
 pub const OUTBOUND: &str = include_str!("../../../songs/outbound.eod");
+/// `undertow.eod` — fast subdivisions over a half-time body.
+pub const UNDERTOW: &str = include_str!("../../../songs/undertow.eod");
+/// `nightshift.eod` — restrained, traditional synthwave with a returning form.
+pub const NIGHTSHIFT: &str = include_str!("../../../songs/nightshift.eod");
+/// `small-light.eod` — wooden pulses opening into a finite, luminous miniature.
+pub const SMALL_LIGHT: &str = include_str!("../../../songs/small-light.eod");
+/// `rust-and-voltage.eod` — a rock band synthesized without samples.
+pub const RUST_AND_VOLTAGE: &str = include_str!("../../../songs/rust-and-voltage.eod");
+/// `nightshift-dub.eod` — offbeat organ, syncopated bass and tape echoes.
+pub const NIGHTSHIFT_DUB: &str = include_str!("../../../songs/nightshift-dub.eod");
+/// `undertow-skipping-stones.eod` — dry two-step drums and dorian keys.
+pub const UNDERTOW_SKIPPING_STONES: &str =
+    include_str!("../../../songs/undertow-skipping-stones.eod");
+/// `small-light-afterimage.eod` — a beatless, finite ambient variation.
+pub const SMALL_LIGHT_AFTERIMAGE: &str = include_str!("../../../songs/small-light-afterimage.eod");
+/// `seven-lanterns.eod` — a finite 7/8 procession through a ramped tempo map.
+pub const SEVEN_LANTERNS: &str = include_str!("../../../songs/seven-lanterns.eod");
+/// `paper-orbits.eod` — a finite five-against-seven keyboard canon.
+pub const PAPER_ORBITS: &str = include_str!("../../../songs/paper-orbits.eod");
+/// `seven-teeth.eod` — seven-step rock through one shared amplifier.
+pub const SEVEN_TEETH: &str = include_str!("../../../songs/seven-teeth.eod");
+/// Retained strings: partial strumming, bend, repick and damping.
+pub const SIX_STRINGS: &str = include_str!("../../../songs/six-strings.eod");
+/// Full rock arrangement built around the retained-string model.
+pub const IRON_IN_THE_RAIN: &str = include_str!("../../../songs/iron-in-the-rain.eod");
+
+/// Synthetic organ: individual dry stops, full registration and a shared hall.
+pub const CATHEDRAL_ORGAN: &str = include_str!("../../../songs/cathedral-organ.eod");
+
+/// Dry additive/physical comparison and retained wind-pressure articulation.
+pub const ORGAN_LABORATORY: &str = include_str!("../../../songs/organ-laboratory.eod");
 
 /// Every song, in the order `songs/CLAUDE.md` introduces them: the four cyclic
 /// pieces first, then the two that needed finite time and live input, then the
-/// external port, and last the two written after the engine rather than
+/// external port, and last the pieces written after the engine rather than
 /// before it.
 ///
 /// A `static` rather than a `const` on purpose. A `const` is substituted at
@@ -132,6 +163,102 @@ pub static SONGS: &[Song] = &[
                    fast pulse against a low event count, and pentatonic cells \
                    that stay consonant wherever the harmony has got to",
         source: OUTBOUND,
+    },
+    Song {
+        name: "undertow",
+        title: "the current is faster underneath",
+        stresses: "a 168 BPM grid heard in half-time, dense broken-beat onset \
+                   structure without a bright wall, a centred sub/Reese under \
+                   stereo harmony, and a cyclic 16-bar form",
+        source: UNDERTOW,
+    },
+    Song {
+        name: "nightshift",
+        title: "the office is quiet enough to hear the rain",
+        stresses: "traditional low-density synthwave, a cyclic 32-bar form, \
+                   two related harmonic sections, and sparse mid-register \
+                   melodies over a restrained analogue palette",
+        source: NIGHTSHIFT,
+    },
+    Song {
+        name: "small-light",
+        title: "A Small Light Under Water",
+        stresses: "a finite forty-bar arrangement, asymmetric wooden pulses, \
+                   inharmonic bells, and a minor-to-dorian harmonic opening",
+        source: SMALL_LIGHT,
+    },
+    Song {
+        name: "rust-and-voltage",
+        title: "Rust and Voltage",
+        stresses: "sample-free dirty rock, struck-string partials through two \
+                   distortion stages, chromatic riffs, and a half-time breakdown",
+        source: RUST_AND_VOLTAGE,
+    },
+    Song {
+        name: "nightshift-dub",
+        title: "the rain reaches the basement",
+        stresses: "a thirty-two-bar dub variation, offbeat organ chops, \
+                   syncopated bass and a four-bar echo breakdown",
+        source: NIGHTSHIFT_DUB,
+    },
+    Song {
+        name: "undertow-skipping-stones",
+        title: "the current catches the sunlight",
+        stresses: "a thirty-two-bar broken-beat variation, exact swung hat \
+                   offsets, clipped bass and D dorian electric-piano replies",
+        source: UNDERTOW_SKIPPING_STONES,
+    },
+    Song {
+        name: "small-light-afterimage",
+        title: "what the water remembers",
+        stresses: "a twenty-four-bar ambient variation, slow minor-to-dorian \
+                   harmony, answering resonances and a finite ending",
+        source: SMALL_LIGHT_AFTERIMAGE,
+    },
+    Song {
+        name: "seven-lanterns",
+        title: "a procession that keeps an extra step",
+        stresses: "thirty-two measures of 7/8, rational finite-timeline scaling, \
+                   ramped tempo, plucked strings, breathy reeds and clay drums",
+        source: SEVEN_LANTERNS,
+    },
+    Song {
+        name: "paper-orbits",
+        title: "five steps meet seven on the same landing",
+        stresses: "a forty-eight-cycle keyboard canon, five- and seven-beat \
+                   phrases, bounded multi-cycle captures and a thinning coda",
+        source: PAPER_ORBITS,
+    },
+    Song {
+        name: "seven-teeth",
+        title: "Seven Teeth",
+        stresses: "sample-free rock in 7/8, triangle/saw strings through a \
+                   shared persistent amplifier, a half-time breakdown and solo",
+        source: SEVEN_TEETH,
+    },
+    Song {
+        name: "six-strings",
+        title: "Six Strings, One Amplifier",
+        stresses: "six persistent string resonators, partial strums, bend and repick, physical damping and one shared amp",
+        source: SIX_STRINGS,
+    },
+    Song {
+        name: "organ-laboratory",
+        title: "Pipes Under Pressure",
+        stresses: "dry additive and physical pipe comparison, pressure-driven retained flue, short valve closure and wind shutdown",
+        source: ORGAN_LABORATORY,
+    },
+    Song {
+        name: "cathedral-organ",
+        title: "Iron Choir",
+        stresses: "voiced synthetic pipe ranks, keyed sustain/release, registration controls, independent pedal and shared cathedral decay",
+        source: CATHEDRAL_ORGAN,
+    },
+    Song {
+        name: "iron-in-the-rain",
+        title: "Iron in the Rain",
+        stresses: "a full sample-free rock arrangement with six retained rhythm strings, bent lead, string bass, synthesized drums and a finite ending",
+        source: IRON_IN_THE_RAIN,
     },
 ];
 

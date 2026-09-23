@@ -15,6 +15,30 @@ use apteronotus_synth::{
 
 const SR: f64 = 48_000.0;
 
+#[test]
+fn retained_string_validates_bounds_and_declares_memory_and_response() {
+    let mut g = GraphBuilder::with_inputs(3);
+    let string = g.string_resonator(
+        Source::Input(0),
+        Source::Input(1),
+        Source::Input(2),
+        40.0,
+        20.0,
+    );
+    let graph = g.out_mono(string).unwrap();
+    assert_eq!(graph.cost().delay_buffer_seconds, 0.025);
+    assert!((graph.tail() - 20.025).abs() < 1e-9);
+    assert!(PatchTemplate::new(graph.clone()).is_ok());
+    assert!(graph.nodes[0].op.activity_input(0));
+    assert!(!graph.nodes[0].op.activity_input(1));
+    assert!(!graph.nodes[0].op.activity_input(2));
+    for (min_hz, decay) in [(0.0, 20.0), (40.0, 0.0), (40.0, 121.0), (f64::NAN, 20.0)] {
+        let mut invalid = graph.clone();
+        invalid.nodes[0].op = Op::StringResonator { min_hz, decay };
+        assert!(invalid.validate().is_err());
+    }
+}
+
 /// A bare oscillator at the symbolic note frequency.
 fn tone() -> GraphTemplate {
     let mut g = GraphBuilder::new();
@@ -28,6 +52,40 @@ fn play(template: &GraphTemplate, note: &Note, seconds: f64) -> Vec<Vec<f32>> {
 }
 
 // ------------------------------------------------------------ the symbolic n
+
+#[test]
+fn triangle_has_odd_harmonics_and_rejects_out_of_band_partials() {
+    let mut g = GraphBuilder::new();
+    let signal = g.triangle(n::HZ);
+    let voice = g.out_mono(signal).unwrap();
+    assert_eq!(voice.nodes.len(), 1);
+    assert_eq!(voice.lifetime().absolute_horizon, 0.0);
+    let amplitude = |samples: &[f32], hz: f64| {
+        let (re, im) = samples
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(re, im), (i, x)| {
+                let phase = std::f64::consts::TAU * hz * i as f64 / SR;
+                (
+                    re + f64::from(*x) * phase.cos(),
+                    im + f64::from(*x) * phase.sin(),
+                )
+            });
+        2.0 * re.hypot(im) / samples.len() as f64
+    };
+    let note = Note::new(250.0);
+    let audio = play(&voice, &note, 0.4);
+    assert_eq!(audio, play(&voice, &note, 0.4));
+    let fundamental = amplitude(&audio[0], 250.0);
+    assert!(fundamental > 0.5);
+    assert!((amplitude(&audio[0], 750.0) / fundamental - 1.0 / 9.0).abs() < 0.01);
+    assert!(amplitude(&audio[0], 500.0) < fundamental * 0.001);
+
+    // A naive triangle's third harmonic at 30 kHz folds to 18 kHz here.
+    let high = play(&voice, &Note::new(10_000.0), 0.4);
+    assert!(amplitude(&high[0], 10_000.0) > 0.5);
+    assert!(amplitude(&high[0], 18_000.0) < 0.01);
+}
 
 #[test]
 fn a_symbolic_note_input_becomes_the_notes_number() {
@@ -282,6 +340,22 @@ fn a_finite_patch_stops_sources_before_downstream_state_drains() {
         after_tail < 1.0e-5,
         "the nonterminating source was not stopped at the run boundary"
     );
+}
+
+#[test]
+fn a_finite_triangle_patch_stops_its_source_and_drains_its_delay() {
+    let mut g = GraphBuilder::new();
+    let oscillator = g.triangle(250.0);
+    let delayed = g.delay(oscillator, 0.05, DelayRange::fixed(0.05).unwrap());
+    let patch = PatchTemplate::new(g.out_mono(delayed).unwrap()).unwrap();
+    let layout = BusLayout::new(1).unwrap();
+    let controls = ControlStore::new(&ControlLayout::new());
+    let (mut unit, lifetime) =
+        instantiate_timed_patch_routed(&patch, 0.1, 0.005, &layout, &controls).unwrap();
+    assert!(lifetime.absolute_horizon >= 0.15);
+    let audio = render(unit.as_mut(), SR, 0.2);
+    assert!(rms(&audio[0][(0.105 * SR) as usize..(0.14 * SR) as usize]) > 0.05);
+    assert!(rms(&audio[0][(0.17 * SR) as usize..]) < 1e-5);
 }
 
 #[test]
@@ -574,6 +648,53 @@ fn lifetime_keeps_gate_relative_and_absolute_components_separate() {
 }
 
 #[test]
+fn final_adsr_retires_long_decay_and_keeps_the_audible_release() {
+    let mut g = GraphBuilder::new();
+    let osc = g.sine(n::HZ);
+    let long = g.curve(Curve::decay(CurveClock::NoteSeconds, 8.0));
+    let audio = g.mul(osc, long);
+    let envelope = g.adsr(Adsr::new(0.001, 0.03, 0.8, 0.14));
+    // Match the score's scaled envelope, not just audio * bare ADSR.
+    let envelope = g.mul(envelope, 0.22);
+    let output = g.mul(audio, envelope);
+    let voice = g.out_mono(output).unwrap();
+    let note = Note::new(110.0).duration(0.3);
+    let lifetime = voice.lifetime_for(&note).unwrap();
+    assert_eq!(lifetime.absolute_horizon, 0.0);
+    assert_eq!(lifetime.gate_tail, 0.14);
+    let audio = play(&voice, &note, 0.6);
+    assert!(rms(&audio[0][(0.32 * SR) as usize..(0.4 * SR) as usize]) > 0.01);
+    assert!(
+        audio[0][(0.44 * SR).ceil() as usize..]
+            .iter()
+            .all(|s| *s == 0.0)
+    );
+}
+
+#[test]
+fn final_adsr_does_not_discard_downstream_or_ungated_tails() {
+    let mut g = GraphBuilder::new();
+    let osc = g.sine(n::HZ);
+    let long = g.curve(Curve::decay(CurveClock::NoteSeconds, 8.0));
+    let audio = g.mul(osc, long);
+    let envelope = g.adsr(Adsr::new(0.001, 0.03, 0.8, 0.14));
+    let gated = g.mul(audio, envelope);
+    let delayed = g.delay(gated, 0.2, DelayRange::fixed(0.2).unwrap());
+    let voice = g.out_mono(delayed).unwrap();
+    assert!((voice.lifetime().gate_tail - 0.34).abs() < 1e-12);
+    assert_eq!(voice.lifetime().absolute_horizon, 0.0);
+    let note = Note::new(110.0).duration(0.3);
+    let samples = play(&voice, &note, 0.8);
+    assert!(rms(&samples[0][(0.52 * SR) as usize..(0.6 * SR) as usize]) > 0.01);
+
+    // A separate output before the gate must still retain its entire history.
+    let mut ungated = voice.clone();
+    ungated.outputs = vec![gated, audio];
+    ungated.validate().unwrap();
+    assert_eq!(ungated.lifetime().absolute_horizon, 8.0);
+}
+
+#[test]
 fn mul_uses_component_wise_maximum_for_safe_retention() {
     let mut g = GraphBuilder::new();
     let noise = g.noise();
@@ -586,6 +707,19 @@ fn mul_uses_component_wise_maximum_for_safe_retention() {
     assert_eq!(lifetime.gate_tail, 2.0);
     assert_eq!(lifetime.absolute_horizon, 0.05);
     assert_eq!(lifetime.end_after_onset(0.1), 2.1);
+}
+
+#[test]
+fn ordinary_gain_and_an_added_dc_bias_are_not_hard_silence() {
+    let mut g = GraphBuilder::new();
+    let osc = g.sine(n::HZ);
+    let delayed = g.delay(osc, 2.0, DelayRange::fixed(2.0).unwrap());
+    let constant_gain = g.mul(delayed, 0.5);
+    let envelope = g.adsr(Adsr::new(0.001, 0.03, 0.8, 0.14));
+    let biased_envelope = g.add(envelope, 0.1);
+    let biased_gain = g.mul(delayed, biased_envelope);
+    let voice = g.out(&[constant_gain, biased_gain]).unwrap();
+    assert_eq!(voice.lifetime().gate_tail, 2.0);
 }
 
 #[test]

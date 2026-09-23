@@ -29,6 +29,8 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
                 output.push_str("__pattern_at(");
                 output.push_str(&index.to_string());
                 output.push(',');
+                output.push_str(&quoted_content_base(bytes, index, end).to_string());
+                output.push(',');
                 output.push_str(&source[index..end]);
                 output.push(')');
             } else {
@@ -100,6 +102,10 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
                 output.push_str(target.expect("target was checked"));
                 output.push('(');
                 output.push_str(&start.to_string());
+                if matches!(word, "pattern" | "play") {
+                    output.push(',');
+                    output.push_str(&direct_literal_base(bytes, open).to_string());
+                }
                 let mut first_argument = open + 1;
                 while first_argument < bytes.len() && bytes[first_argument].is_ascii_whitespace() {
                     first_argument += 1;
@@ -134,6 +140,67 @@ pub(crate) fn inject_call_sites(source: &str) -> String {
     output
 }
 
+fn direct_literal_base(bytes: &[u8], open: usize) -> usize {
+    let mut index = open + 1;
+    let mut depth = 1usize;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"') {
+            let end = quoted_end(bytes, index);
+            if depth == 1 {
+                return quoted_content_base(bytes, index, end);
+            }
+            index = end;
+            continue;
+        }
+        if bytes[index..].starts_with(b"--") {
+            index = if let Some(end) = long_bracket_end(bytes, index + 2) {
+                end
+            } else {
+                bytes[index..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |offset| index + offset + 1)
+            };
+            continue;
+        }
+        if bytes[index] == b'['
+            && let Some((content, end)) = long_bracket_parts(bytes, index)
+        {
+            if depth == 1 {
+                let body_end = long_bracket_body_end(bytes, index, end);
+                let body = &bytes[content..body_end];
+                if body.contains(&b'\r') {
+                    return 0;
+                }
+                return content + usize::from(body.first() == Some(&b'\n'));
+            }
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return 0;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    0
+}
+
+fn quoted_content_base(bytes: &[u8], start: usize, end: usize) -> usize {
+    let content_end = end.saturating_sub(1).max(start + 1);
+    if bytes[start + 1..content_end].contains(&b'\\') {
+        0
+    } else {
+        start + 1
+    }
+}
+
 fn quoted_end(bytes: &[u8], start: usize) -> usize {
     let quote = bytes[start];
     let mut index = start + 1;
@@ -148,6 +215,10 @@ fn quoted_end(bytes: &[u8], start: usize) -> usize {
 }
 
 fn long_bracket_end(bytes: &[u8], start: usize) -> Option<usize> {
+    long_bracket_parts(bytes, start).map(|(_, end)| end)
+}
+
+fn long_bracket_parts(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
     if bytes.get(start) != Some(&b'[') {
         return None;
     }
@@ -165,11 +236,20 @@ fn long_bracket_end(bytes: &[u8], start: usize) -> Option<usize> {
             && bytes.get(index + 1..index + 1 + equals) == Some(&bytes[start + 1..marker_end])
             && bytes.get(index + 1 + equals) == Some(&b']')
         {
-            return Some(index + equals + 2);
+            return Some((marker_end + 1, index + equals + 2));
         }
         index += 1;
     }
-    Some(bytes.len())
+    Some((marker_end + 1, bytes.len()))
+}
+
+fn long_bracket_body_end(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut marker_end = start + 1;
+    while bytes.get(marker_end) == Some(&b'=') {
+        marker_end += 1;
+    }
+    let closer_len = marker_end - start + 1;
+    end.saturating_sub(closer_len)
 }
 
 const fn is_identifier_start(byte: u8) -> bool {
@@ -189,7 +269,7 @@ mod tests {
         let source = "local p = pattern(\"a\") >> degrade(0.2) >> sometimes(0.1, rev)\nlocal x = perlin(0.1)\nplay(v, p)";
         assert_eq!(
             inject_call_sites(source),
-            "local p = __pattern_at(10,\"a\") >> __degrade_at(26,0.2) >> __sometimes_at(42,0.1, rev)\nlocal x = __perlin_at(72,0.1)\n__play_at(84,v, p)"
+            "local p = __pattern_at(10,19,\"a\") >> __degrade_at(26,0.2) >> __sometimes_at(42,0.1, rev)\nlocal x = __perlin_at(72,0.1)\n__play_at(84,0,v, p)"
         );
     }
 
@@ -219,8 +299,49 @@ mod tests {
     fn mini_literal_on_the_left_of_a_transform_keeps_its_site() {
         assert_eq!(
             inject_call_sites(r#"play(v, "c4 e4" >> velocity(0.5))"#),
-            r#"__play_at(0,v, __pattern_at(8,"c4 e4") >> velocity(0.5))"#
+            r#"__play_at(0,9,v, __pattern_at(8,9,"c4 e4") >> velocity(0.5))"#
         );
+    }
+
+    #[test]
+    fn mini_entry_points_receive_only_exact_literal_content_offsets() {
+        assert_eq!(
+            inject_call_sites(r#"pattern("a")"#),
+            r#"__pattern_at(0,9,"a")"#
+        );
+        assert_eq!(
+            inject_call_sites(r#"play(v, "c4")"#),
+            r#"__play_at(0,9,v, "c4")"#
+        );
+        assert_eq!(
+            inject_call_sites(r#"pattern("a\tb")"#),
+            r#"__pattern_at(0,0,"a\tb")"#
+        );
+        assert_eq!(
+            inject_call_sites("pattern([[a b]])"),
+            "__pattern_at(0,10,[[a b]])"
+        );
+        assert_eq!(
+            inject_call_sites("pattern([[\na b]])"),
+            "__pattern_at(0,11,[[\na b]])"
+        );
+        assert_eq!(
+            inject_call_sites("pattern([[\r\na b]])"),
+            "__pattern_at(0,0,[[\r\na b]])"
+        );
+        assert_eq!(
+            inject_call_sites("pattern([[a\r\nb]])"),
+            "__pattern_at(0,0,[[a\r\nb]])"
+        );
+    }
+
+    #[test]
+    fn outer_calls_ignore_nested_literals_and_nonliteral_arguments() {
+        assert_eq!(
+            inject_call_sites(r#"play(v, pattern("a"))"#),
+            r#"__play_at(0,0,v, __pattern_at(8,17,"a"))"#
+        );
+        assert_eq!(inject_call_sites("play(v, p)"), "__play_at(0,0,v, p)");
     }
 
     #[test]

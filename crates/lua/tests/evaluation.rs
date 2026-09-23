@@ -9,6 +9,79 @@ use apteronotus_synth::{
 const SR: f64 = 48_000.0;
 
 #[test]
+fn string_resonator_exposes_modulatable_inputs_and_rejects_bad_bounds() {
+    let program = evaluate(
+        r#"
+        local p = patch { inputs = 1, graph = function(cv)
+            return string_resonator(cv.input, 220 + sine(5) * 3, 0,
+                { min_hz = 40, decay = secs(20) }) >> pan(0)
+        end }
+        run(p)
+    "#,
+    )
+    .unwrap();
+    assert!(program.patches[0].graph().nodes.iter().any(|n| matches!(
+        n.op,
+        Op::StringResonator {
+            min_hz: 40.0,
+            decay: 20.0
+        }
+    )));
+    for bounds in [
+        "{min_hz=0, decay=secs(20)}",
+        "{min_hz=40, decay=secs(0)}",
+        "{min_hz=40, decay=secs(121)}",
+    ] {
+        let source = format!(
+            "patch {{ graph = function() return string_resonator(0, 220, 0, {bounds}) end }}"
+        );
+        assert!(
+            evaluate(&source)
+                .unwrap_err()
+                .to_string()
+                .contains("string_resonator")
+        );
+    }
+    assert!(evaluate("string_resonator(0, 220, 0, {min_hz=40, decay=secs(20)})").is_err());
+}
+
+#[test]
+fn triangle_supports_direct_modulation_and_processor_forms() {
+    let program = evaluate(
+        r#"
+      local direct = voice { graph = function(n)
+        return triangle(n.hz + sine(3) * 2) * 0.1 >> pan(0)
+      end }
+      local piped = voice { graph = function(n)
+        return n.hz >> triangle() >> mul(0.1) >> pan(0)
+      end }
+      play(direct, "a3")
+      play(piped, "a3")
+    "#,
+    )
+    .unwrap();
+    for graph in &program.voices {
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|node| node.op == Op::Triangle)
+                .count(),
+            1
+        );
+        let audio = render(
+            instantiate(graph, &Note::new(220.0)).unwrap().as_mut(),
+            SR,
+            0.2,
+        );
+        assert!(rms(&audio[0]) > 0.01);
+        assert!((zero_crossing_hz(&audio[0], SR) - 220.0).abs() < 8.0);
+    }
+    assert!(evaluate("triangle(220)").is_err());
+    assert!(evaluate("voice { graph = function() return triangle(220, 440) end }").is_err());
+}
+
+#[test]
 fn an_edit_stages_a_polyphonic_voice_and_pattern_as_plain_data() {
     let program = evaluate(
         r#"
@@ -49,6 +122,42 @@ fn an_edit_stages_a_polyphonic_voice_and_pattern_as_plain_data() {
     let audio = render(unit.as_mut(), SR, 0.2);
     assert!((zero_crossing_hz(&audio[0], SR) - 440.0).abs() < 3.0);
     assert!(rms(&audio[0]) > 0.05);
+}
+
+#[test]
+fn mini_event_spans_slice_the_original_lua_document() {
+    let source = r#"
+local tone = voice { graph = function() return sine(220) * 0.01 end }
+play(tone, "c4 e4")
+"#;
+    let program = evaluate(source).unwrap();
+    let mut events = program.tracks[0].pattern.onsets(Span::cycle(0));
+    events.sort_by_key(|event| event.src.unwrap().start);
+    let slices = events
+        .iter()
+        .map(|event| {
+            let span = event.src.unwrap();
+            &source[span.start as usize..span.end as usize]
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(slices, ["c4", "e4"]);
+}
+
+#[test]
+fn timeline_placement_preserves_document_absolute_mini_spans() {
+    let source = r#"
+local tone = voice { graph = function() return sine(220) * 0.01 end }
+local score = timeline { at(bars(2), pattern("g4")) }
+play(tone, score)
+"#;
+    let program = evaluate(source).unwrap();
+    let event = &program.tracks[0]
+        .pattern
+        .onsets(Span::new(Frac::int(2), Frac::int(3)))[0];
+    let span = event.src.unwrap();
+
+    assert_eq!(&source[span.start as usize..span.end as usize], "g4");
 }
 
 #[test]
@@ -1670,4 +1779,144 @@ fn external_onset_and_init_samples_remain_distinct_in_the_owned_track() {
     program
         .validate(Limits::default().graph_publication)
         .unwrap();
+}
+
+#[test]
+fn a_typed_capture_window_keeps_seven_eighths_from_repeating_its_first_note() {
+    let program = evaluate(
+        r#"
+        local v = voice {graph = function(n) return sine(n.hz) * 0.1 end}
+        local cell = pattern("c4 d4 e4 f4 g4 a4 b4") >> slow(7 / 8)
+        play(v, timeline { at(bars(2), cell, bars(7 / 8)) })
+        play(v, timeline { at(bars(2), cell) })
+    "#,
+    )
+    .unwrap();
+    let events = program.tracks[0]
+        .pattern
+        .onsets(Span::new(Frac::ZERO, Frac::int(4)));
+    assert_eq!(events.len(), 7);
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(
+            event.whole.unwrap().begin,
+            Frac::int(2) + Frac::new(index as i64, 8)
+        );
+        assert!(
+            event.src.is_some(),
+            "capture must preserve source attribution"
+        );
+    }
+    assert_eq!(
+        program.tracks[1]
+            .pattern
+            .onsets(Span::new(Frac::ZERO, Frac::int(4)))
+            .len(),
+        8,
+        "the existing two-argument form still captures exactly one cycle"
+    );
+}
+
+#[test]
+fn longer_captures_step_alternation_and_retain_release_beyond_the_window() {
+    let program = evaluate(
+        r#"
+        local v = voice {graph = function(n) return sine(n.hz) * 0.1 end}
+        play(v, timeline { at(bars(4), pattern("<c4 d4>") >> hold(bars(2)), bars(3)) })
+    "#,
+    )
+    .unwrap();
+    let events = program.tracks[0]
+        .pattern
+        .onsets(Span::new(Frac::ZERO, Frac::int(10)));
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].value, events[2].value);
+    assert_ne!(events[0].value, events[1].value);
+    assert_eq!(
+        events[2].whole.unwrap(),
+        Span::new(Frac::int(6), Frac::int(8))
+    );
+    let mut sliced = program.tracks[0]
+        .pattern
+        .onsets(Span::new(Frac::ZERO, Frac::new(37, 7)));
+    sliced.extend(
+        program.tracks[0]
+            .pattern
+            .onsets(Span::new(Frac::new(37, 7), Frac::int(10))),
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (event.whole, &event.value))
+            .collect::<Vec<_>>(),
+        sliced
+            .iter()
+            .map(|event| (event.whole, &event.value))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn seconds_capture_is_projected_from_its_placement_through_the_tempo_map() {
+    let program = evaluate(
+        r#"
+        tempo { {at = bars(0), bpm = 60}, {at = bars(1), bpm = 120} }
+        local v = voice {graph = function(n) return sine(n.hz) * 0.1 end}
+        play(v, timeline { at(bars(0), pattern("c4*4"), secs(5)) })
+        play(v, timeline { at(bars(1), pattern("c4*4"), secs(1)) })
+    "#,
+    )
+    .unwrap();
+    let query = Span::new(Frac::ZERO, Frac::int(4));
+    let crossing = program.tracks[0].pattern.onsets(query);
+    let later = program.tracks[1].pattern.onsets(query);
+    assert_eq!(crossing.len(), 6);
+    assert_eq!(later.len(), 2);
+    assert_eq!(later[0].whole.unwrap().begin, Frac::ONE);
+    assert_eq!(later[1].whole.unwrap().begin, Frac::new(5, 4));
+}
+
+#[test]
+fn capture_windows_are_typed_positive_and_bounded_before_querying() {
+    for duration in ["0.5", "bars(0)", "bars(-1)", "bars(1e20)", "secs(0)"] {
+        let source = format!("tempo(120); timeline {{ at(bars(0), pattern('c4'), {duration}) }}");
+        assert!(evaluate(&source).is_err(), "{duration}");
+    }
+    let no_clock = evaluate("timeline { at(bars(0), pattern('c4'), secs(1)) }")
+        .unwrap_err()
+        .to_string();
+    assert!(no_clock.contains("tempo"));
+    let small = Evaluator::new(Limits {
+        max_timeline_capture_cycles: 2,
+        ..Limits::default()
+    });
+    assert!(
+        small
+            .evaluate("timeline { at(bars(0), pattern('c4'), bars(2)) }")
+            .is_ok()
+    );
+    assert!(
+        small
+            .evaluate("timeline { at(bars(0), pattern('c4'), bars(3)) }")
+            .unwrap_err()
+            .to_string()
+            .contains("2 cycles")
+    );
+    let budget = Evaluator::new(Limits {
+        pattern_nodes: 100,
+        ..Limits::default()
+    });
+    let error = budget
+        .evaluate("timeline { at(bars(0), pattern('c4*8'), bars(20)) }")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("timeline capture"), "{error}");
+    assert!(evaluate("at(bars(0), pattern('c4'), bars(1), bars(2))").is_err());
+}
+
+#[test]
+fn an_unrepresentable_placement_becomes_a_diagnostic_instead_of_panicking() {
+    let error = evaluate("timeline { at(bars(1e30), pattern('c4')) }")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cycle-time representation"), "{error}");
 }

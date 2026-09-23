@@ -8,7 +8,7 @@
 
 use apteronotus_synth::{
     AudioInputLayout, BusLayout, ControlLayout, ControlStore, LowerError, PatchTemplate,
-    instantiate_patch_routed, instantiate_patch_routed_with_audio_inputs,
+    instantiate_patch_routed_at, instantiate_patch_routed_with_audio_inputs_at,
 };
 use fundsp::net::Net;
 use fundsp::prelude32::{AudioUnit, ReplayMode, Sequencer, pass, zero};
@@ -32,7 +32,20 @@ impl PersistentRuntime {
         controls: &ControlLayout,
         patches: impl IntoIterator<Item = &'a PatchTemplate>,
     ) -> Result<PersistentRuntime, PersistentError> {
-        Self::new_inner(layout, controls, None, patches)
+        Self::new_at_transport(layout, controls, patches, 0.0)
+    }
+
+    /// Construct a persistent arena at an absolute transport time.
+    ///
+    /// This coordinate initializes derived transport controls without
+    /// pretending stateful DSP has history it has not rendered.
+    pub fn new_at_transport<'a>(
+        layout: &BusLayout,
+        controls: &ControlLayout,
+        patches: impl IntoIterator<Item = &'a PatchTemplate>,
+        transport_seconds: f64,
+    ) -> Result<PersistentRuntime, PersistentError> {
+        Self::new_inner(layout, controls, None, patches, transport_seconds)
     }
 
     /// Construct a persistent arena whose processor exposes the program's
@@ -43,7 +56,25 @@ impl PersistentRuntime {
         audio_inputs: &AudioInputLayout,
         patches: impl IntoIterator<Item = &'a PatchTemplate>,
     ) -> Result<PersistentRuntime, PersistentError> {
-        Self::new_inner(layout, controls, Some(audio_inputs), patches)
+        Self::with_audio_inputs_at_transport(layout, controls, audio_inputs, patches, 0.0)
+    }
+
+    /// Construct an input-bearing persistent arena at an absolute transport
+    /// time. See [`Self::new_at_transport`].
+    pub fn with_audio_inputs_at_transport<'a>(
+        layout: &BusLayout,
+        controls: &ControlLayout,
+        audio_inputs: &AudioInputLayout,
+        patches: impl IntoIterator<Item = &'a PatchTemplate>,
+        transport_seconds: f64,
+    ) -> Result<PersistentRuntime, PersistentError> {
+        Self::new_inner(
+            layout,
+            controls,
+            Some(audio_inputs),
+            patches,
+            transport_seconds,
+        )
     }
 
     fn new_inner<'a>(
@@ -51,6 +82,7 @@ impl PersistentRuntime {
         controls: &ControlLayout,
         audio_inputs: Option<&AudioInputLayout>,
         patches: impl IntoIterator<Item = &'a PatchTemplate>,
+        transport_seconds: f64,
     ) -> Result<PersistentRuntime, PersistentError> {
         let controls = ControlStore::new(controls);
         let lanes = layout.total_channels();
@@ -69,13 +101,14 @@ impl PersistentRuntime {
                 });
             }
             let unit = match audio_inputs {
-                Some(audio_inputs) => instantiate_patch_routed_with_audio_inputs(
+                Some(audio_inputs) => instantiate_patch_routed_with_audio_inputs_at(
                     patch,
                     layout,
                     &controls,
                     audio_inputs,
+                    transport_seconds,
                 ),
-                None => instantiate_patch_routed(patch, layout, &controls),
+                None => instantiate_patch_routed_at(patch, layout, &controls, transport_seconds),
             }
             .map_err(|source| PersistentError::Lower { index, source })?;
             if inputs == 0 {

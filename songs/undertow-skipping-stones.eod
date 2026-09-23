@@ -1,0 +1,114 @@
+-- undertow-skipping-stones.eod — the current catches the sunlight
+-- A 132 BPM broken-beat variation of undertow, in D dorian. Thirty-two bars.
+-- The half-time Reese becomes a clipped, syncopated bass; dry two-step drums
+-- leave holes for electric-piano replies. Swing is an exact 1/24-bar offset
+-- on the quiet hat layer, so neither scheduler windows nor renders change it.
+-- Render: cargo run -p apteronotus-render -- --song undertow-skipping-stones --cycles 32 --tail 5
+
+tempo(132)
+local room = send {
+  graph = reverb(22, secs(1.65), 0.65) >> highpass(240) >> lowpass(4700),
+  level = 0.23,
+}
+local echo = send {
+  graph = delay(beats(0.75)) >> lowpass(2800) >> feedback(0.3),
+  level = 0.18,
+}
+local keys_level = control {name = "keys", range = {0, 1.5}, default = 1}
+local bass_level = control {name = "bass", range = {0, 1.5}, default = 1}
+local drums_level = control {name = "drums", range = {0, 1.5}, default = 1}
+local keys = voice {
+  graph = function(n)
+    local tine = sine(n.hz * 4.01) * decay(ms(95)) * 0.17
+    local body = sine(n.hz) * decay(ms(850))
+      + sine(n.hz * 2.002) * decay(ms(320)) * 0.28
+    return (body + tine) * (1 - decay(ms(4)))
+      * adsr(ms(3), ms(140), 0.6, ms(350)) * n.velocity * 0.18 * keys_level
+      >> pan(n.pan)
+  end,
+}
+local bass = voice {
+  params = {tone = {200, 2400, 700, "hz"}},
+  graph = function(n)
+    local env = adsr(ms(5), ms(95), 0.35, ms(65))
+    local body = sine(n.hz) * 0.85 + pulse(n.hz, 0.42) * 0.25
+      + saw(n.hz * 1.004) * 0.16
+    return body >> lowpass(n.tone + env * 650, 0.65)
+      >> mul(env * n.velocity * 0.34 * bass_level)
+      >> shape("tanh", 1.25) >> dcblock() >> pan(0)
+  end,
+}
+local kick = voice {
+  graph = function(n)
+    local body = sine(51 + decay(ms(26)) * 77) * decay(ms(130))
+    local click = (noise() >> bandpass(1700, 0.9)) * decay(ms(6)) * 0.1
+    return (body + click) * (1 - decay(ms(2))) * n.velocity * 0.5 * drums_level >> pan(0)
+  end,
+}
+local clap = voice {
+  graph = function(n)
+    local crack = noise() >> bandpass(1900, 0.8)
+    local bursts = decay(ms(12)) + (decay(ms(58)) - decay(ms(16))) * 0.9
+    return (crack * bursts + sine(205) * decay(ms(28)) * 0.15)
+      * n.velocity * 0.32 * drums_level >> pan(0.08)
+  end,
+}
+local hat = voice {
+  graph = function(n)
+    return noise() >> highpass(6200, 0.6) >> lowpass(10500, 0.6)
+      >> mul(decay(ms(28)) * n.velocity * 0.085 * drums_level) >> pan(n.pan)
+  end,
+}
+local marimba = voice {
+  graph = function(n)
+    return (sine(n.hz) * decay(ms(260)) + sine(n.hz * 3.97) * decay(ms(36)) * 0.21)
+      * (1 - decay(ms(2))) * n.velocity * 0.16 >> pan(n.pan)
+  end,
+}
+
+local chords = {"[f3,a3,c4,e4]", "[e3,g3,b3,d4]", "[e3,a3,c4,d4]", "[g3,b3,d4,e4]"}
+local basslines = {
+  "d2 ~ ~ d2 ~ a1 ~ ~ ~ d3 ~ ~ c2 ~ a1 ~",
+  "g1 ~ ~ ~ d2 ~ g2 ~ ~ ~ g1 ~ b1 ~ d2 ~",
+  "a1 ~ ~ a2 ~ e2 ~ ~ ~ a1 ~ ~ g2 ~ e2 ~",
+  "g1 ~ ~ d2 ~ g2 ~ ~ b1 ~ ~ ~ d2 ~ g1 ~",
+}
+local replies = {
+  "~ ~ a4 ~ ~ e4 ~ ~", "~ g4 ~ ~ d4 ~ ~ ~",
+  "~ ~ e4 ~ g4 ~ a4 ~", "b4 ~ a4 ~ ~ g4 ~ ~",
+}
+local harmony, lows, kicks, claps, hats, ghosts, answers = {}, {}, {}, {}, {}, {}, {}
+for bar = 0, 31 do
+  local row = math.floor(bar / 2) % 4 + 1
+  local break_down = bar >= 16 and bar < 20
+  local ending = bar >= 28
+  local h = chords[row]
+  local cell = "~ " .. h .. " ~ ~ ~ ~ " .. h .. " ~"
+  if break_down or ending then cell = h .. " ~ ~ ~" end
+  table.insert(harmony, at(bars(bar), pattern(cell) >> hold(beats(0.65))
+    >> velocity(0.7) >> pan(-0.2)))
+  if not break_down and not ending then
+    table.insert(lows, at(bars(bar), pattern(basslines[row])
+      >> hold(beats(0.36)) >> velocity(0.85) >> bass.tone(650 + (bar % 4) * 110)))
+    local kick_cell = "x ~ ~ ~ ~ ~ x ~ ~ ~ ~ x ~ ~ ~ ~"
+    if bar % 4 == 3 then kick_cell = "x ~ ~ ~ ~ x ~ ~ ~ ~ x ~ ~ ~ x ~" end
+    table.insert(kicks, at(bars(bar), pattern(kick_cell) >> velocity(0.82)))
+    table.insert(claps, at(bars(bar), pattern("~ x ~ x") >> velocity(0.75)))
+    table.insert(hats, at(bars(bar), pattern("~ x ~ x ~ x ~ x")
+      >> velocity("0.6 0.42 0.54 0.4") >> pan(-0.33)))
+    table.insert(ghosts, at(bars(bar), pattern("~ x ~ ~ ~ x ~ x")
+      >> shift(bars(1 / 24)) >> velocity(0.28) >> pan(0.4)))
+  end
+  if bar >= 4 and bar < 30 and bar % 2 == 1 then
+    table.insert(answers, at(bars(bar), pattern(replies[row])
+      >> velocity(0.7) >> pan(0.3)))
+  end
+end
+play(keys, timeline(harmony) >> to(room, 0.48) >> to(echo, 0.35))
+play(bass, timeline(lows))
+play(kick, timeline(kicks))
+play(clap, timeline(claps) >> to(room, 0.16))
+play(hat, timeline(hats))
+play(hat, timeline(ghosts))
+play(marimba, timeline(answers) >> to(room, 0.5) >> to(echo, 0.32))
+master(highpass(34) >> lowpass(11000, 0.65) >> limiter(ms(4), ms(150)) >> mul(0.94))

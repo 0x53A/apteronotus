@@ -200,6 +200,7 @@ enum Processor {
     Sine,
     Cosine,
     Saw,
+    Triangle,
     Pulse,
     Pluck {
         frequency: Source,
@@ -362,6 +363,7 @@ struct LuaVoicing(VoicingShape);
 #[derive(Clone, Debug)]
 struct LuaPlacement {
     start: Frac,
+    capture_cycles: Frac,
     pattern: LuaPattern,
 }
 
@@ -719,6 +721,7 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "soft_saw", state.clone(), soft_saw)?;
     set_callback(ctx, "__saw_at", state.clone(), saw_at)?;
     set_callback(ctx, "pulse", state.clone(), pulse)?;
+    set_callback(ctx, "triangle", state.clone(), triangle)?;
     set_callback(ctx, "noise", state.clone(), noise)?;
     set_callback(ctx, "pink", state.clone(), pink)?;
     set_callback(ctx, "impulse", state.clone(), impulse)?;
@@ -749,6 +752,7 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "feedback", state.clone(), feedback_delay)?;
     set_callback(ctx, "slew", state.clone(), slew)?;
     set_callback(ctx, "gate_env", state.clone(), gate_env)?;
+    set_callback(ctx, "string_resonator", state.clone(), string_resonator)?;
     set_callback(ctx, "add", state.clone(), add)?;
     set_callback(ctx, "sub", state.clone(), sub)?;
     set_callback(ctx, "mul", state.clone(), mul)?;
@@ -756,6 +760,8 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "clamp", state.clone(), clamp)?;
     set_callback(ctx, "neg", state.clone(), neg)?;
     set_callback(ctx, "mix", state.clone(), mix)?;
+    set_callback(ctx, "flue_pipe", state.clone(), flue_pipe)?;
+    set_callback(ctx, "harmonics", state.clone(), harmonics)?;
     set_callback(ctx, "adsr", state.clone(), adsr)?;
     set_callback(ctx, "step", state.clone(), step)?;
     set_callback(ctx, "__step_at", state.clone(), step_at)?;
@@ -2214,7 +2220,25 @@ fn at<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if !(2..=3).contains(&stack.len()) {
+        return Err(binding_error(
+            ctx,
+            "at expects a start, a pattern, and an optional typed capture duration",
+        ));
+    }
     let start = read_placement_time(ctx, state, stack.get(0))?;
+    let capture_cycles = if stack.len() == 3 {
+        read_capture_duration(ctx, state, start, stack.get(2))?
+    } else {
+        Frac::ONE
+    };
+    let limit = state.borrow().limits.max_timeline_capture_cycles.max(0);
+    if capture_cycles <= Frac::ZERO || capture_cycles > Frac::int(limit) {
+        return Err(binding_error(
+            ctx,
+            format!("at capture duration must be positive and no longer than {limit} cycles"),
+        ));
+    }
     let pattern = read_lua_pattern(ctx, stack.get(1))
         .map_err(|_| {
             binding_error(
@@ -2225,7 +2249,14 @@ fn at<'gc>(
         .clone();
     stack.replace(
         ctx,
-        UserData::new_static(&ctx, LuaPlacement { start, pattern }),
+        UserData::new_static(
+            &ctx,
+            LuaPlacement {
+                start,
+                capture_cycles,
+                pattern,
+            },
+        ),
     );
     Ok(CallbackReturn::Return)
 }
@@ -2308,7 +2339,8 @@ fn timeline<'gc>(
                 ),
             ));
         }
-        let estimated = density.ceil() as usize;
+        // Partial final cycles can contain a full cycle's onset density.
+        let estimated = (density * placement.capture_cycles.to_f64().ceil()).ceil() as usize;
         if events.len().saturating_add(estimated) > state.borrow().limits.pattern_nodes {
             return Err(binding_error(
                 ctx,
@@ -2319,14 +2351,26 @@ fn timeline<'gc>(
             ));
         }
 
-        // A placement captures one cycle of cyclic material. Query order is
+        // A placement captures its local window (one cycle by default). Query order is
         // the stable structural order and therefore also defines captured
         // event ordinals; it is not a musical chord-order contract.
-        for event in placement.pattern.pattern.onsets(Span::cycle(0)) {
+        for event in placement
+            .pattern
+            .pattern
+            .onsets(Span::new(Frac::ZERO, placement.capture_cycles))
+        {
+            if events.len() >= state.borrow().limits.pattern_nodes {
+                return Err(binding_error(
+                    ctx,
+                    "timeline capture exceeds the pattern node limit",
+                ));
+            }
             let whole = event
                 .whole
                 .expect("onsets cannot contain continuous signal events");
-            let begin = whole.begin + placement.start;
+            let begin = whole.begin.checked_add(placement.start).ok_or_else(|| {
+                binding_error(ctx, "timeline onset exceeds the cycle-time representation")
+            })?;
             let end = if let Some(seconds) = placement.pattern.hold_seconds {
                 let state = state.borrow();
                 let begin_seconds = state.program.tempo.cycle_to_seconds(begin);
@@ -2336,7 +2380,12 @@ fn timeline<'gc>(
                     .seconds_to_cycle(begin_seconds + seconds)
                     .map_err(|error| binding_error(ctx, error.to_string()))?
             } else {
-                whole.end + placement.start
+                whole.end.checked_add(placement.start).ok_or_else(|| {
+                    binding_error(
+                        ctx,
+                        "timeline release exceeds the cycle-time representation",
+                    )
+                })?
             };
             let shifted = Span::new(begin, end);
             let ordinal = u64::try_from(events.len())
@@ -2412,7 +2461,7 @@ fn pattern<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    parse_pattern(ctx, state, &mut stack, 0, 0)
+    parse_pattern(ctx, state, &mut stack, 0, 0, None)
 }
 
 fn read_placement_time<'gc>(
@@ -2454,13 +2503,57 @@ fn read_placement_time<'gc>(
     }
 }
 
+fn read_capture_duration<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    start: Frac,
+    value: Value<'gc>,
+) -> Result<Frac, Error<'gc>> {
+    let expected = "at capture duration expects bars(...), beats(...), secs(...), or ms(...)";
+    let Value::UserData(data) = value else {
+        return Err(binding_error(ctx, expected));
+    };
+    let duration = data
+        .downcast_static::<LuaDuration>()
+        .map_err(|_| binding_error(ctx, expected))?;
+    if !duration.value.is_finite() || duration.value <= 0.0 {
+        return Err(binding_error(
+            ctx,
+            "at capture duration must be positive and finite",
+        ));
+    }
+    if let Some(cycles) = cycle_hold_duration(*duration) {
+        return Ok(cycles);
+    }
+    let state = state.borrow();
+    if !state.tempo_declared {
+        return Err(binding_error(
+            ctx,
+            "at capture in seconds requires tempo(...) earlier in the evaluation",
+        ));
+    }
+    let start_seconds = state.program.tempo.cycle_to_seconds(start);
+    let end = state
+        .program
+        .tempo
+        .seconds_to_cycle(start_seconds + duration.value)
+        .map_err(|error| binding_error(ctx, error.to_string()))?;
+    end.checked_sub(start).ok_or_else(|| {
+        binding_error(
+            ctx,
+            "at capture duration exceeds the cycle-time representation",
+        )
+    })
+}
+
 fn pattern_at<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
     let binding = read_call_site(ctx, stack.get(0))?;
-    parse_pattern(ctx, state, &mut stack, 1, binding)
+    let base = read_document_base(ctx, stack.get(1))?;
+    parse_pattern(ctx, state, &mut stack, 2, binding, base)
 }
 
 fn parse_pattern<'gc>(
@@ -2469,10 +2562,11 @@ fn parse_pattern<'gc>(
     stack: &mut piccolo::Stack<'gc, '_>,
     source_index: usize,
     binding: u64,
+    base: Option<usize>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
     let source = read_string(ctx, stack.get(source_index), "pattern source")?;
-    let pattern =
-        mini::parse_at(&source, binding).map_err(|error| binding_error(ctx, error.to_string()))?;
+    let pattern = mini::parse_in(&source, binding, base)
+        .map_err(|error| binding_error(ctx, error.to_string()))?;
     state.borrow_mut().spend_pattern(ctx, &pattern)?;
     stack.replace(
         ctx,
@@ -2495,7 +2589,7 @@ fn play<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    play_bound(ctx, state, &mut stack, 0, 0)
+    play_bound(ctx, state, &mut stack, 0, 0, None)
 }
 
 fn play_at<'gc>(
@@ -2504,7 +2598,8 @@ fn play_at<'gc>(
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
     let binding = read_call_site(ctx, stack.get(0))?;
-    play_bound(ctx, state, &mut stack, 1, binding)
+    let base = read_document_base(ctx, stack.get(1))?;
+    play_bound(ctx, state, &mut stack, 2, binding, base)
 }
 
 fn play_bound<'gc>(
@@ -2513,6 +2608,7 @@ fn play_bound<'gc>(
     stack: &mut piccolo::Stack<'gc, '_>,
     argument_offset: usize,
     binding: u64,
+    base: Option<usize>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
     enum PlayTarget {
         Voice(usize),
@@ -2540,7 +2636,7 @@ fn play_bound<'gc>(
                 .to_str()
                 .map_err(|_| binding_error(ctx, "pattern source must be UTF-8"))?;
             (
-                mini::parse_at(source, binding)
+                mini::parse_in(source, binding, base)
                     .map_err(|error| binding_error(ctx, error.to_string()))?,
                 EventRouting::new(),
                 Vec::new(),
@@ -3045,7 +3141,7 @@ fn numeric_pattern_operand<'gc>(
                 .to_str()
                 .map_err(|_| binding_error(ctx, "numeric pattern source must be UTF-8"))?;
             Ok(LuaPattern {
-                pattern: mini::parse(source)
+                pattern: mini::parse_in(source, 0, None)
                     .map_err(|error| binding_error(ctx, error.to_string()))?,
                 controls: Vec::new(),
                 routing: EventRouting::new(),
@@ -5128,6 +5224,27 @@ fn dc<'gc>(
     Ok(CallbackReturn::Return)
 }
 
+fn triangle<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    let generation = current_generation(ctx, state)?;
+    if stack.is_empty() {
+        stack.replace(ctx, lua_processor(ctx, generation, Processor::Triangle)?);
+        return Ok(CallbackReturn::Return);
+    }
+    if stack.len() != 1 {
+        return Err(binding_error(ctx, "triangle expects one frequency input"));
+    }
+    let hz = read_mono(ctx, stack.get(0), generation)?;
+    let mut state = state.borrow_mut();
+    state.spend_node(ctx)?;
+    let source = state.active_mut(ctx)?.graph.triangle(hz);
+    stack.replace(ctx, lua_source(ctx, generation, [source])?);
+    Ok(CallbackReturn::Return)
+}
+
 fn pulse<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
@@ -5144,6 +5261,125 @@ fn pulse<'gc>(
     state.spend_node(ctx)?;
     let source = state.active_mut(ctx)?.graph.pulse(hz, duty);
     stack.replace(ctx, lua_source(ctx, generation, [source])?);
+    Ok(CallbackReturn::Return)
+}
+
+fn flue_pipe<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.len() != 4 {
+        return Err(binding_error(
+            ctx,
+            "flue_pipe expects hz, pressure, turbulence, {min_hz}",
+        ));
+    }
+    let generation = current_generation(ctx, state)?;
+    let hz = read_mono(ctx, stack.get(0), generation)?;
+    let pressure = read_mono(ctx, stack.get(1), generation)?;
+    let turbulence = read_mono(ctx, stack.get(2), generation)?;
+    let Value::Table(spec) = stack.get(3) else {
+        return Err(binding_error(ctx, "flue_pipe expects a bounds table"));
+    };
+    let min_hz = read_number(ctx, spec.get_value(ctx, "min_hz"), "flue minimum Hz")?;
+    if !min_hz.is_finite() || !(20.0..=1000.0).contains(&min_hz) {
+        return Err(binding_error(
+            ctx,
+            "flue_pipe min_hz must be within 20..1000",
+        ));
+    }
+    let mut state = state.borrow_mut();
+    state.spend_node(ctx)?;
+    let output = state
+        .active_mut(ctx)?
+        .graph
+        .flue_pipe(hz, pressure, turbulence, min_hz);
+    stack.replace(ctx, lua_source(ctx, generation, [output])?);
+    Ok(CallbackReturn::Return)
+}
+
+fn harmonics<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.len() != 2 {
+        return Err(binding_error(ctx, "harmonics expects hz, { amplitudes }"));
+    }
+    let generation = current_generation(ctx, state)?;
+    let hz = read_mono(ctx, stack.get(0), generation)?;
+    let Value::Table(table) = stack.get(1) else {
+        return Err(binding_error(ctx, "harmonics expects an amplitude table"));
+    };
+    let length = table.length();
+    if !(1..=32).contains(&length) {
+        return Err(binding_error(ctx, "harmonics expects 1..32 amplitudes"));
+    }
+    let mut amplitudes = Vec::with_capacity(length as usize);
+    for index in 1..=length {
+        amplitudes.push(read_number(
+            ctx,
+            table.get_value(ctx, index),
+            "harmonic amplitude",
+        )?);
+    }
+    if amplitudes.iter().any(|x| !x.is_finite())
+        || amplitudes.iter().map(|x| x.abs()).sum::<f64>() > 1.0 + 1e-12
+    {
+        return Err(binding_error(
+            ctx,
+            "harmonics amplitudes must be finite with absolute sum <= 1",
+        ));
+    }
+    let mut state = state.borrow_mut();
+    state.spend_node(ctx)?;
+    let output = state.active_mut(ctx)?.graph.harmonics(hz, amplitudes);
+    stack.replace(ctx, lua_source(ctx, generation, [output])?);
+    Ok(CallbackReturn::Return)
+}
+
+fn string_resonator<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.len() != 4 {
+        return Err(binding_error(
+            ctx,
+            "string_resonator expects excitation, hz, mute, { min_hz, decay }",
+        ));
+    }
+    let generation = current_generation(ctx, state)?;
+    let audio = read_mono(ctx, stack.get(0), generation)?;
+    let hz = read_mono(ctx, stack.get(1), generation)?;
+    let mute = read_mono(ctx, stack.get(2), generation)?;
+    let Value::Table(spec) = stack.get(3) else {
+        return Err(binding_error(
+            ctx,
+            "string_resonator expects a bounds table",
+        ));
+    };
+    let min_hz = read_number(ctx, spec.get_value(ctx, "min_hz"), "string minimum Hz")?;
+    let decay = read_seconds(ctx, spec.get_value(ctx, "decay"), "string nominal decay")?;
+    if !min_hz.is_finite()
+        || !(1.0..=20_000.0).contains(&min_hz)
+        || !decay.is_finite()
+        || decay <= 0.0
+        || decay > 120.0
+    {
+        return Err(binding_error(
+            ctx,
+            "string_resonator requires min_hz in 1..20000 and decay in (0, 120] seconds",
+        ));
+    }
+    let mut state = state.borrow_mut();
+    state.spend_node(ctx)?;
+    let output = state
+        .active_mut(ctx)?
+        .graph
+        .string_resonator(audio, hz, mute, min_hz, decay);
+    stack.replace(ctx, lua_source(ctx, generation, [output])?);
     Ok(CallbackReturn::Return)
 }
 
@@ -7008,6 +7244,7 @@ fn processor_inputs(processor: &Processor) -> usize {
         Processor::Sine
         | Processor::Cosine
         | Processor::Saw
+        | Processor::Triangle
         | Processor::Pluck { .. }
         | Processor::Shape { .. }
         | Processor::DcBlock
@@ -7090,6 +7327,10 @@ fn apply_processor<'gc>(
         Processor::Saw => {
             state.spend_node(ctx)?;
             vec![state.active_mut(ctx)?.graph.saw(one(inputs))]
+        }
+        Processor::Triangle => {
+            state.spend_node(ctx)?;
+            vec![state.active_mut(ctx)?.graph.triangle(one(inputs))]
         }
         Processor::Pulse => {
             state.spend_node(ctx)?;
@@ -8100,6 +8341,19 @@ fn read_call_site<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> Result<u64, Erro
         ));
     }
     Ok(number as u64)
+}
+
+fn read_document_base<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+) -> Result<Option<usize>, Error<'gc>> {
+    let base = read_call_site(ctx, value)?;
+    if base == 0 {
+        return Ok(None);
+    }
+    usize::try_from(base)
+        .map(Some)
+        .map_err(|_| binding_error(ctx, "document byte offset does not fit this host"))
 }
 
 fn call_site_span(call_site: u64, name: &str) -> SrcSpan {

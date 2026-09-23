@@ -7,6 +7,21 @@ an invitation for the runtime to infer more behavior from it.
 
 ## Settled semantics
 
+### Source attribution
+
+Mini-notation events created by direct `pattern(...)` and `play(...)` calls
+carry document-absolute byte spans when the lexical source pass can locate an
+unescaped literal exactly. Provenance remains derived from string-local spans,
+so moving a call in the document does not perturb event or voice randomness.
+Escaped quoted strings, CR-normalised long strings and nonliteral arguments
+carry no newly invented document coordinate.
+
+One attribution gap remains deliberate: `numeric_pattern_operand` can coerce an
+inline string used in pattern arithmetic without a call-site argument. Those
+events carry no source span until arithmetic coercion receives its own `_at`
+entry path. Timeline placement is not a gap; it preserves spans already carried
+by its `LuaPattern` values.
+
 ### Evaluation and ownership
 
 Each explicit evaluation gets a fresh Piccolo VM and a fresh set of arena-scoped

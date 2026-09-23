@@ -1,0 +1,101 @@
+-- paper-orbits.eod — five steps meet seven on the same landing
+-- A finite keyboard canon: 102 BPM, forty-eight cycles, then a pedal tail.
+-- Five quarter-note steps on the left cross seven on the right. Each line
+-- returns simply; their relationship takes thirty-five beats to come home.
+-- Long at() captures keep this score readable without a loop copying bars.
+-- Render: cargo run -p apteronotus-render -- --song paper-orbits --cycles 48 --tail 7
+
+tempo(102)
+local room = send {
+  graph = reverb(36, secs(3.4), 0.69) >> highpass(180) >> lowpass(3900),
+  level = 0.27,
+}
+local echo = send {
+  graph = delay(beats(1.5)) >> lowpass(2400) >> feedback(0.25),
+  level = 0.14,
+}
+local keys_level = control { name = "keys", range = {0, 1.5}, default = 1 }
+local air_level = control { name = "air", range = {0, 1.5}, default = 1 }
+local pulse_level = control { name = "pulse", range = {0, 1.5}, default = 1 }
+local piano = voice {
+  params = { tone = {800, 5000, 2400, "hz"} },
+  graph = function(n)
+    local hammer = (noise() >> lowpass(n.tone, 0.6)) * decay(ms(5))
+    local string = hammer >> pluck(n.hz, 0.12, 0.28)
+    local body = sine(n.hz) * decay(ms(730))
+      + sine(n.hz * 2.002) * decay(ms(360)) * 0.2
+      + sine(n.hz * 4.008) * decay(ms(100)) * 0.045
+    return (string * 2.8 + body * 0.6) >> lowpass(n.tone, 0.65)
+      >> mul(adsr(ms(3), ms(170), 0.62, ms(480)) * n.velocity * 0.23 * keys_level)
+      >> pan(n.pan)
+  end,
+}
+local felt = voice {
+  graph = function(n)
+    return (sine(n.hz) + sine(n.hz * 2) * 0.16)
+      * adsr(ms(15), ms(320), 0.4, ms(330)) * n.velocity * 0.22 >> pan(0)
+  end,
+}
+local air = voice {
+  graph = function(n)
+    local body = soft_saw(n.hz * 0.999) * 0.3 + sine(n.hz) * 0.6
+      + soft_saw(n.hz * 1.001) * 0.2
+    return body >> lowpass(980, 0.6)
+      >> mul(adsr(secs(1.5), secs(1), 0.65, secs(2.5)) * n.velocity * 0.10 * air_level)
+      >> pan(n.pan)
+  end,
+}
+local brush = voice {
+  graph = function(n)
+    return noise() >> bandpass(3600, 0.7)
+      >> mul((1 - decay(ms(12))) * decay(ms(110)) * n.velocity * 0.1 * pulse_level)
+      >> pan(n.pan)
+  end,
+}
+local pulse = voice {
+  graph = function(n)
+    return sine(62 + decay(ms(30)) * 35) * decay(ms(140))
+      * (1 - decay(ms(5))) * n.velocity * 0.24 * pulse_level >> pan(0)
+  end,
+}
+
+local left = pattern("c4 e4 g4 b4 d4") >> slow(5 / 4)
+  >> hold(beats(0.62)) >> velocity(scale(0.55, 0.78, sine(1 / 11)))
+  >> piano.tone(scale(1700, 2700, sine(1 / 13))) >> pan(-0.3)
+local right = pattern("g4 a4 b4 e4 d4 c4 d4") >> slow(7 / 4)
+  >> hold(beats(0.55)) >> velocity(scale(0.42, 0.65, sine(1 / 17)))
+  >> piano.tone(scale(1800, 2900, sine(1 / 19))) >> pan(0.3)
+local harmony = pattern("<[e3,g3,b3,d4] [c3,e3,g3,b3] [d3,f#3,a3,e4] [b2,d3,g3,a3]>")
+  >> slow(4) >> hold(bars(3.6)) >> velocity(0.62) >> pan(0.08)
+local roots = pattern("<c2 a1 d2 g1>") >> slow(4)
+  >> hold(beats(2.5)) >> velocity(0.72)
+
+-- The right hand enters eight bars late, steps away for four, then comes back
+-- with its own seven-step clock reset. The coda returns the first five-note
+-- figure at half speed and lets the final ninth remain open.
+play(piano, timeline {
+  at(bars(0), left, bars(36)),
+  at(bars(36), left >> slow(2) >> velocity(0.48), bars(8)),
+  at(bars(44), pattern("c4 ~ e4 ~ g4 ~ d5 ~") >> slow(4)
+    >> hold(beats(1.2)) >> velocity(0.38) >> pan(-0.12), bars(4)),
+} >> to(room, 0.56) >> to(echo, 0.27))
+play(piano, timeline {
+  at(bars(8), right, bars(12)),
+  at(bars(24), right, bars(16)),
+  at(bars(41), pattern("b4 ~ g4 ~ e4 ~ ~ ~") >> slow(3)
+    >> hold(beats(1)) >> velocity(0.36) >> pan(0.22), bars(3)),
+} >> to(room, 0.52) >> to(echo, 0.25))
+play(air, timeline {
+  at(bars(4), harmony, bars(36)),
+  at(bars(40), pattern("[c3,e3,g3,b3]") >> hold(bars(4)) >> velocity(0.42)),
+} >> to(room, 0.7))
+play(felt, timeline { at(bars(4), roots, bars(36)) })
+play(brush, timeline {
+  at(bars(12), pattern("~ x ~ x") >> velocity(0.45) >> pan("-0.35 0.35"), bars(8)),
+  at(bars(24), pattern("~ x ~ x") >> velocity(0.4) >> pan("-0.35 0.35"), bars(12)),
+} >> to(room, 0.28))
+play(pulse, timeline {
+  at(bars(12), pattern("x ~ x ~") >> velocity(0.6), bars(8)),
+  at(bars(24), pattern("x ~ x ~") >> velocity(0.55), bars(12)),
+})
+master(highpass(30) >> lowpass(8200, 0.65) >> limiter(ms(6), ms(220)) >> mul(0.96))

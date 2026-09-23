@@ -19,6 +19,9 @@ use apteronotus_songs::{SONGS, Song};
 /// Why this song does not reach audio on the current backend, or `None` if it
 /// does. Exercises the same three steps the player takes at a Run.
 fn refusal(song: &Song) -> Option<String> {
+    if let Err(error) = apteronotus_lua::check_syntax(song.source) {
+        return Some(format!("syntax check: {error}"));
+    }
     let program = match evaluate(song.source) {
         Ok(program) => program,
         Err(error) => return Some(format!("evaluation: {error}")),

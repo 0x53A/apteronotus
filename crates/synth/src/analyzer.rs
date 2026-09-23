@@ -233,15 +233,21 @@ impl AudioUnit for OnsetDetectorUnit {
 pub(crate) struct TransportSequenceUnit {
     period_seconds: f64,
     slots: Vec<crate::template::TransportSlot>,
+    transport_origin_seconds: f64,
     sample_rate: f64,
     sample_index: u64,
 }
 
 impl TransportSequenceUnit {
-    pub(crate) fn new(period_seconds: f64, slots: Vec<crate::template::TransportSlot>) -> Self {
+    pub(crate) fn new(
+        period_seconds: f64,
+        slots: Vec<crate::template::TransportSlot>,
+        transport_origin_seconds: f64,
+    ) -> Self {
         Self {
             period_seconds,
             slots,
+            transport_origin_seconds,
             sample_rate: 44_100.0,
             sample_index: 0,
         }
@@ -249,7 +255,7 @@ impl TransportSequenceUnit {
 
     #[inline]
     fn sample(&mut self) -> f32 {
-        let elapsed = self.sample_index as f64 / self.sample_rate;
+        let elapsed = self.transport_origin_seconds + self.sample_index as f64 / self.sample_rate;
         self.sample_index = self.sample_index.wrapping_add(1);
         let phase = elapsed.rem_euclid(self.period_seconds);
         let index = self

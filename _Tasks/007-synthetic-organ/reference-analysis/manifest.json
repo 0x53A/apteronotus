@@ -1,0 +1,181 @@
+{
+  "sources": [
+    {
+      "id": "light",
+      "title": "Light of the Imperium",
+      "url": "https://www.youtube.com/watch?v=Tiw1sKOJz2w",
+      "path": "target/organ-reference-analysis/Tiw1sKOJz2w.wav",
+      "regions": [
+        {
+          "id": "L1",
+          "start": 10,
+          "end": 24,
+          "note": "Exposed harmonic passage; candidate organ/rank texture, source identity unconfirmed"
+        },
+        {
+          "id": "L2",
+          "start": 28,
+          "end": 40,
+          "note": "Layered sustained harmonic passage before the main rhythmic entry"
+        },
+        {
+          "id": "L3",
+          "start": 54,
+          "end": 62,
+          "note": "Dense rhythmic mix: compare production texture, not an isolated organ"
+        },
+        {
+          "id": "L4",
+          "start": 84,
+          "end": 98,
+          "note": "Reduced-texture passage before the next full entry"
+        }
+      ]
+    },
+    {
+      "id": "empires",
+      "title": "Empires Will Fall",
+      "url": "https://www.youtube.com/watch?v=yzQ7IBpQd0Q",
+      "path": "target/organ-reference-analysis/yzQ7IBpQd0Q.wav",
+      "regions": [
+        {
+          "id": "E1",
+          "start": 18,
+          "end": 28,
+          "note": "Sustained upper harmonic ladder over a rhythmic low part; candidate organ texture"
+        },
+        {
+          "id": "E2",
+          "start": 28,
+          "end": 40,
+          "note": "Bright layered passage; multiple pitched sources overlap"
+        },
+        {
+          "id": "E3",
+          "start": 106,
+          "end": 118,
+          "note": "Exposed changing harmonic ladder; useful candidate for inspecting upper partials"
+        },
+        {
+          "id": "chord",
+          "start": 107.9,
+          "end": 108.7,
+          "note": "Pitch-probe window: peaks near 208, 247 and 311 Hz; mixed sources, not an isolated stop"
+        }
+      ]
+    },
+    {
+      "id": "iron",
+      "title": "Our organ \u2014 Iron Choir",
+      "path": "target/auditions/iron-choir-refined.wav",
+      "regions": [
+        {
+          "id": "principal",
+          "start": 0,
+          "end": 3,
+          "note": "Known source: dry additive principal, D3"
+        },
+        {
+          "id": "reed",
+          "start": 12,
+          "end": 15,
+          "note": "Known source: dry additive reed, D3"
+        },
+        {
+          "id": "registration",
+          "start": 16,
+          "end": 24,
+          "note": "Known source: full additive registration, pedal and shared cathedral"
+        },
+        {
+          "id": "rhythm",
+          "start": 24,
+          "end": 32,
+          "note": "Known source: rhythmic organ keying with shared cathedral"
+        }
+      ]
+    },
+    {
+      "id": "lab",
+      "title": "Our organ \u2014 Pipes Under Pressure",
+      "path": "target/auditions/pipes-under-pressure.wav",
+      "regions": [
+        {
+          "id": "classic",
+          "start": 2,
+          "end": 4,
+          "note": "Known source: classic additive flute, A3, dry"
+        },
+        {
+          "id": "speech",
+          "start": 8,
+          "end": 10,
+          "note": "Known source: refined additive flute, A3, dry"
+        },
+        {
+          "id": "physical",
+          "start": 14,
+          "end": 16,
+          "note": "Known source: pressure-driven physical flue, nominal A3, dry"
+        }
+      ]
+    },
+    {
+      "id": "probe",
+      "title": "Our organ \u2014 approximate pitch-matched chord",
+      "path": "target/organ-reference-analysis/matched-probe.wav",
+      "regions": [
+        {
+          "id": "dry",
+          "start": 1,
+          "end": 1.8,
+          "note": "Same registration as Iron Choir; G#3/B3/D#4, no pedal, dry"
+        },
+        {
+          "id": "hall",
+          "start": 5,
+          "end": 5.8,
+          "note": "Same approximate pitch probe and registration, shared Iron Choir hall"
+        }
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "id": "reference-vs-registration",
+      "title": "Reference passages versus our complete organ registration",
+      "regions": [
+        "light-L1",
+        "light-L3",
+        "empires-E3",
+        "iron-registration"
+      ]
+    },
+    {
+      "id": "dry-pipe-comparison",
+      "title": "Our dry pipes: harmonic distribution and physical-flue bandwidth",
+      "regions": [
+        "iron-principal",
+        "iron-reed",
+        "lab-classic",
+        "lab-speech",
+        "lab-physical"
+      ]
+    },
+    {
+      "id": "pitch-matched-comparison",
+      "title": "Empires Will Fall at 1:48 versus our approximate pitch-matched chord",
+      "regions": [
+        "empires-chord",
+        "probe-dry",
+        "probe-hall"
+      ]
+    }
+  ],
+  "findings": [
+    "Our current registration is substantially darker and narrower than the selected reference passages. Useful candidate organ/keyboard windows are Light of the Imperium 0:28\u20130:40 and Empires Will Fall 1:46\u20131:58; attribution from spectra alone remains uncertain.",
+    "The approximate pitch-matched probe uses G\u266f3/B3/D\u266f4 and the existing seven-rank registration. The reference window has 16.36% of its power at 2\u201312 kHz, versus 1.00% for our hall probe. Centroids are 1212 Hz and 387 Hz. These are mixed-reference versus organ measurements, not isolated-stop error scores.",
+    "The hall probe has a side/mid energy ratio of \u221221.5 dB, versus \u22123.4 dB in the reference window. The original Iron Choir registration with pedal is narrower still (\u221230.5 dB). Current spatial treatment contributes little width.",
+    "The next useful experiment is brighter reed/mixture voicing, deliberate rank placement and stronger spatial treatment, followed by controlled drive/rhythmic processing. The physical flue is a useful foundation and wind-response experiment; these recordings do not establish a need for a more complex physical solver."
+  ]
+}

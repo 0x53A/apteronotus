@@ -31,15 +31,19 @@ roughly a kilohertz.
   transactional generation activation, external-trigger recording, native
   default-device input through a bounded capture ring, a smoothed `MasterGain`
   at the device edge, and cpal output over `fundsp::Sequencer::backend()`.
-  Browser input attachment, native input selection, MIDI binding and persistent
-  replacement remain.
+  Native same-clock/same-layout persistent replacement uses a bounded
+  two-stream crossfade. Browser replacement, retained-input pre-roll, native
+  input selection and MIDI binding remain.
 - `crates/lua` — a fresh, sandboxed Piccolo VM per evaluation, producing only
   owned pattern/graph/program data. The same crate builds natively and for
   `wasm32-unknown-unknown`. Typed graph operators, voices, persistent patches,
   controls, buses/sends, structural pattern transforms and source-site
   attribution for notation/random transforms are connected. Tempo maps and
   finite timeline placement are owned `Program` data; graph-expression spans
-  and the wider score API remain.
+  and the wider score API remain. Direct mini-notation literals now carry
+  document-absolute editor spans without rebasing their local provenance;
+  escaped/CR-normalised literals and inline arithmetic coercion stay honestly
+  unattributed rather than pointing at plausible wrong bytes.
 - `crates/songs` — the specification corpus from `songs/`, embedded as static
   strings for other applications to consume. No dependencies, no evaluator, no
   audio; the crate is a delivery mechanism, and it exists because
@@ -52,22 +56,60 @@ roughly a kilohertz.
   the whole window is scheduled before the first block, and `Sequencer` is
   driven directly instead of split frontend/backend. Renders are reproducible
   sample for sample, which is what lets a render be measured against a
-  reference recording. `--stems` emits the routed bus layout rather than the
-  main channels, because a per-bus comparison is a real error signal where
-  mix-against-mix confounds every part at once.
+  reference recording. `--stems` emits the post-processor routed bus layout;
+  `--raw-stems` emits the sequencer lanes before returns and master processing.
+  A per-bus comparison is a real error signal where mix-against-mix confounds
+  every part at once. `--list-tracks`,
+  `--solo-track` and `--mute-track` select scheduler views only after
+  evaluation, so isolation never moves provenance-bearing source coordinates;
+  persistent runs and the production processing layout remain in place. A
+  stem render prints per-lane RMS, peak and DC measurements, labeling buses by
+  declaration ordinal because lexical Lua names do not survive evaluation.
+  `--track-summary` explicitly performs one isolated production-path render per
+  selected track and reports scheduler-native voice/onset counts and minimum
+  distinct-onset interval beside RMS, peak, Welch spectral centroid and DC; it
+  is opt-in because that truthful audio measurement costs one render per track.
+  `--spectrum` reuses the same deterministic Welch pass for mix centroid and
+  fixed 0–200, 200–2000, 2000–8000 and 8000–Nyquist power levels. `--json`
+  emits a versioned complete analysis document on stdout and implies the
+  deliberately expensive per-track isolation pass; diagnostics remain on
+  stderr and the WAV is still the measured artifact. Its per-track entries
+  retain every tempo-projected interval between distinct onset groups, not an
+  audio-derived transient guess. `--cycles a..b` and `--seconds a..b` select
+  an exact nonzero analysis window; the renderer still advances from transport
+  zero and discards the prefix, so carried voices and persistent DSP retain
+  the history they would have had in a full render. `--dynamics` measures
+  stereo difference/sum energy and the p95−p5 spread of a 20 ms RMS envelope;
+  the JSON document carries the same scalars with the declared −120 dBFS
+  silence floor. `--third-octaves` uses the same Welch pass for 30 contiguous
+  base-2 bands from 25 Hz through 20 kHz and prints both absolute dBFS and the
+  curve relative to its 1 kHz band; JSON retains the typed curve.
+  `--reference <wav>` accepts float32 or integer PCM WAV through 32 bits,
+  compares both curves after
+  independently anchoring them at 1 kHz, collapses the result to six region
+  means, and reports side/mid and envelope-spread deltas in prose and JSON.
+  `--stability <seconds>` reports the min/max/spread of whole-layout RMS over
+  fixed windows of scheduled music; response-tail samples are deliberately
+  excluded, while `--json` always includes a five-second stability summary.
 - `crates/app` — the first native and wasm user paths: a lexically highlighted
   Lua editor, explicit Run/Stop commands, activation diagnostics, persistent
   patch/bus execution, a permanent master fader and live control faders over
   the production evaluator, scheduler and cpal output. It is also where the
-  corpus is pinned against the backend: `src/corpus.rs` asserts that all seven
-  songs still evaluate, lower and open a stereo output. Native uses a
+  corpus is pinned against the backend: `src/corpus.rs` asserts that every
+  embedded song still evaluates, lowers and opens a stereo output. Native uses a
   control-thread player; the custom
   web component evaluates explicitly and advances lookahead on the browser
   event loop, with wasm-pack packaging and GitHub Pages deployment.
   Compatible persistent edits retain the live arena and control values at the
-  scheduling frontier. Incompatible persistent/layout edits use an explicit
-  transactional hard reset until replacement crossfade exists; file handling
-  and parser/type diagnostics while typing also remain.
+  scheduling frontier. Native incompatible persistent edits crossfade at that
+  same transport when tempo and layout are unchanged; layout/tempo changes and
+  browser replacement retain the transactional cycle-zero reset. The shared song
+  library, native source Open/Save, browser import/download and debounced
+  compile-only syntax diagnostics are connected. Graph/type diagnostics while
+  typing, recent files and autosave remain. Sounding mini tokens
+  are derived from the latency-adjusted audible revision—not the last accepted
+  one—and disappear as soon as the buffer differs from that revision's exact
+  source.
 
 `pattern` never learns that fundsp exists; `synth` never learns there is a
 language. That seam is the point: it is what keeps the engine liftable behind
@@ -286,6 +328,14 @@ onset. The scheduler ends a voice at
 `max(gate + gate_tail, absolute_horizon)`. Both coordinates add through a
 stateful response and take component-wise maxima at joins, so a delayed
 gate-bound branch cannot lend its delay to an unrelated long envelope.
+
+A final ADSR product provides a stronger proof: its completed signal is zero
+after gate plus release, so it may cap upstream history. Scaled ADSR factors
+retain that proof; arbitrary gains, biased envelopes and asymptotic curves do
+not. Downstream responses still add their tails, and any ungated output/send
+still retains its own history. The backend ADSR enforces an exact terminal zero
+around fundsp's control-rate interpolation. This prevents long, already-muted
+guitar voices from accumulating on the audio thread.
 Stateful stdlib compositions may attach response metadata without becoming DSP
 primitives: `ring(hz, decay)` remains multiplication plus a band-pass.
 
@@ -476,13 +526,12 @@ Kept as doors, not built:
   Changing tempo is rejected because there is no single repeating seconds
   projection. No Lua or pattern query reaches the audio thread.
 
-  The current `TransportSequenceUnit` advances a sample counter from its
-  instance origin. Compatible edits reuse that instance and hard resets begin
-  at cycle zero, so current output is coherent, but this is deliberately
-  recorded clock debt: before replacement crossfade may start a patch at a
-  nonzero transport coordinate, lowering must receive that absolute coordinate
-  and derive phase from it. A replacement must never mistake its own age for
-  transport position.
+  `TransportSequenceUnit` advances a sample counter relative to an explicit
+  absolute transport origin supplied by persistent lowering. A replacement
+  instantiated at a nonzero frontier therefore derives the same periodic phase
+  as an uninterrupted instance rather than mistaking its own age for transport
+  position. Stateful DSP still begins without history; retained-input pre-roll
+  is a different contract.
 
 ## Development
 
@@ -511,6 +560,8 @@ Hearing a change is `cargo run`; *looking* at one is
 
 ```
 cargo run -p apteronotus-render -- songs/techno.eod --seconds 8 -o /tmp/techno.wav
+cargo run -p apteronotus-render -- songs/techno.eod --list-tracks
+cargo run -p apteronotus-render -- songs/techno.eod --solo-track 3 --seconds 8 -o /tmp/techno-track-3.wav
 ```
 
 which reports voice count and peak level, and defaults to 32-bit float so an

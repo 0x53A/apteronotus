@@ -1,0 +1,84 @@
+-- small-light-afterimage.eod — what the water remembers
+-- A beatless variation of small-light: 72 BPM, twenty-four bars, then silence.
+-- Its D minor-to-dorian change remains, but the wooden ostinato becomes slow
+-- answering resonances. Bell notes move down an octave and the bass breathes
+-- once every two bars. The last four bars contain only two departing notes.
+-- Render: cargo run -p apteronotus-render -- --song small-light-afterimage --cycles 24 --tail 9
+
+tempo(72)
+local water = send {
+  graph = reverb(46, secs(4.8), 0.72) >> highpass(170) >> lowpass(3300),
+  level = 0.42,
+}
+local echo = send {
+  graph = delay(beats(2.5)) >> lowpass(2000) >> feedback(0.36) >> highpass(300),
+  level = 0.21,
+}
+local bloom = control {name = "bloom", range = {0, 1.5}, default = 1}
+local bells = control {name = "bells", range = {0, 1.5}, default = 1}
+local pad = voice {
+  graph = function(n)
+    local drift = init_random(1, 0.9985, 1.0015)
+    local body = sine(n.hz) * 0.7 + soft_saw(n.hz * drift) * 0.24
+      + sine(n.hz * 2.001) * 0.08
+    return body >> lowpass(900 + decay(secs(2)) * 380, 0.6)
+      >> mul(adsr(secs(1.8), secs(1.4), 0.65, secs(3.1)) * n.velocity * 0.16 * bloom)
+      >> pan(n.pan)
+  end,
+}
+local bell = voice {
+  graph = function(n)
+    local body = sine(n.hz) * decay(secs(2.8))
+      + sine(n.hz * 2.004) * decay(secs(1.1)) * 0.24
+      + sine(n.hz * 3.97) * decay(ms(280)) * 0.09
+    return body * (1 - decay(ms(22)))
+      * adsr(ms(12), ms(100), 0.8, secs(1.8)) * n.velocity * 0.23 * bells
+      >> pan(n.pan)
+  end,
+}
+local wood = voice {
+  graph = function(n)
+    return (sine(n.hz) * decay(ms(450)) + sine(n.hz * 2.73) * decay(ms(70)) * 0.16)
+      * (1 - decay(ms(7))) * n.velocity * 0.12 >> pan(n.pan)
+  end,
+}
+local bass = voice {
+  graph = function(n)
+    return (sine(n.hz) + sine(n.hz * 2) * 0.1)
+      * adsr(ms(170), ms(700), 0.6, secs(1.2)) * n.velocity * 0.2 >> pan(0)
+  end,
+}
+local harmonies = {
+  "[f3,a3,c4,e4]", "[e3,g3,a3,d4]", "[f3,a3,c4,d4]", "[e3,g3,c4,d4]",
+  "[f3,a3,b3,e4]", "[e3,g3,b3,d4]", "[e3,a3,c4,d4]", "[f3,a3,c4,e4]",
+  "[f3,a3,c4,e4]", "[e3,g3,a3,d4]",
+}
+local roots = {"d2", "c2", "bb1", "c2", "d2", "g1", "a1", "d2", "d2", "d2"}
+local tune = {"a4", "e4", "d4", "c4", "e4", "b4", "a4", "d4", "e4", "a3"}
+local pads, lows, notes, knocks = {}, {}, {}, {}
+for phrase = 0, 9 do
+  local bar = phrase * 2
+  local strength = 0.7
+  if phrase >= 8 then strength = 0.48 end
+  table.insert(pads, at(bars(bar), pattern(harmonies[phrase + 1]) >> slow(2)
+    >> hold(bars(1.5)) >> velocity(strength)
+    >> pan(-0.25)))
+  table.insert(lows, at(bars(bar), pattern(roots[phrase + 1])
+    >> hold(beats(2.6)) >> velocity(strength * 0.8)))
+  table.insert(notes, at(bars(bar + 0.75), pattern(tune[phrase + 1])
+    >> hold(beats(1.4)) >> velocity(strength)
+    >> pan(0.3)))
+  if phrase < 8 then
+    table.insert(knocks, at(bars(bar + 1.5), pattern("a3 ~ e4 ~")
+      >> velocity(0.42) >> pan(-0.4)))
+  end
+end
+table.insert(notes, at(bars(20.5), pattern("d4") >> hold(beats(2))
+  >> velocity(0.38) >> pan(-0.15)))
+table.insert(notes, at(bars(22), pattern("e4") >> hold(beats(2))
+  >> velocity(0.28) >> pan(0.2)))
+play(pad, timeline(pads) >> to(water, 0.7))
+play(bass, timeline(lows))
+play(bell, timeline(notes) >> to(water, 0.7) >> to(echo, 0.42))
+play(wood, timeline(knocks) >> to(water, 0.72))
+master(highpass(30) >> lowpass(6500, 0.6) >> limiter(ms(8), ms(260)) >> mul(0.96))

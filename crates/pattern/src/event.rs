@@ -73,6 +73,17 @@ impl SrcSpan {
             end: end as u32,
         }
     }
+
+    /// Shift into an enclosing document coordinate space. Overflow means the
+    /// coordinate cannot be represented and must be omitted; saturating would
+    /// manufacture a plausible but wrong editor range.
+    pub fn offset(self, base: usize) -> Option<SrcSpan> {
+        let base = u32::try_from(base).ok()?;
+        Some(SrcSpan {
+            start: self.start.checked_add(base)?,
+            end: self.end.checked_add(base)?,
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]

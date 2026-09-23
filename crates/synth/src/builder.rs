@@ -252,6 +252,27 @@ impl GraphBuilder {
         self.node(Op::Sine, [hz])
     }
 
+    /// Staged harmonic amplitudes (fundamental first), at most 32, absolute
+    /// sum <= 1. Frequency is modulatable; the backend suppresses ultrasonic
+    /// partials at the actual device rate. Graph validation checks the table.
+    pub fn harmonics(&mut self, hz: impl Into<Source>, amplitudes: Vec<f64>) -> Source {
+        let hz = self.arg(hz);
+        self.node(Op::Harmonics { amplitudes }, [hz])
+    }
+
+    /// Experimental flue waveguide. A retained patch may reopen the wind on
+    /// the same vibrating pipe. In a note voice, envelope the PRESSURE input.
+    pub fn flue_pipe(
+        &mut self,
+        hz: impl Into<Source>,
+        pressure: impl Into<Source>,
+        turbulence: impl Into<Source>,
+        min_hz: f64,
+    ) -> Source {
+        let inputs = [self.arg(hz), self.arg(pressure), self.arg(turbulence)];
+        self.node(Op::FluePipe { min_hz }, inputs)
+    }
+
     pub fn cosine(&mut self, hz: impl Into<Source>) -> Source {
         let hz = self.arg(hz);
         self.node(Op::Cosine, [hz])
@@ -265,6 +286,12 @@ impl GraphBuilder {
     pub fn pulse(&mut self, hz: impl Into<Source>, duty: impl Into<Source>) -> Source {
         let (hz, duty) = (self.arg(hz), self.arg(duty));
         self.node(Op::Pulse, [hz, duty])
+    }
+
+    /// Band-limited triangle; frequency remains an ordinary modulatable input.
+    pub fn triangle(&mut self, hz: impl Into<Source>) -> Source {
+        let hz = self.arg(hz);
+        self.node(Op::Triangle, [hz])
     }
 
     pub fn noise(&mut self) -> Source {
@@ -289,6 +316,19 @@ impl GraphBuilder {
         let min = self.init_expr(min.into()).ok_or(InitScalarError::Dynamic)?;
         let max = self.init_expr(max.into()).ok_or(InitScalarError::Dynamic)?;
         Ok(self.node(Op::InitRandom { stream, min, max }, []))
+    }
+
+    /// Retained, re-excitable string with dynamic pitch and damping.
+    pub fn string_resonator(
+        &mut self,
+        excitation: Source,
+        hz: impl Into<Source>,
+        mute: impl Into<Source>,
+        min_hz: f64,
+        decay: f64,
+    ) -> Source {
+        let inputs = [self.arg(excitation), self.arg(hz), self.arg(mute)];
+        self.node(Op::StringResonator { min_hz, decay }, inputs)
     }
 
     pub fn pluck(

@@ -1,10 +1,9 @@
 //! The documents the app ships with.
 //!
-//! These are not the specification corpus in `songs/` — those are written
-//! against the whole language, including parts that do not exist yet. Every
-//! document here evaluates and plays on the current backend, and
-//! `tests::every_example_is_playable` is what keeps that true as the backend
-//! moves underneath them.
+//! The short teaching examples precede the complete embedded song corpus in
+//! the library picker. Every document evaluates and plays on the backend, and
+//! the example tests and `corpus::the_whole_corpus_still_lowers` keep that
+//! true as the backend moves underneath them.
 
 /// One shipped document.
 pub struct Example {
@@ -38,6 +37,37 @@ pub const EXAMPLES: &[Example] = &[
     },
 ];
 
+/// Teaching examples first, then the authoritative corpus without source copies.
+pub fn documents() -> impl Iterator<Item = Example> {
+    EXAMPLES
+        .iter()
+        .map(|example| Example {
+            name: example.name,
+            summary: example.summary,
+            source: example.source,
+        })
+        .chain(apteronotus_songs::SONGS.iter().map(|song| Example {
+            name: song.name,
+            summary: song.stresses,
+            source: song.source,
+        }))
+}
+
+/// Keep the last edited buffer while browsing untouched library documents.
+/// Editing a loaded document makes it the next buffer to preserve. Returns
+/// whether the editor changed; this never evaluates the source.
+pub fn open_document(source: &mut String, displaced: &mut Option<String>, document: &str) -> bool {
+    if source.as_str() == document {
+        return false;
+    }
+    let was_library_document = documents().any(|entry| entry.source == source.as_str());
+    let previous = std::mem::replace(source, document.into());
+    if displaced.is_none() || !was_library_document {
+        *displaced = Some(previous);
+    }
+    true
+}
+
 /// The document the editor opens with.
 pub fn starter() -> &'static str {
     EXAMPLES[0].source
@@ -48,6 +78,46 @@ mod tests {
     use super::EXAMPLES;
     use crate::player::{needs_persistent_runtime, persistent_runtime, playable_channels};
     use apteronotus_lua::evaluate;
+
+    #[test]
+    fn browsing_songs_retains_the_edited_buffer_until_another_edit() {
+        let original = "-- my unsaved composition\n";
+        let mut source = original.to_string();
+        let mut displaced = None;
+        for song in apteronotus_songs::SONGS {
+            assert!(super::open_document(
+                &mut source,
+                &mut displaced,
+                song.source
+            ));
+            assert_eq!(displaced.as_deref(), Some(original));
+        }
+        let current = source.clone();
+        assert!(!super::open_document(&mut source, &mut displaced, &current));
+        assert_eq!(displaced.as_deref(), Some(original));
+        source.push_str("\n-- my variation\n");
+        let edited = source.clone();
+        assert!(super::open_document(
+            &mut source,
+            &mut displaced,
+            super::starter()
+        ));
+        assert_eq!(displaced.as_deref(), Some(edited.as_str()));
+        source = displaced.take().unwrap();
+        assert_eq!(source, edited);
+    }
+
+    #[test]
+    fn the_initial_library_document_is_also_recoverable() {
+        let mut source = super::starter().to_string();
+        let mut displaced = None;
+        super::open_document(
+            &mut source,
+            &mut displaced,
+            apteronotus_songs::NIGHTSHIFT_DUB,
+        );
+        assert_eq!(displaced.as_deref(), Some(super::starter()));
+    }
 
     /// A shipped example that does not evaluate is worse than no example, and
     /// the backend is moving. This is the guard.

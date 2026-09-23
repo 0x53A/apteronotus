@@ -49,6 +49,7 @@ pub fn instantiate(
         note,
         None,
         None,
+        0.0,
         template.channels(),
         template
             .outputs
@@ -73,6 +74,7 @@ pub fn instantiate_with_controls(
         note,
         Some(controls),
         None,
+        0.0,
         template.channels(),
         template
             .outputs
@@ -102,6 +104,20 @@ pub fn instantiate_patch_routed(
     layout: &BusLayout,
     controls: &ControlStore,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_patch_routed_at(patch, layout, controls, 0.0)
+}
+
+/// Instantiate a persistent patch at an absolute transport coordinate.
+///
+/// Stateful nodes still begin with empty history. Coordinate-derived nodes,
+/// notably compiled transport sequences, begin at the phase they would have
+/// had if the instance had existed since transport zero.
+pub fn instantiate_patch_routed_at(
+    patch: &PatchTemplate,
+    layout: &BusLayout,
+    controls: &ControlStore,
+    transport_seconds: f64,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
     instantiate_routed_impl(
         patch.graph(),
         &Note::new(440.0),
@@ -109,6 +125,7 @@ pub fn instantiate_patch_routed(
         &EventRouting::new(),
         Some(controls),
         None,
+        transport_seconds,
     )
 }
 
@@ -124,6 +141,18 @@ pub fn instantiate_patch_routed_with_audio_inputs(
     controls: &ControlStore,
     audio_inputs: &AudioInputLayout,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
+    instantiate_patch_routed_with_audio_inputs_at(patch, layout, controls, audio_inputs, 0.0)
+}
+
+/// Instantiate an input-bearing persistent patch at an absolute transport
+/// coordinate. See [`instantiate_patch_routed_at`].
+pub fn instantiate_patch_routed_with_audio_inputs_at(
+    patch: &PatchTemplate,
+    layout: &BusLayout,
+    controls: &ControlStore,
+    audio_inputs: &AudioInputLayout,
+    transport_seconds: f64,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
     instantiate_routed_impl(
         patch.graph(),
         &Note::new(440.0),
@@ -131,13 +160,15 @@ pub fn instantiate_patch_routed_with_audio_inputs(
         &EventRouting::new(),
         Some(controls),
         Some(audio_inputs),
+        transport_seconds,
     )
 }
 
 /// Instantiate one autonomous patch for a finite transport span.
 ///
 /// The lifecycle gate is inserted immediately after every nonterminating audio
-/// source. This is intentionally not an output gain: stateful processors
+/// source; pressure-driven flues instead have their wind input gated.
+/// This is intentionally not an output gain: stateful processors
 /// downstream receive silence when the span closes and continue rendering
 /// until their declared response tails have drained.
 pub fn instantiate_timed_patch_routed(
@@ -181,6 +212,7 @@ pub fn instantiate_timed_patch_routed_with_routing(
         routing,
         Some(controls),
         None,
+        0.0,
     )?;
     Ok((unit, lifetime))
 }
@@ -213,7 +245,7 @@ fn lifecycle_gated_graph(
     };
 
     for node in &template.nodes {
-        let inputs = node
+        let mut inputs: Vec<Input> = node
             .inputs
             .iter()
             .map(|input| Input {
@@ -221,6 +253,16 @@ fn lifecycle_gated_graph(
                 src: input.src,
             })
             .collect();
+        if matches!(node.op, Op::FluePipe { .. }) {
+            let drive_gate = nodes.len();
+            nodes.push(Node {
+                op: Op::Mul,
+                inputs: vec![inputs[1], Input::new(gate_source)],
+                tail: 0.0,
+                src: node.src,
+            });
+            inputs[1].source = Source::port(drive_gate, 0);
+        }
         let node_id = nodes.len();
         nodes.push(Node {
             op: node.op.clone(),
@@ -272,7 +314,7 @@ pub fn instantiate_routed(
     layout: &BusLayout,
     event: &EventRouting,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
-    instantiate_routed_impl(template, note, layout, event, None, None)
+    instantiate_routed_impl(template, note, layout, event, None, None, 0.0)
 }
 
 pub fn instantiate_routed_with_controls(
@@ -282,7 +324,7 @@ pub fn instantiate_routed_with_controls(
     event: &EventRouting,
     controls: &ControlStore,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
-    instantiate_routed_impl(template, note, layout, event, Some(controls), None)
+    instantiate_routed_impl(template, note, layout, event, Some(controls), None, 0.0)
 }
 
 fn instantiate_routed_impl(
@@ -292,7 +334,11 @@ fn instantiate_routed_impl(
     event: &EventRouting,
     controls: Option<&ControlStore>,
     audio_inputs: Option<&AudioInputLayout>,
+    transport_seconds: f64,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
+    if !transport_seconds.is_finite() {
+        return Err(LowerError::InvalidTransportTime(transport_seconds));
+    }
     template.validate()?;
     if template.channels() != layout.main_channels() && template.channels() != 1 {
         return Err(RoutingError::MainChannelMismatch {
@@ -369,6 +415,7 @@ fn instantiate_routed_impl(
         note,
         controls,
         audio_inputs,
+        transport_seconds,
         layout.total_channels(),
         routes,
     )
@@ -379,6 +426,7 @@ fn instantiate_to_lanes(
     note: &Note,
     controls: Option<&ControlStore>,
     audio_inputs: Option<&AudioInputLayout>,
+    transport_seconds: f64,
     output_channels: usize,
     routes: impl IntoIterator<Item = (usize, Source, f64)>,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
@@ -392,7 +440,14 @@ fn instantiate_to_lanes(
     // feedback needs an explicit graph representation before it is legal.)
     let mut nodes: Vec<FundspNode> = Vec::with_capacity(template.nodes.len());
     for (node_index, node) in template.nodes.iter().enumerate() {
-        nodes.push(net.push(unit_for(&node.op, node_index, note, template, controls)?));
+        nodes.push(net.push(unit_for(
+            &node.op,
+            node_index,
+            note,
+            template,
+            controls,
+            transport_seconds,
+        )?));
     }
 
     // Lifted scalars, keyed by bit pattern. A voice typically reuses `0`, `1`
@@ -469,6 +524,7 @@ pub enum LowerError {
     InvalidDuration(f64),
     InvalidPluckParameter,
     InvalidSlewTime(f64),
+    InvalidTransportTime(f64),
     InvalidBreakpointCurve,
     UnknownAudioInput,
 }
@@ -531,6 +587,10 @@ impl core::fmt::Display for LowerError {
                     "slew response time must be finite and non-negative, got {seconds}"
                 )
             }
+            LowerError::InvalidTransportTime(seconds) => write!(
+                f,
+                "persistent transport start must be finite, got {seconds}"
+            ),
             LowerError::InvalidBreakpointCurve => {
                 write!(
                     f,
@@ -710,11 +770,15 @@ fn unit_for(
     note: &Note,
     template: &GraphTemplate,
     controls: Option<&ControlStore>,
+    transport_seconds: f64,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
     let unit: Box<dyn AudioUnit> = match op {
         Op::Sine => Box::new(sine()),
+        Op::FluePipe { min_hz } => Box::new(crate::flue::FlueUnit::new(*min_hz)),
+        Op::Harmonics { amplitudes } => Box::new(crate::harmonic::HarmonicUnit::new(amplitudes)),
         Op::Cosine => Box::new(sine().phase(0.25)),
         Op::Saw => Box::new(saw()),
+        Op::Triangle => Box::new(triangle()),
         Op::Pulse => Box::new(pulse()),
         Op::Noise => {
             let mut unit = noise();
@@ -786,6 +850,9 @@ fn unit_for(
             })),
         },
         Op::DcBlock => Box::new(dcblock()),
+        Op::StringResonator { min_hz, decay } => {
+            Box::new(crate::string::StringUnit::new(*min_hz, *decay))
+        }
         Op::Delay(range) => Box::new(tap(range.min_seconds() as f32, range.max_seconds() as f32)),
         Op::Reverb {
             room_size,
@@ -867,6 +934,7 @@ fn unit_for(
         } => Box::new(crate::analyzer::TransportSequenceUnit::new(
             *period_seconds,
             slots.clone(),
+            transport_seconds,
         )),
         Op::Width => Box::new(crate::analyzer::WidthUnit::new()),
         Op::Slew {
@@ -996,11 +1064,7 @@ fn unit_for(
         // Both envelopes read the note clock, which starts at zero when the
         // sequencer starts the unit. They are pure functions of `t`, so an edit
         // costs them nothing: there is no phase to migrate, warm or crossfade.
-        Op::Adsr(adsr) => {
-            let adsr = *adsr;
-            let gate = note.duration;
-            Box::new(envelope(move |t: f32| adsr.at(t as f64, gate) as f32))
-        }
+        Op::Adsr(adsr) => Box::new(crate::adsr::AdsrUnit::new(*adsr, note.duration)),
         Op::Decay { .. } => Box::new(envelope2(|t, seconds| {
             if seconds > 0.0 {
                 (-3.0 * t / seconds).exp()

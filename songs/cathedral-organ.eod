@@ -1,0 +1,74 @@
+-- cathedral-organ.eod — Iron Choir
+-- Synthetic pipe organ study for a future industrial/Darktide-inspired score.
+-- Original phrases, no samples. 120 BPM; 48 seconds of music + 6 seconds of room.
+-- Render: cargo run -p apteronotus-render -- --song cathedral-organ --seconds 48 --tail 6
+-- 0–16s: principal, stopped flute, string, reed, each heard DRY in isolation.
+-- 16–24s: full registration and independent pedal in the shared cathedral.
+-- 24–40s: short mechanical minor-mode figures; 40–48s: final held cadence.
+tempo(120)
+local reeds = control { name = "Reed stop", range = {0, 1}, default = 0.32 }
+local mixture = control { name = "Mixture stop", range = {0, 1}, default = 0.20 }
+local swell = control { name = "Organ expression", range = {0, 1}, default = 0.8 }
+local hall = send {
+  graph = reverb(38, secs(4.8), 0.68) >> highpass(110) >> lowpass(5600),
+  level = 0.30,
+}
+
+local kinds = {"principal", "flute", "string", "reed"}
+for i, kind in ipairs(kinds) do
+  local stop = voice { graph = function(n)
+    return organ_pipe(n.hz, {kind=kind, feet=8}) * 0.33 >> pan(0)
+  end }
+  play(stop, timeline {
+    at(secs((i - 1) * 4), pattern("d3") >> hold(beats(5))),
+    at(secs((i - 1) * 4 + 3), pattern("d4") >> hold(beats(1))),
+  })
+end
+
+local great = voice { graph = function(n)
+  -- Footage is relative to an 8-foot unison. Independent ranks, deliberately
+  -- small fixed tuning differences; no chorus restarting on every key press.
+  local reed_level = slew(reeds, .020)
+  local top_level = slew(mixture, .020)
+  local tone = organ(n.hz, {
+    {kind="flute", feet=16, level=0.24, cents=-1.3},
+    {kind="principal", feet=8, level=0.70},
+    {kind="principal", feet=4, level=0.38, cents=1.1},
+    {kind="string", feet=8, level=0.20, cents=-2.4},
+    {kind="reed", feet=8, level=reed_level, cents=0.7},
+    {kind="principal", feet=2, level=top_level, cents=-0.6},
+    {kind="principal", feet=8/3, level=top_level * 0.55, cents=0.9},
+  })
+  -- Expression changes loudness, not note velocity or pipe pitch. The stop
+  -- controls remain live throughout a held chord.
+  return tone * 0.20 * slew(swell, .025) >> pan(n.pan)
+end }
+local pedal = voice { graph = function(n)
+  return organ(n.hz, {
+    {kind="flute", feet=16, level=0.85, chiff=0},
+    {kind="principal", feet=8, level=0.24, chiff=0},
+    {kind="reed", feet=16, level=0.12, cents=-1.1},
+  }) * 0.32 * slew(swell, .025) >> pan(0)
+end }
+local manuals, pedals = {}, {}
+local chords = {"[d3,a3,d4,f4]", "[bb2,f3,bb3,d4]", "[g2,d3,g3,bb3]", "[a2,e3,a3,c#4]"}
+local roots = {"d2", "bb1", "g1", "a1"}
+for bar = 8, 23 do
+  local index = math.floor((bar - 8) / 2) % 4 + 1
+  if bar >= 20 then index = 1 end
+  if bar < 12 or bar >= 20 then
+    if bar % 2 == 0 then
+      table.insert(manuals, at(bars(bar), pattern(chords[index]) >> hold(beats(7.6))))
+      table.insert(pedals, at(bars(bar), pattern(roots[index]) >> hold(beats(7.7))))
+    end
+  else
+    -- Leave space between key closures; room energy connects the dry stabs.
+    local upper = {"d4 a3 d4 f4", "bb3 f3 bb3 d4", "g3 d3 g3 bb3", "a3 e3 a3 c#4"}
+    table.insert(manuals, at(bars(bar), pattern(upper[index]) >> hold(beats(.62))))
+    table.insert(manuals, at(bars(bar), pattern(chords[index] .. " ~ ~ ~") >> hold(beats(.8))))
+    table.insert(pedals, at(bars(bar), pattern(roots[index] .. " ~ " .. roots[index] .. " ~")
+      >> hold(beats(.78))))
+  end
+end
+play(great, timeline(manuals) >> to(hall, 0.75))
+play(pedal, timeline(pedals) >> to(hall, 0.30))

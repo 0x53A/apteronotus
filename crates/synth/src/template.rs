@@ -464,10 +464,17 @@ pub enum Op {
     // ------------------------------------------------------------ generators
     /// (hz) → audio
     Sine,
+    /// (hz) → audio. Up to 32 phase-coherent harmonics, sum of absolute
+    /// amplitudes <= 1. Partials fade out between 0.40 and 0.48 sample rate.
+    Harmonics {
+        amplitudes: Vec<f64>,
+    },
     /// (hz) → audio, with a quarter-cycle initial phase
     Cosine,
     /// (hz) → audio. Band-limited.
     Saw,
+    /// (hz) → audio, band-limited triangle with odd harmonics falling as 1/n²
+    Triangle,
     /// (hz, duty) → audio
     Pulse,
     /// () → audio. White.
@@ -491,6 +498,21 @@ pub enum Op {
         gain_per_second: f64,
         damping: InitScalar,
         max_delay_seconds: f64,
+    },
+
+    /// (excitation, hz, mute) → retained string. Nominal decay is a T60;
+    /// interpolation and brightness losses can shorten it. Pitch is clamped
+    /// to min_hz..sample_rate/4; mute 0..1 adds physical loop damping.
+    StringResonator {
+        min_hz: f64,
+        decay: f64,
+    },
+
+    /// (hz, pressure, turbulence) → retained experimental flue waveguide.
+    /// Pressure is normalized 0..1; turbulence is clamped to ±1. Declared
+    /// min_hz bounds allocation; pitch clamps to min_hz..min(1200, rate/32).
+    FluePipe {
+        min_hz: f64,
     },
 
     // --------------------------------------------------------------- filters
@@ -685,8 +707,10 @@ impl Op {
             | Op::Portamento { .. }
             | Op::RunGate { .. } => 0,
             Op::Sine
+            | Op::Harmonics { .. }
             | Op::Cosine
             | Op::Saw
+            | Op::Triangle
             | Op::Pluck { .. }
             | Op::DcBlock
             | Op::Neg
@@ -713,7 +737,7 @@ impl Op {
             | Op::Window { .. }
             | Op::Pan
             | Op::Fdn { .. } => 2,
-            Op::Width => 3,
+            Op::Width | Op::StringResonator { .. } | Op::FluePipe { .. } => 3,
             Op::Reverb { .. } | Op::Limiter { .. } => 2,
             Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak | Op::Moog => 3,
         }
@@ -730,10 +754,10 @@ impl Op {
     ///
     /// Filter frequency and Q inputs steer activity but do not create it, so a
     /// long cutoff curve must not retain a voice. Arithmetic conservatively
-    /// treats both inputs as activity-bearing. In particular `Mul` cannot use
-    /// the tempting minimum rule: `audio * dc(0.5)` would otherwise inherit
-    /// the constant's zero metadata and truncate every voice. Over-retaining a
-    /// delayed signal multiplied by a short envelope is the safe direction.
+    /// treats both inputs as activity-bearing. `Mul` cannot use a general
+    /// minimum rule: `audio * dc(0.5)` must not truncate a voice. The lifetime
+    /// walk separately recognises ADSR factors with a proven hard release;
+    /// asymptotic curves and arbitrary control inputs retain the maximum rule.
     pub fn activity_input(&self, port: usize) -> bool {
         match self {
             Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak | Op::Moog => port == 0,
@@ -756,11 +780,15 @@ impl Op {
             | Op::ControlWrite { .. }
             | Op::Pluck { .. }
             | Op::Pan => port == 0,
+            Op::StringResonator { .. } => port == 0,
+            Op::FluePipe { .. } => port == 1,
             Op::Reverb { .. } | Op::Limiter { .. } => port < 2,
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => port < 2,
             Op::Sine
+            | Op::Harmonics { .. }
             | Op::Cosine
             | Op::Saw
+            | Op::Triangle
             | Op::Pulse
             | Op::Noise
             | Op::Pink
@@ -780,6 +808,8 @@ impl Op {
     /// Stateful response after the activity driving this node ends.
     fn response_tail(&self) -> f64 {
         match self {
+            Op::StringResonator { decay, min_hz } => decay + 1.0 / min_hz,
+            Op::FluePipe { min_hz } => 0.08 + 64.0 / min_hz,
             Op::Delay(range) => range.max_seconds(),
             Op::Reverb { time, .. } => *time,
             Op::Limiter { attack, .. } => *attack,
@@ -835,7 +865,14 @@ impl Op {
     pub(crate) fn begins_audio_activity(&self) -> bool {
         matches!(
             self,
-            Op::Sine | Op::Cosine | Op::Saw | Op::Pulse | Op::Noise | Op::Pink
+            Op::Sine
+                | Op::Harmonics { .. }
+                | Op::Cosine
+                | Op::Saw
+                | Op::Triangle
+                | Op::Pulse
+                | Op::Noise
+                | Op::Pink
         )
     }
 }
@@ -1035,6 +1072,7 @@ impl GraphTemplate {
                 .nodes
                 .iter()
                 .map(|node| match &node.op {
+                    Op::Harmonics { amplitudes } => amplitudes.len(),
                     Op::Curve(curve) => curve.terms.len(),
                     Op::BreakpointCurve { times, values, .. } => times.len() + values.len(),
                     Op::TransportSequence { slots, .. } => slots.len(),
@@ -1046,6 +1084,10 @@ impl GraphTemplate {
                 .nodes
                 .iter()
                 .map(|node| match node.op {
+                    Op::StringResonator { min_hz, .. } => 1.0 / min_hz,
+                    // Two delay lines at 4x rate, stored as f64 (other
+                    // delay nodes store f32): count their byte-equivalent cost.
+                    Op::FluePipe { min_hz } => 2.0 * 4.0 * (1.52 + 0.50) / min_hz,
                     Op::Delay(range) => range.max_seconds(),
                     // fundsp's stereo reverb owns 32 delay lines whose
                     // maximum propagation time is bounded by room diameter
@@ -1144,7 +1186,23 @@ impl GraphTemplate {
 
     fn lifetime_impl(&self, note: Option<&Note>) -> Result<Lifetime, ParamValueError> {
         let mut through = vec![Lifetime::default(); self.nodes.len()];
+        // A gate-relative *hard* zero is stronger than ordinary activity
+        // metadata. Only ADSR and products containing it establish this fact.
+        // In particular a constant's empty lifetime does not mean silence.
+        let mut hard_release: Vec<Option<f64>> = vec![None; self.nodes.len()];
         for (id, node) in self.nodes.iter().enumerate() {
+            hard_release[id] = match &node.op {
+                Op::Adsr(adsr) => Some(adsr.tail()),
+                Op::Mul => node
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input.source {
+                        Source::Port { node, .. } => hard_release.get(node).copied().flatten(),
+                        _ => None,
+                    })
+                    .reduce(f64::min),
+                _ => None,
+            };
             let upstream = node
                 .inputs
                 .iter()
@@ -1199,6 +1257,10 @@ impl GraphTemplate {
                 Op::RunGate { active_seconds, .. } => Lifetime {
                     gate_tail: 0.0,
                     absolute_horizon: *active_seconds,
+                },
+                Op::Mul if hard_release[id].is_some() => Lifetime {
+                    gate_tail: hard_release[id].expect("checked hard release"),
+                    absolute_horizon: 0.0,
                 },
                 _ => upstream,
             };
@@ -1442,6 +1504,20 @@ impl GraphTemplate {
                             .is_some_and(|slot| slot.end_seconds == period_seconds)
                 }
                 Op::Width => true,
+                Op::Harmonics { ref amplitudes } => {
+                    !amplitudes.is_empty()
+                        && amplitudes.len() <= 32
+                        && amplitudes.iter().all(|x| x.is_finite())
+                        && amplitudes.iter().map(|x| x.abs()).sum::<f64>() <= 1.0 + 1e-12
+                }
+                Op::FluePipe { min_hz } => min_hz.is_finite() && (20.0..=1000.0).contains(&min_hz),
+                Op::StringResonator { min_hz, decay } => {
+                    min_hz.is_finite()
+                        && (1.0..=20_000.0).contains(&min_hz)
+                        && decay.is_finite()
+                        && decay > 0.0
+                        && decay <= 120.0
+                }
                 Op::Pluck {
                     frequency,
                     gain_per_second,
@@ -1460,7 +1536,13 @@ impl GraphTemplate {
                     response_time,
                     initial,
                 } => init_scalar_valid(response_time, &self.params) && initial.is_finite(),
-                Op::GateEnv {
+                Op::Adsr(Adsr {
+                    attack,
+                    decay,
+                    sustain,
+                    release,
+                })
+                | Op::GateEnv {
                     attack,
                     decay,
                     sustain,
@@ -1735,10 +1817,12 @@ pub struct GraphCost {
     pub output_channels: usize,
     pub declared_parameters: usize,
     /// Flat data stored by bounded table-driven nodes such as transport
-    /// sequences, curves, breakpoint envelopes, and FDN delay layouts.
+    /// sequences, curves, harmonic amplitudes, breakpoint envelopes, and FDN delay layouts.
     pub data_entries: usize,
-    /// Sum of maximum delay-line lengths. At a known sample rate this converts
-    /// directly to the dominant state-memory allocation.
+    /// Sum of maximum delay-line lengths in host-rate f32 equivalents.
+    /// Oversampled/f64 nodes charge the corresponding storage multiplier.
+    /// At a known sample rate this estimates dominant state-memory allocation;
+    /// fixed interpolation guards and node metadata are additional.
     pub delay_buffer_seconds: f64,
     pub tail_seconds: f64,
 }

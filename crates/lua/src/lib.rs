@@ -9,12 +9,14 @@ mod bindings;
 mod error;
 mod program;
 mod source;
+mod syntax;
 
 pub use error::EvalError;
 pub use program::{
     ExternalControlBinding, ExternalDegrade, PatchControl, PatchControlKind, PatchId, PatchRun,
     Program, ProgramError, Track, VoiceId,
 };
+pub use syntax::{SyntaxDiagnostic, check_syntax, check_syntax_with_limit};
 
 use apteronotus_pattern::ValueLimits;
 use apteronotus_synth::GraphLimits;
@@ -54,6 +56,8 @@ pub struct Limits {
     /// the same duration-times-density resource shape as `hold` without
     /// pretending that either operation changes steady-state pattern density.
     pub max_control_signal_cycles: i64,
+    /// Maximum local query window captured by one finite `at` placement.
+    pub max_timeline_capture_cycles: i64,
     /// Maximum map width and curve terms in one pattern event.
     pub pattern_values: ValueLimits,
     /// Tempo points in one evaluated score.
@@ -85,6 +89,7 @@ impl Default for Limits {
             pattern_nodes: 200_000,
             max_hold_cycles: 4_096,
             max_control_signal_cycles: 4_096,
+            max_timeline_capture_cycles: 4_096,
             pattern_values: ValueLimits::default(),
             tempo_points: 1_024,
             voices: 256,
@@ -128,11 +133,16 @@ impl Evaluator {
         let state = Rc::new(RefCell::new(BuildState::new(self.limits)));
         let mut lua = Lua::core();
         lua.try_enter(|ctx| install(ctx, state.clone()))?;
-        let prelude = lua.try_enter(|ctx| {
-            let closure = Closure::load(ctx, Some("apteronotus prelude"), PRELUDE.as_bytes())?;
-            Ok(ctx.stash(Executor::start(ctx, closure.into(), ())))
-        })?;
-        lua.execute::<()>(&prelude)?;
+        for (name, source) in [
+            ("apteronotus prelude", PRELUDE),
+            ("apteronotus organ stdlib", include_str!("stdlib/organ.lua")),
+        ] {
+            let prelude = lua.try_enter(|ctx| {
+                let closure = Closure::load(ctx, Some(name), source.as_bytes())?;
+                Ok(ctx.stash(Executor::start(ctx, closure.into(), ())))
+            })?;
+            lua.execute::<()>(&prelude)?;
+        }
 
         let attributed_source = inject_call_sites(source);
         let executor = lua.try_enter(|ctx| {

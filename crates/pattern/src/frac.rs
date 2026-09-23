@@ -30,6 +30,30 @@ impl Frac {
         reduce(n as i128, d as i128)
     }
 
+    /// Normalise untrusted input without panicking on a zero denominator or
+    /// a reduced value that cannot fit in the 64-bit representation.
+    pub fn checked_new(n: i64, d: i64) -> Option<Frac> {
+        checked_reduce(n as i128, d as i128)
+    }
+
+    /// Add untrusted coordinates, returning `None` if the reduced result
+    /// exceeds this representation. Ordinary arithmetic retains its invariant
+    /// checks for callers that have already established their bounds.
+    pub fn checked_add(self, other: Frac) -> Option<Frac> {
+        checked_reduce(
+            self.n as i128 * other.d as i128 + other.n as i128 * self.d as i128,
+            self.d as i128 * other.d as i128,
+        )
+    }
+
+    /// Subtract untrusted coordinates without overflowing their representation.
+    pub fn checked_sub(self, other: Frac) -> Option<Frac> {
+        checked_reduce(
+            self.n as i128 * other.d as i128 - other.n as i128 * self.d as i128,
+            self.d as i128 * other.d as i128,
+        )
+    }
+
     pub const fn int(n: i64) -> Frac {
         Frac { n, d: 1 }
     }
@@ -226,6 +250,14 @@ impl PartialOrd for Frac {
 /// may reach this assertion.
 fn reduce(n: i128, d: i128) -> Frac {
     assert!(d != 0, "Frac with zero denominator");
+    checked_reduce(n, d)
+        .unwrap_or_else(|| panic!("cycle time overflowed a 64-bit rational: {n}/{d}"))
+}
+
+fn checked_reduce(n: i128, d: i128) -> Option<Frac> {
+    if d == 0 {
+        return None;
+    }
     let (n, d) = if d < 0 { (-n, -d) } else { (n, d) };
     let mut a = n.abs();
     let mut b = d;
@@ -236,14 +268,10 @@ fn reduce(n: i128, d: i128) -> Frac {
     }
     let g = if a == 0 { 1 } else { a };
     let (n, d) = (n / g, d / g);
-    assert!(
-        n >= i64::MIN as i128 && n <= i64::MAX as i128 && d <= i64::MAX as i128,
-        "cycle time overflowed a 64-bit rational: {n}/{d}"
-    );
-    Frac {
-        n: n as i64,
-        d: d as i64,
-    }
+    Some(Frac {
+        n: i64::try_from(n).ok()?,
+        d: i64::try_from(d).ok()?,
+    })
 }
 
 impl Add for Frac {
@@ -340,6 +368,38 @@ mod tests {
         assert_eq!(Frac::new(2, 4), Frac::new(1, 2));
         assert_eq!(Frac::new(1, -2), Frac::new(-1, 2));
         assert_eq!(Frac::new(0, 7), Frac::ZERO);
+    }
+
+    #[test]
+    fn checked_construction_reduces_before_checking_representation() {
+        assert_eq!(Frac::checked_new(1, 0), None);
+        assert_eq!(Frac::checked_new(i64::MIN, -1), None);
+        assert_eq!(Frac::checked_new(1, i64::MIN), None);
+        assert_eq!(Frac::checked_new(i64::MIN, i64::MIN), Some(Frac::ONE));
+        assert_eq!(Frac::checked_new(0, i64::MIN), Some(Frac::ZERO));
+        assert_eq!(
+            Frac::checked_new(2, i64::MIN),
+            Some(Frac::new(-1, 1_i64 << 62))
+        );
+        assert_eq!(Frac::checked_new(i64::MIN, 1), Some(Frac::int(i64::MIN)));
+    }
+
+    #[test]
+    fn checked_coordinate_arithmetic_never_wraps() {
+        assert_eq!(Frac::int(i64::MAX).checked_add(Frac::ONE), None);
+        assert_eq!(Frac::int(i64::MIN).checked_sub(Frac::ONE), None);
+        assert_eq!(
+            Frac::int(i64::MIN).checked_sub(Frac::int(i64::MIN)),
+            Some(Frac::ZERO)
+        );
+        assert_eq!(
+            Frac::new(1, 3).checked_add(Frac::new(2, 3)),
+            Some(Frac::ONE)
+        );
+        assert_eq!(
+            Frac::new(7, 8).checked_sub(Frac::new(1, 8)),
+            Some(Frac::new(3, 4))
+        );
     }
 
     #[test]

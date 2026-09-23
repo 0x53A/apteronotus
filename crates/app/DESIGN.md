@@ -81,6 +81,22 @@ identifiers are plain `TEXT`, and comments recede almost into the well.
 The layouter never wraps. A code editor scrolls sideways; wrapping would also
 desynchronise the gutter, which counts newlines.
 
+### Sounding source
+
+Mini-notation tokens receive the discharge wash only while their events overlap
+the latency-adjusted transport window. The window is derived on every frame by
+querying the audible program; there is no cursor, timer or retained flash
+history. Held events therefore stay lit and very short events remain visible
+for a 60 ms retrospective window, while continuous pattern signals are ignored.
+
+“Audible” is deliberately not “last accepted.” Compatible edits are staged at
+the scheduler frontier and promoted only when the device clock reaches their
+exact `effective_at`; multiple accepted revisions remain queued in order. A
+new transport origin, Stop, or runtime uncertainty clears the mirror. Finally,
+the editor buffer must be byte-identical to the source that produced the
+audible program. The first typed byte after Run turns every highlight off rather
+than attempting an unsafe span remap.
+
 ## Motion
 
 The transport indicator is a row of bars whose heights are a function of
@@ -94,20 +110,28 @@ That is the only animation. Nothing else fades, slides or eases.
 
 - **Masthead**: identity, then the transport actions, then the document
   actions, then the transport readout. Run is the only *filled* control in the
-  application; Stop and Examples are outlined, and Stop greys out when nothing
+  application; Stop, Library and File are outlined, and Stop greys out when nothing
   is sounding, so the accent always points at the thing that starts sound
-  rather than at the thing that ends it. In the Examples menu the document
-  currently loaded is named in the accent and marked `open`. Choosing an
-  example stores the displaced buffer in one restore slot; recovery is an
+  rather than at the thing that ends it. In the Library menu the document
+  currently loaded is named in the accent and marked `open`. Choosing a
+  document retains the last edited buffer while browsing; recovery is an
   explicit menu item rather than a confirmation dialog on every choice.
 - **Document**: a recessed well with a gutter. The current line number is
   accented; that is the only place the editor comments on your cursor.
 - **Controls**: program-declared writable controls as faders, right of the
   document, present only when a program declares them.
-- **Diagnostics**: appears only on a refused edit, above the status bar,
-  in `ALERT`, selectable.
+- **Diagnostics**: current-buffer syntax problems and last-Run failures are
+  separate labeled messages above the status bar, in `ALERT`, selectable.
+  A source-line action moves the editor cursor without evaluating the text.
 - **Status bar**: what is sounding on the left, what the document is on the
-  right.
+  right. Its cycle readout is derived each frame from the audible program's
+  tempo map and device transport origin; an accepted future revision boundary
+  is not mislabeled as the current playhead.
 
 A panel that has nothing to say is not drawn. There are no empty states and no
 placeholder chrome.
+
+The lexical colour pass still does no parsing. A separate compile-only checker
+runs after a typing pause and supplies the first original-source line diagnostic.
+Its red gutter number takes precedence over the cursor accent. Syntax feedback
+never changes the transport or the active program.

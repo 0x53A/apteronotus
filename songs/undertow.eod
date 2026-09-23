@@ -1,0 +1,252 @@
+-- undertow.eod — the current is faster underneath.
+--
+-- Liquid drum and bass is a useful contradiction: 168 BPM on paper, 84 BPM
+-- in the body. The hats and bass subdivisions supply the speed; one backbeat
+-- in the middle of each bar supplies the weight. If the snare doubles, it
+-- turns into a race. If the bass sustains, it turns into fog. The arrangement
+-- therefore removes things more often than it adds them.
+--
+-- This is a cyclic piece, not a 64-bar curve with nowhere to go afterwards.
+-- Eight two-bar section weights make a 16-bar form. Under them, the drum
+-- details run in four bars, harmony in eight, and the plucked counterline in
+-- five. The form returns; the small alignments take longer.
+
+tempo(168)
+key("d", "dorian")
+
+---------------------------------------------------------------------- space
+
+-- Short and dark. At this tempo a large bright hall joins consecutive hats
+-- into one continuous sheet, which defeats the point of writing a break.
+room = send {
+  graph = reverb(30, secs(1.7), 0.68) >> highpass(260) >> lowpass(6200),
+  level = 0.18,
+}
+
+-- Three eighths: the liquid-DnB answer to a dotted eighth, but filtered far
+-- enough down that it repeats pitches rather than transients.
+echo = send {
+  graph = delay(beats(1.5)) >> lowpass(2300) >> feedback(0.31),
+  level = 0.16,
+}
+
+---------------------------------------------------------------------- desk
+
+lvl_bass  = control { name = "bass",  range = { 0, 1.5 }, default = 1 }
+lvl_drums = control { name = "drums", range = { 0, 1.5 }, default = 1 }
+lvl_pad   = control { name = "pad",   range = { 0, 1.5 }, default = 1 }
+lvl_glass = control { name = "glass", range = { 0, 1.5 }, default = 1 }
+
+---------------------------------------------------------------------- rack
+
+-- A sub and a Reese are related but not interchangeable. The sine supplies a
+-- stable floor. The two detuned saws supply audible pitch on small speakers,
+-- then lose everything above 1.8 kHz so the hats have somewhere to exist.
+undertow = voice {
+  params = {
+    cutoff = { 100, 2600, 760, "hz" },
+    drift  = { 0, 0.025, 0.009 },
+    drive  = { 1, 5, 2.1 },
+  },
+  graph = function(n)
+    local env = adsr(ms(9), ms(180), 0.42, ms(120))
+    local sub = sine(n.hz) * 0.62
+    local teeth = saw(n.hz * 2 * (1 - n.drift)) * 0.26
+                + saw(n.hz * 2 * (1 + n.drift)) * 0.26
+                + pulse(n.hz * 2, 0.41) * 0.12
+    local mid = (teeth | n.cutoff * (0.72 + 1.1 * env) | dc(0.38)) >> lowpass()
+    return (sub + mid)
+        >> mul(env * n.velocity * 0.32 * lvl_bass)
+        >> shape("tanh", n.drive)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+kick = voice {
+  graph = function(n)
+    local pitch = 48 + 58 * decay(ms(34))
+    local body = (pitch >> sine()) * decay(ms(145)) * (1 - decay(ms(3)))
+    local knock = ((noise() | dc(1450) | dc(1.2)) >> bandpass()) * decay(ms(7))
+    return (body + knock * 0.10)
+        >> mul(n.velocity * 0.68 * lvl_drums)
+        >> shape("tanh", 1.45)
+        >> dcblock()
+        >> pan(0)
+  end,
+}
+
+-- One large backbeat. The low body is short; the noise tail is wide enough to
+-- mark the half-time pulse but stops before the next run of hats.
+snare = voice {
+  params = { tone = { 900, 4200, 1850, "hz" } },
+  graph = function(n)
+    local crack = (noise() | dc(n.tone) | dc(0.8)) >> bandpass()
+    local wire = (noise() | dc(4600) | dc(0.7)) >> highpass()
+    local body = sine(188) + sine(326) * 0.32
+    local hit = crack * decay(ms(105))
+              + wire * decay(ms(54)) * 0.34
+              + body * decay(ms(72)) * 0.24
+    return hit
+        >> mul(n.velocity * 1.35 * lvl_drums)
+        >> shape("soft", 1.2)
+        >> pan(n.pan)
+  end,
+}
+
+-- Each onset gets a provenance-derived noise stream, so the new fingerprint
+-- report should see low correlation rather than a reset waveform.
+hat = voice {
+  params = {
+    tone = { 3000, 14000, 7600, "hz" },
+    ring = { 0.015, 0.14, 0.045, "s" },
+  },
+  graph = function(n)
+    local metal = (noise() | dc(n.tone) | dc(0.9)) >> highpass()
+    local env = decay(n.ring) * (1 - decay(ms(2)))
+    return metal
+        >> mul(env * n.velocity * 1.40 * lvl_drums)
+        >> pan(n.pan)
+  end,
+}
+
+-- A dry rim for the small notes around the backbeat. It has no noise, which
+-- keeps those notes legible underneath the snare instead of making it longer.
+rim = voice {
+  graph = function(n)
+    local modes = ring(920, ms(80)) * 0.48
+                + ring(1460, ms(55)) * 0.31
+                + ring(2380, ms(36)) * 0.18
+    return impulse() >> modes
+        >> mul(n.velocity * 1.60 * lvl_drums)
+        >> dcblock()
+        >> pan(n.pan)
+  end,
+}
+
+-- Four voices, deliberately below the break. A 1.6 second attack means its
+-- chord change is heard as a colour moving, not as another event on the grid.
+water = voice {
+  params = {
+    cutoff = { 300, 4200, 1250, "hz" },
+    spread = { 0, 0.018, 0.006 },
+  },
+  graph = function(n)
+    local osc = soft_saw(n.hz * (1 - n.spread)) * 0.28
+              + soft_saw(n.hz) * 0.32
+              + soft_saw(n.hz * (1 + n.spread)) * 0.28
+              + sine(n.hz * 2) * 0.08
+    local breathe = 0.78 + 0.22 * sine(0.13)
+    return (osc | n.cutoff * breathe | dc(0.62)) >> lowpass()
+        >> mul(adsr(secs(1.6), secs(1.1), 0.76, secs(2.8)) * n.velocity * lvl_pad)
+        >> chorus(0, 0.020, 0.008, 0.25)
+  end,
+}
+
+-- The five-bar counterline. Karplus–Strong supplies the front, while a quiet
+-- sine an octave up stops the darkest notes disappearing into the bass bus.
+glass = voice {
+  params = { bright = { 0.05, 0.95, 0.42 } },
+  graph = function(n)
+    local string = impulse() >> pluck(n.hz, 0.48, n.bright)
+    local light = sine(n.hz * 2.01) * decay(ms(380)) * 0.14
+    local env = 1 - decay(ms(7))
+    return (string * 0.62 + light) * env
+        >> mul(n.velocity * 0.58 * lvl_glass)
+        >> (dc(n.hz * 3.2) | dc(1.1)) >> peak()
+        >> pan(n.pan)
+  end,
+}
+
+---------------------------------------------------------------------- shape
+
+-- D Dorian: Dm9, G6, Cmaj9 and Am11. The upper voices move by steps while
+-- the bass line is free to anticipate the next root.
+chords = pattern("<[d3,a3,c4,e4] [g2,d3,e3,b3] [c3,g3,b3,d4] [a2,e3,g3,c4]>")
+      >> slow(2)
+
+roots = pattern([[<
+  [d1 ~ d2 ~ ~ a1 c2 ~]
+  [g1 ~ ~ d2 g2 ~ e2 ~]
+  [c2 ~ g1 ~ c2 ~ d2 ~]
+  [a1 ~ e2 ~ g1 ~ c2 ~]
+>]]) >> slow(2)
+
+-- Five bars against the eight-bar harmony. Every note is in D Dorian and no
+-- cell contains the major third that would force one chord interpretation.
+glass_cell = pattern([[<
+  [~ a4 ~ d5 ~ e5 ~ ~]
+  [d5 ~ ~ c5 ~ a4 ~ ~]
+  [~ e5 ~ g5 ~ d5 ~ a4]
+  [c5 ~ d5 ~ ~ a4 ~ ~]
+  [~ ~ g4 ~ a4 ~ c5 ~]
+>]])
+
+local function sections(spec)
+  return pattern(spec) >> slow(16)
+end
+
+bass_sections  = sections("0 0.72 1 1 1 1 0.55 1")
+kick_sections  = sections("0.45 0.75 1 1 1 1 0 1")
+snare_sections = sections("0 0.75 1 1 1 1 0.35 1")
+hat_sections   = sections("0 0.25 0.70 1 1 0.82 0.18 1")
+pad_sections   = sections("1 1 0.55 0.35 0.82 0.42 1 0.6")
+glass_sections = sections("0 0.3 0.72 0.45 0 0.72 1 0.8")
+
+---------------------------------------------------------------------- score
+
+play(undertow, roots
+      >> velocity(0.78 * bass_sections)
+      >> undertow.cutoff(scale(540, 1250, sine(1 / 9)))
+      >> undertow.drift(scale(0.005, 0.013, sine(1 / 11)))
+      >> undertow.drive(scale(1.8, 2.7, sine(1 / 13)))
+      >> duck("1 0 0 0", 0.28))
+
+-- Four bars of kick detail. Beat three is deliberately left mostly empty for
+-- the snare; the little pickup before the next bar is what makes it a break.
+play(kick, pattern("<[bd ~ ~ bd ~ ~ bd ~] [bd ~ ~ ~ ~ bd ~ bd] [bd ~ bd ~ ~ ~ bd ~] [bd ~ ~ bd ~ ~ [~ bd] ~]>")
+      >> velocity(0.92 * kick_sections))
+
+play(snare, pattern("<[~ ~ x ~] [~ ~ x [~ x]] [~ ~ x ~] [[~ x] ~ x ~]>")
+      >> velocity(0.88 * snare_sections)
+      >> snare.tone(scale(1500, 2300, sine(1 / 7)))
+      >> pan("-0.08 0.08")
+      >> to(room, 0.36))
+
+play(hat, pattern("<[~ x x x ~ x x x] [~ x [x x] x ~ x x [x x]] [~ x x ~ ~ x [x x] x] [~ x x x [~ x] x x x]>")
+      >> velocity(scale(0.27, 0.48, sine(2)) * hat_sections)
+      >> hat.tone(scale(5600, 9200, sine(1 / 7)))
+      >> hat.ring("0.035 0.026 0.050 0.030")
+      >> pan("-0.42 0.28 -0.18 0.38")
+      >> degrade(0.06))
+
+play(rim, pattern("<[~ ~ ~ [x ~] ~ ~ x ~] [~ x ~ ~ ~ ~ x ~] [~ ~ x ~ ~ [~ x] ~ ~] [~ x ~ ~ x ~ ~ [x ~]]>")
+      >> velocity(0.46 * snare_sections)
+      >> pan("0.36 -0.28")
+      >> to(room, 0.22))
+
+play(water, chords
+      >> velocity(0.28 * pad_sections)
+      >> water.cutoff(scale(850, 1750, sine(1 / 11)))
+      >> water.spread(scale(0.004, 0.009, sine(1 / 13)))
+      >> to(room, 0.72)
+      >> duck("1 0 0 0", 0.22))
+
+play(glass, glass_cell
+      >> shift(bars(2))
+      >> velocity(0.52 * glass_sections)
+      >> glass.bright(scale(0.26, 0.58, sine(1 / 9)))
+      >> pan("-0.32 0.30 -0.16 0.38")
+      >> to(echo, 0.34)
+      >> to(room, 0.44))
+
+-- Low end stays centred before width is added. The high-pass is below the D1
+-- fundamental (36.7 Hz), so it removes DC and rumble rather than the root.
+master(
+    highpass(30)
+    >> width(2.80)
+    >> lowpass(12500, 0.5)
+    >> shape("soft", 1.08)
+    >> limiter(0.003, 0.16)
+    >> mul(1.12)
+)

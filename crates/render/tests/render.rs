@@ -9,7 +9,10 @@
 
 use apteronotus_lua::evaluate;
 use apteronotus_pattern::Frac;
-use apteronotus_render::{RenderOptions, RenderSpan, Rendered, SampleFormat, render, write_wav};
+use apteronotus_render::{
+    RenderOptions, RenderSpan, Rendered, SampleFormat, TrackSelection, render, stem_lane_labels,
+    write_wav,
+};
 use apteronotus_songs::SONGS;
 
 /// One short click on the first of four steps, so onsets are exactly one cycle
@@ -97,6 +100,43 @@ fn the_tail_is_rendered_but_nothing_new_is_scheduled_into_it() {
     );
 }
 
+#[test]
+fn a_nonzero_cycle_window_prerolls_and_then_discards_the_prefix() {
+    let program = evaluate(CLICKS).unwrap();
+    let end = Frac::new(3, 200);
+    let begin = Frac::new(1, 200);
+    let full = render(
+        &program,
+        &RenderOptions {
+            span: RenderSpan::Cycles(end),
+            tail_seconds: 0.0,
+            ..RenderOptions::default()
+        },
+    )
+    .unwrap();
+    let window = render(
+        &program,
+        &RenderOptions {
+            span: RenderSpan::CyclesRange { begin, end },
+            tail_seconds: 0.0,
+            ..RenderOptions::default()
+        },
+    )
+    .unwrap();
+    let first_frame = (window.start_seconds * window.sample_rate).ceil() as usize;
+
+    assert_eq!(window.voices, 0, "the only onset belongs to the prefix");
+    assert!(
+        window.peak > 0.0,
+        "the prefix voice must ring into the window"
+    );
+    assert_eq!(
+        window.samples,
+        full.samples[first_frame * full.channels..],
+        "window rendering must be the exact suffix of a render from transport zero"
+    );
+}
+
 /// Nothing in the chain draws from a generator whose state depends on when a
 /// block was computed, so this is exact rather than approximate.
 #[test]
@@ -168,6 +208,332 @@ fn stems_expose_the_whole_routed_layout() {
         "a song with sends has buses beyond its main output"
     );
     assert_eq!(stems.frames(), main.frames());
+}
+
+#[test]
+fn raw_stems_expose_bus_inputs_before_returns_clear_them() {
+    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let processed = render(
+        &program,
+        &RenderOptions {
+            stems: true,
+            ..options(2.0)
+        },
+    )
+    .unwrap();
+    let raw = render(
+        &program,
+        &RenderOptions {
+            raw_stems: true,
+            ..options(2.0)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(raw.channels, program.buses.total_channels());
+    assert_eq!(raw.frames(), processed.frames());
+    assert!(
+        raw.channel_metrics()[2..]
+            .iter()
+            .any(|metrics| metrics.rms > 0.0),
+        "a raw send lane must retain signal before its return consumes it"
+    );
+    assert!(
+        processed.channel_metrics()[2..]
+            .iter()
+            .all(|metrics| metrics.rms == 0.0),
+        "post-processor bus lanes are cleared after their returns"
+    );
+}
+
+#[test]
+fn track_selection_is_post_evaluation_and_keeps_original_program_order() {
+    let program = evaluate(
+        r#"
+tempo(120)
+local click = voice {
+  graph = function(n)
+    return noise() * decay(ms(20)) * n.velocity * 0.1
+  end,
+}
+play(click, "x ~" >> velocity(0.7))
+play(click, "~ x" >> velocity(0.4))
+"#,
+    )
+    .unwrap();
+
+    let render_with = |tracks: TrackSelection| {
+        render(
+            &program,
+            &RenderOptions {
+                span: RenderSpan::Cycles(Frac::ONE),
+                tail_seconds: 0.0,
+                tracks,
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap()
+    };
+
+    let full = render_with(TrackSelection::all());
+    let mut first_only = TrackSelection::all();
+    first_only.include_only([0]);
+    let first = render_with(first_only);
+    let mut second_only = TrackSelection::all();
+    second_only.include_only([1]);
+    let second = render_with(second_only);
+
+    assert_eq!(full.voices, 2);
+    assert_eq!(full.tracks.len(), 2);
+    assert_eq!(full.tracks[0].index, 0);
+    assert_eq!(full.tracks[1].index, 1);
+    assert_eq!(first.voices, 1);
+    assert_eq!(first.tracks[0].voices, 1);
+    assert_eq!(second.voices, 1);
+    assert_eq!(full.samples.len(), first.samples.len());
+    for ((mixed, first), second) in full.samples.iter().zip(&first.samples).zip(&second.samples) {
+        assert!(
+            (mixed - (first + second)).abs() < 1.0e-6,
+            "the isolated tracks no longer sum to the unchanged full render"
+        );
+    }
+}
+
+#[test]
+fn muting_every_track_keeps_the_output_shape_and_schedules_no_voices() {
+    let program = evaluate(CLICKS).unwrap();
+    let mut tracks = TrackSelection::all();
+    tracks.exclude([0]);
+    let rendered = render(
+        &program,
+        &RenderOptions {
+            tracks,
+            tail_seconds: 0.0,
+            ..options(1.0)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(rendered.channels, 1);
+    assert_eq!(rendered.voices, 0);
+    assert_eq!(rendered.peak, 0.0);
+}
+
+#[test]
+fn an_isolated_track_keeps_the_persistent_routed_layout() {
+    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let full = render(
+        &program,
+        &RenderOptions {
+            stems: true,
+            ..options(2.0)
+        },
+    )
+    .unwrap();
+    let mut tracks = TrackSelection::all();
+    tracks.include_only([0]);
+    let isolated = render(
+        &program,
+        &RenderOptions {
+            stems: true,
+            tracks,
+            ..options(2.0)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(isolated.channels, full.channels);
+    assert_eq!(isolated.frames(), full.frames());
+    assert!(isolated.voices > 0);
+    assert!(isolated.voices < full.voices);
+}
+
+#[test]
+fn an_unknown_selected_track_is_a_diagnostic() {
+    let program = evaluate(CLICKS).unwrap();
+    let mut tracks = TrackSelection::all();
+    tracks.include_only([1]);
+    let error = render(
+        &program,
+        &RenderOptions {
+            tracks,
+            ..options(1.0)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "track 1 does not exist; program track count is 1"
+    );
+}
+
+#[test]
+fn channel_metrics_measure_interleaved_lanes_independently() {
+    let rendered = Rendered {
+        sample_rate: 48_000.0,
+        channels: 2,
+        samples: vec![1.0, -0.5, -1.0, 0.5, 0.0, 0.0],
+        format: SampleFormat::Float32,
+        voices: 0,
+        tracks: Vec::new(),
+        scheduled_seconds: 0.0,
+        start_seconds: 0.0,
+        peak: 1.0,
+        clipped: 0,
+    };
+    let metrics = rendered.channel_metrics();
+
+    assert_eq!(metrics.len(), 2);
+    assert!(metrics[0].dc.abs() < 1.0e-12);
+    assert!(metrics[1].dc.abs() < 1.0e-12);
+    assert!((metrics[0].rms - (2.0f64 / 3.0).sqrt()).abs() < 1.0e-12);
+    assert!((metrics[1].rms - (0.5f64 / 3.0).sqrt()).abs() < 1.0e-12);
+    assert_eq!(metrics[0].peak, 1.0);
+    assert_eq!(metrics[1].peak, 0.5);
+    let whole = rendered.metrics();
+    assert!(whole.dc.abs() < 1.0e-12);
+    assert!((whole.rms - (2.5f64 / 6.0).sqrt()).abs() < 1.0e-12);
+    assert_eq!(whole.peak, 1.0);
+}
+
+#[test]
+fn onset_fingerprints_use_scheduler_clock_and_normalized_waveforms() {
+    let mut samples = vec![0.0; 30];
+    samples[0..2].copy_from_slice(&[1.0, -1.0]);
+    samples[10..12].copy_from_slice(&[0.5, -0.5]);
+    samples[20..22].copy_from_slice(&[-1.0, 1.0]);
+    let rendered = Rendered {
+        sample_rate: 10.0,
+        channels: 1,
+        samples,
+        format: SampleFormat::Float32,
+        voices: 3,
+        tracks: Vec::new(),
+        scheduled_seconds: 3.0,
+        start_seconds: 5.0,
+        peak: 1.0,
+        clipped: 0,
+    };
+
+    let metrics = rendered
+        .onset_fingerprint_metrics(&[5.0, 6.0, 7.0], 0.2)
+        .unwrap();
+    assert_eq!(metrics.window_seconds, 0.2);
+    assert_eq!(metrics.correlations, [1.0, -1.0]);
+    assert_eq!(metrics.median_correlation, 0.0);
+    assert_eq!(metrics.maximum_correlation, 1.0);
+    assert!(
+        rendered
+            .onset_fingerprint_metrics(&[4.0, 5.0], 0.2)
+            .is_none()
+    );
+}
+
+#[test]
+fn spectral_centroid_finds_an_antiphase_stereo_tone_without_cancellation() {
+    let sample_rate = 32_768.0;
+    let frequency = 1_024.0;
+    let mut samples = Vec::with_capacity(32_768 * 2);
+    for frame in 0..32_768 {
+        let sample = (std::f64::consts::TAU * frequency * frame as f64 / sample_rate).sin() as f32;
+        samples.extend([sample, -sample]);
+    }
+    let rendered = Rendered {
+        sample_rate,
+        channels: 2,
+        samples,
+        format: SampleFormat::Float32,
+        voices: 0,
+        tracks: Vec::new(),
+        scheduled_seconds: 1.0,
+        start_seconds: 0.0,
+        peak: 1.0,
+        clipped: 0,
+    };
+
+    let spectral = rendered.spectral_metrics().unwrap();
+    let centroid = spectral.centroid_hz;
+    assert!(
+        (centroid - frequency).abs() < 2.0,
+        "expected {frequency} Hz, measured {centroid} Hz"
+    );
+    let bands = spectral.band_decibels();
+    assert!((bands[1].unwrap() - -3.0103).abs() < 0.05);
+    assert!(bands[0].is_none_or(|level| level < -100.0));
+    assert!(bands[2].is_none_or(|level| level < -100.0));
+    let thirds = spectral.third_octave_decibels();
+    assert!((thirds[16].unwrap() - -3.0103).abs() < 0.05);
+    assert!(thirds[15].is_none_or(|level| level < -100.0));
+    assert!(thirds[17].is_none_or(|level| level < -100.0));
+}
+
+#[test]
+fn stereo_width_and_envelope_spread_have_declared_coordinates() {
+    let mut samples = Vec::new();
+    // Twenty 20 ms windows: ten at -20 dBFS, ten at 0 dBFS. A signal present
+    // only on the left has equal sum and difference energy, hence 0 dB S/M.
+    for window in 0..20 {
+        let level = if window < 10 { 0.1 } else { 1.0 };
+        for _ in 0..20 {
+            samples.extend([level, 0.0]);
+        }
+    }
+    let rendered = Rendered {
+        sample_rate: 1_000.0,
+        channels: 2,
+        samples,
+        format: SampleFormat::Float32,
+        voices: 0,
+        tracks: Vec::new(),
+        scheduled_seconds: 0.4,
+        start_seconds: 0.0,
+        peak: 1.0,
+        clipped: 0,
+    };
+
+    let stereo = rendered.stereo_metrics().unwrap();
+    assert!(stereo.side_mid_decibels().unwrap().abs() < 1.0e-12);
+    let envelope = rendered.envelope_metrics_20ms().unwrap();
+    assert!((envelope.p5_dbfs - -23.0102999566).abs() < 1.0e-6);
+    assert!((envelope.p95_dbfs - -3.0102999566).abs() < 1.0e-6);
+    assert!((envelope.spread_decibels - 20.0).abs() < 1.0e-6);
+}
+
+#[test]
+fn level_stability_excludes_the_response_tail() {
+    let mut samples = vec![0.1; 200];
+    samples.extend(vec![1.0; 200]);
+    // This explicit tail is louder still; it must not enter either window.
+    samples.extend(vec![4.0; 100]);
+    let rendered = Rendered {
+        sample_rate: 1_000.0,
+        channels: 1,
+        samples,
+        format: SampleFormat::Float32,
+        voices: 0,
+        tracks: Vec::new(),
+        scheduled_seconds: 0.4,
+        start_seconds: 0.0,
+        peak: 4.0,
+        clipped: 100,
+    };
+
+    let stability = rendered.level_stability(0.2).unwrap();
+    assert_eq!(stability.windows, 2);
+    assert!((stability.min_rms_dbfs - -20.0).abs() < 1.0e-6);
+    assert!(stability.max_rms_dbfs.abs() < 1.0e-12);
+    assert!((stability.spread_decibels - 20.0).abs() < 1.0e-6);
+    assert!(stability.peak_max_dbfs.unwrap().abs() < 1.0e-12);
+}
+
+#[test]
+fn stem_labels_follow_the_authoritative_flattened_layout() {
+    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let labels = stem_lane_labels(&program);
+
+    assert_eq!(labels.len(), program.buses.total_channels());
+    assert_eq!(&labels[..2], ["main.L", "main.R"]);
+    assert_eq!(&labels[2..4], ["bus0.L", "bus0.R"]);
 }
 
 #[test]
@@ -272,7 +638,9 @@ fn pcm16_clamps_rather_than_wrapping() {
         samples: vec![0.0, 1.0, -1.0, 4.0, -4.0],
         format: SampleFormat::Pcm16,
         voices: 0,
+        tracks: Vec::new(),
         scheduled_seconds: 0.0,
+        start_seconds: 0.0,
         peak: 4.0,
         clipped: 2,
     };

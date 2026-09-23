@@ -1,0 +1,203 @@
+-- seven-teeth.eod — Seven Teeth
+-- GPT-6 Astra. A machine with one tooth missing, still trying to dance.
+-- 144 quarter-notes/minute, 64 measures of 7/8, entirely synthesized.
+-- Render: cargo run -p apteronotus-render -- songs/seven-teeth.eod --cycles 64 --tail 4
+-- Form: 4-bar ignition / 12 riff / 8 chorus / 8 riff / 8 half-time /
+--       8 solo / 12 last chorus / 4 disintegration.
+
+tempo { beats_per_cycle = 3.5, { at = bars(0), bpm = 144 } }
+
+local room = send {
+  graph = reverb(13, secs(0.7), 0.55),
+  level = 0.18,
+}
+
+-- One persistent stereo amplifier. Overlapping notes fight inside the same
+-- distortion, rather than each carrying a separate amp that dies with it.
+local amp = send {
+  graph = (highpass(75, 0.65) | highpass(75, 0.65))
+    >> (shape("tanh", 14) | shape("tanh", 14))
+    >> (lowpass(5800, 0.7) | lowpass(5800, 0.7))
+    >> (shape("clip", 1.6) | shape("clip", 1.6))
+    >> (lowpass(3400, 0.75) | lowpass(3400, 0.75))
+    >> (highpass(100, 0.7) | highpass(100, 0.7))
+    >> ((mul(0.88) | mul(0.88)) + reverb(16, secs(0.85), 0.6) * 0.12),
+  level = 0.26,
+}
+
+local function strings(side, tuning)
+  return voice {
+    graph = function(n)
+      local hz = n.hz * tuning * init_random(1, 0.998, 1.002)
+      local pick = noise() * decay(ms(7))
+      local attack = pick >> pluck(n.hz, 0.04, 0.3)
+      local body = triangle(hz) * 0.7 + saw(hz * 1.4983) * 0.3
+      local signal = (body >> lowpass(1600 + decay(ms(300)) * 3100, 0.65))
+        + attack * 0.5 + pick * 0.1
+      return signal * adsr(ms(2), ms(190), 0.72, ms(130)) * n.velocity
+        >> pan(side) >> to(amp, 1) >> mul(0)
+    end,
+  }
+end
+local left, right = strings(-0.8, 0.998), strings(0.8, 1.002)
+
+local bass = voice {
+  graph = function(n)
+    return (triangle(n.hz) * 0.7 + saw(n.hz * 2) * 0.12)
+      >> shape("tanh", 2) >> highpass(28, 0.65) >> lowpass(1100, 0.65)
+      >> mul(adsr(ms(3), ms(90), 0.75, ms(70)) * n.velocity * 0.15)
+      >> pan(0)
+  end,
+}
+local kick = voice {
+  graph = function(n)
+    local skin = (sine(55 + decay(ms(15)) * 32) + sine(108) * 0.2)
+      * decay(ms(200))
+    local tap = noise() >> bandpass(2400, 0.7) >> mul(decay(ms(8)) * 0.35)
+    return (skin + tap) >> shape("tanh", 1.5)
+      >> mul(n.velocity * 0.32) >> pan(0)
+  end,
+}
+local snare = voice {
+  graph = function(n)
+    local skin = (triangle(181) + sine(317) * 0.28) * decay(ms(100))
+    local wire = noise() >> highpass(1500, 0.65) >> lowpass(7900, 0.65)
+      >> mul(decay(ms(160)) * 1.2)
+    return (skin * 0.65 + wire) >> shape("tanh", 2.2)
+      >> mul(n.velocity * 0.36) >> pan(-0.1) >> to(room, 0.5)
+  end,
+}
+local hat = voice {
+  graph = function(n)
+    return noise() >> highpass(4800, 0.7) >> lowpass(11200, 0.7)
+      >> mul(decay(ms(85)) * n.velocity * 0.14)
+      >> pan(0.4) >> to(room, 0.12)
+  end,
+}
+local cymbal = voice {
+  graph = function(n)
+    local metal = sine(3719) * sine(5831) * 0.24 + noise()
+    return metal >> highpass(2300, 0.65) >> lowpass(10500, 0.7)
+      >> mul(decay(secs(1.3)) * n.velocity * 0.2)
+      >> pan(-0.45) >> to(room, 0.38)
+  end,
+}
+local tom = voice {
+  graph = function(n)
+    return (sine(n.hz + decay(ms(24)) * 28) + triangle(n.hz * 1.55) * 0.18)
+      * decay(ms(240)) * n.velocity * 0.27
+      >> pan(n.pan) >> to(room, 0.3)
+  end,
+}
+local lead = voice {
+  graph = function(n)
+    local bend = 1 - decay(ms(45)) * 0.035
+    local hz = n.hz * bend * (1 + sine(6.2) * 0.004)
+    return (pulse(hz, 0.38) * 0.24 + triangle(hz) * 0.55)
+      * adsr(ms(4), ms(110), 0.8, ms(180)) * n.velocity * 0.6
+      >> pan(0.05) >> to(amp, 1) >> mul(0)
+  end,
+}
+
+-- Literal patterns keep their source coordinates through the arrangement.
+local riff = {
+  pattern("d2 d2 ~ f2 ~ ab2 g2"),
+  pattern("d2 ~ [d2 d2] eb2 d2 ~ c3"),
+  pattern("d2 d2 ~ f2 ~ g2 ab2"),
+  pattern("a2 g2 f2 eb2 d2 ~ ~"),
+}
+local roots = {
+  pattern("d1 d1 ~ f1 ~ ab1 g1"),
+  pattern("d1 ~ [d1 d1] eb1 d1 ~ c2"),
+  pattern("d1 d1 ~ f1 ~ g1 ab1"),
+  pattern("a1 g1 f1 eb1 d1 ~ ~"),
+}
+local chords = {
+  pattern("bb2@3 f2@2 c3@2"), pattern("d2@5 c3@2"),
+  pattern("bb2@3 f2@2 a2@2"), pattern("g2@3 a2@2 d2@2"),
+}
+local chorus_roots = {
+  pattern("bb1 bb1 bb1 f1 f1 c2 c2"), pattern("d1 d1 d1 d1 d1 c2 c2"),
+  pattern("bb1 bb1 bb1 f1 f1 a1 a1"), pattern("g1 g1 g1 a1 a1 d1 d1"),
+}
+local solo = {
+  pattern("d4 ~ f4 g4 ab4 a4 ~"), pattern("c5 a4 g4 f4 d4 ~ ~"),
+  pattern("f4 g4 a4 c5 d5 ~ c5"), pattern("a4 ~ ~ g4 f4 eb4 d4"),
+  pattern("d5 ~ c5 a4 g4 ab4 a4"), pattern("c5 d5 f5 ~ e5 eb5 d5"),
+  pattern("a4 c5 d5 ~ ~ c5 a4"), pattern("g4 f4 eb4 d4 ~ ~ ~"),
+}
+local l, r, b, k, s, h, c, t, melody = {}, {}, {}, {}, {}, {}, {}, {}, {}
+local seconds_per_bar = 3.5 * 60 / 144
+local function hit(lane, bar, notes, level)
+  table.insert(lane, at(bars(bar), notes >> velocity(level)))
+end
+
+for bar = 0, 59 do
+  local row = bar % 4 + 1
+  local chorus = (bar >= 16 and bar < 24) or bar >= 48
+  local broken = bar >= 32 and bar < 40
+  local notes, root = riff[row], roots[row]
+  local gate = 0.64
+  if chorus then
+    notes, root, gate = chords[row], chorus_roots[row], 1.65
+  elseif broken then
+    notes, root, gate = pattern("d2 ~ ~ ~ ~ ab2 ~"), pattern("d1 ~ ~ ~ ~ ab1 ~"), 0.8
+    if row == 4 then
+      notes, root = pattern("f2 ~ eb2 ~ d2 ~ ~"), pattern("f1 ~ eb1 ~ d1 ~ ~")
+    end
+  end
+  table.insert(l, at(bars(bar), notes >> hold(beats(gate))
+    >> velocity(pattern("0.9 0.73 0.8 0.95 0.74 0.9 0.77"))))
+  if bar >= 2 then
+    table.insert(r, at(secs(bar * seconds_per_bar + 0.005 + (bar % 3) * 0.002),
+      notes >> hold(beats(gate * 0.96)) >> velocity(0.83)))
+  end
+  if bar >= 4 then
+    table.insert(b, at(bars(bar), root >> hold(beats(0.48)) >> velocity(0.85)))
+    local bd, sd = pattern("x ~ x ~ ~ x ~"), pattern("~ ~ ~ x ~ ~ x")
+    if broken then bd, sd = pattern("x ~ ~ ~ ~ x ~"), pattern("~ ~ ~ x ~ ~ ~") end
+    hit(k, bar, bd, 0.92)
+    table.insert(s, at(secs(bar * seconds_per_bar + 0.01),
+      sd >> velocity(0.82 + (bar % 3) * 0.035)))
+    local hats = pattern("x x x x x x x")
+    if broken then hats = pattern("x ~ x ~ x ~ x") end
+    table.insert(h, at(bars(bar), hats >> velocity(pattern("0.8 0.4 0.55 0.85 0.45 0.78 0.4"))))
+    if bar % 8 == 7 then
+      hit(t, bar, pattern("~ ~ ~ ~ a2 f2 d2") >> pan(-0.2), 0.86)
+      hit(s, bar, pattern("~ ~ ~ ~ ~ [x x] ~"), 0.5)
+    end
+  end
+  if bar == 4 or bar == 16 or bar == 24 or bar == 32 or bar == 40
+    or bar == 48 or bar == 56 then hit(c, bar, pattern("x ~ ~ ~ ~ ~ ~"), 0.9) end
+  if bar >= 40 and bar < 48 then
+    table.insert(melody, at(bars(bar), solo[bar - 39]
+      >> hold(beats(0.68)) >> velocity(0.9)))
+  end
+end
+
+-- Three staggered teeth fall out. The final D gets the rest of the room.
+for bar = 60, 62 do
+  local notes = pattern("d2 ~ ~ f2 ~ ~ ~")
+  if bar == 61 then notes = pattern("eb2 ~ ~ ~ ~ ~ ~") end
+  if bar == 62 then notes = pattern("d2 ~ ~ ~ ~ ~ ~") end
+  local gate = 0.7
+  if bar == 62 then gate = 6 end
+  table.insert(l, at(bars(bar), notes >> hold(beats(gate)) >> velocity(0.9)))
+  table.insert(r, at(bars(bar), notes >> hold(beats(gate)) >> velocity(0.83)))
+  table.insert(b, at(bars(bar), pattern("d1 ~ ~ ~ ~ ~ ~")
+    >> hold(beats(gate)) >> velocity(0.85)))
+  hit(k, bar, pattern("x ~ ~ ~ ~ ~ ~"), 0.9)
+  hit(s, bar, pattern("x ~ ~ ~ ~ ~ ~"), 0.85)
+  hit(c, bar, pattern("x ~ ~ ~ ~ ~ ~"), 0.85)
+end
+
+play(left, timeline(l))
+play(right, timeline(r))
+play(bass, timeline(b))
+play(kick, timeline(k))
+play(snare, timeline(s))
+play(hat, timeline(h))
+play(cymbal, timeline(c))
+play(tom, timeline(t))
+play(lead, timeline(melody))
+master(limiter(ms(3), ms(110)) >> mul(0.88))

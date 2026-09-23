@@ -27,16 +27,20 @@
 //! `pattern` never learns that fundsp does. That seam is what keeps the engine
 //! liftable behind an ABI later without disturbing anything above it.
 
+mod adsr;
 mod analyzer;
 pub mod builder;
 pub mod control;
 mod fdn;
+mod flue;
+mod harmonic;
 pub mod input;
 pub mod instrument;
 pub mod lower;
 pub mod note;
 pub mod routing;
 pub mod stdlib;
+mod string;
 pub mod template;
 
 pub use builder::{FdnConfig, GraphBuilder, n};
@@ -47,7 +51,8 @@ pub use input::{
 pub use instrument::{InstrumentLifetime, PatchError, PatchTemplate};
 pub use lower::{
     ControlStore, LowerError, instantiate, instantiate_patch, instantiate_patch_routed,
-    instantiate_patch_routed_with_audio_inputs, instantiate_routed,
+    instantiate_patch_routed_at, instantiate_patch_routed_with_audio_inputs,
+    instantiate_patch_routed_with_audio_inputs_at, instantiate_routed,
     instantiate_routed_with_controls, instantiate_timed_patch_routed,
     instantiate_timed_patch_routed_with_routing, instantiate_with_controls,
 };

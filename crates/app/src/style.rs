@@ -55,6 +55,7 @@ pub const DISCHARGE_WASH: Color32 = Color32::from_rgba_premultiplied(0x00, 0x38,
 
 /// Work in flight.
 pub const CAUTION: Color32 = Color32::from_rgb(0xff, 0xb0, 0x3a);
+pub const SEARCH_WASH: Color32 = Color32::from_rgb(0x53, 0x39, 0x16);
 /// A refused edit.
 pub const ALERT: Color32 = Color32::from_rgb(0xff, 0x51, 0x48);
 
@@ -83,6 +84,7 @@ pub const CODE_PUNCT: Color32 = Color32::from_rgb(0x7b, 0x8e, 0x9b);
 const SQUARE: CornerRadius = CornerRadius::ZERO;
 /// The vertical rhythm; every margin is a multiple of it.
 pub const UNIT: f32 = 6.0;
+pub const FILE_WINDOW_WIDTH: f32 = 520.0;
 
 // ---------------------------------------------------------------------------
 // Installation
@@ -483,7 +485,14 @@ pub fn discharge_meter(ui: &mut Ui, accent: Color32, active: bool) {
 
 /// The editor gutter: right-aligned line numbers on the same baseline grid as
 /// the text, closed by a hairline.
-pub fn gutter(ui: &mut Ui, lines: usize, current: usize, row_height: f32, font: &FontId) {
+pub fn gutter(
+    ui: &mut Ui,
+    lines: usize,
+    current: usize,
+    error: Option<usize>,
+    row_height: f32,
+    font: &FontId,
+) {
     let digits = lines.to_string().len().max(2) as f32;
     let glyph = ui.fonts_mut(|fonts| fonts.glyph_width(font, '0'));
     let width = digits * glyph + UNIT * 1.5;
@@ -494,7 +503,13 @@ pub fn gutter(ui: &mut Ui, lines: usize, current: usize, row_height: f32, font: 
     let painter = ui.painter();
     for line in 0..lines {
         let top = rect.top() + line as f32 * row_height;
-        let color = if line == current { DISCHARGE } else { GUTTER };
+        let color = if Some(line) == error {
+            ALERT
+        } else if line == current {
+            DISCHARGE
+        } else {
+            GUTTER
+        };
         painter.text(
             eframe::egui::pos2(rect.right() - UNIT, top),
             eframe::egui::Align2::RIGHT_TOP,

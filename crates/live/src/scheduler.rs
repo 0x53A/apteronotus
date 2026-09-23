@@ -61,11 +61,30 @@ impl<'a> ScheduledRun<'a> {
 pub struct RoutedRuntime<'a> {
     pub layout: &'a BusLayout,
     pub controls: &'a ControlStore,
+    pub sequencer_origin_seconds: f64,
 }
 
 impl<'a> RoutedRuntime<'a> {
     pub fn new(layout: &'a BusLayout, controls: &'a ControlStore) -> RoutedRuntime<'a> {
-        RoutedRuntime { layout, controls }
+        RoutedRuntime {
+            layout,
+            controls,
+            sequencer_origin_seconds: 0.0,
+        }
+    }
+
+    /// Bind the arena to a sequencer whose local zero occurs at this absolute
+    /// transport time.
+    pub fn new_rebased(
+        layout: &'a BusLayout,
+        controls: &'a ControlStore,
+        sequencer_origin_seconds: f64,
+    ) -> RoutedRuntime<'a> {
+        RoutedRuntime {
+            layout,
+            controls,
+            sequencer_origin_seconds,
+        }
     }
 }
 
@@ -253,11 +272,13 @@ impl PitchScheduler {
             return Ok(FillReport {
                 span: Span::new(begin, begin),
                 voices: 0,
+                tracks: Vec::new(),
             });
         }
 
         let span = Span::new(begin, end);
         let mut track_history = vec![self.previous_hz];
+        let mut tracks = Vec::new();
         let pending = prepare_window(
             span,
             [ScheduledTrack::new(pattern, template)],
@@ -265,12 +286,17 @@ impl PitchScheduler {
             sequencer,
             VoiceLayout::MainOnly,
             &mut track_history,
+            &mut tracks,
         )?;
         let voices = pending.len();
         commit_window(pending, sequencer);
         self.previous_hz = track_history[0];
         self.frontier = end;
-        Ok(FillReport { span, voices })
+        Ok(FillReport {
+            span,
+            voices,
+            tracks,
+        })
     }
 
     /// Fill to `seconds` on the sequencer clock.
@@ -363,10 +389,12 @@ impl ProgramScheduler {
             return Ok(FillReport {
                 span: Span::new(begin, begin),
                 voices: 0,
+                tracks: Vec::new(),
             });
         }
         let span = Span::new(begin, end);
         let mut previous_hz = self.previous_hz.clone();
+        let mut track_reports = Vec::new();
         let pending = prepare_window(
             span,
             tracks,
@@ -374,12 +402,17 @@ impl ProgramScheduler {
             sequencer,
             VoiceLayout::MainOnly,
             &mut previous_hz,
+            &mut track_reports,
         )?;
         let voices = pending.len();
         commit_window(pending, sequencer);
         self.previous_hz = previous_hz;
         self.frontier = end;
-        Ok(FillReport { span, voices })
+        Ok(FillReport {
+            span,
+            voices,
+            tracks: track_reports,
+        })
     }
 
     /// Fill a program whose voices produce flattened main/bus stems and may
@@ -454,10 +487,12 @@ impl ProgramScheduler {
             return Ok(FillReport {
                 span: Span::new(begin, begin),
                 voices: 0,
+                tracks: Vec::new(),
             });
         }
         let span = Span::new(begin, end);
         let mut previous_hz = self.previous_hz.clone();
+        let mut track_reports = Vec::new();
         let mut pending = prepare_window(
             span,
             tracks,
@@ -468,6 +503,7 @@ impl ProgramScheduler {
                 controls: routed.controls,
             },
             &mut previous_hz,
+            &mut track_reports,
         )?;
         prepare_timed_runs(
             span,
@@ -482,7 +518,11 @@ impl ProgramScheduler {
         commit_window(pending, sequencer);
         self.previous_hz = previous_hz;
         self.frontier = end;
-        Ok(FillReport { span, voices })
+        Ok(FillReport {
+            span,
+            voices,
+            tracks: track_reports,
+        })
     }
 
     pub fn fill_to_seconds<'a>(
@@ -509,6 +549,23 @@ impl ProgramScheduler {
             .seconds_to_cycle(seconds)
             .map_err(ScheduleError::Transport)?;
         self.fill_to_tempo_map(end, tracks, tempo, sequencer)
+    }
+
+    /// Fill an absolute transport window into a sequencer whose zero occurs
+    /// at `sequencer_origin_seconds` on that transport.
+    pub fn fill_to_seconds_tempo_map_from<'a>(
+        &mut self,
+        absolute_seconds: f64,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        tempo: &TempoMap,
+        sequencer: &mut Sequencer,
+        sequencer_origin_seconds: f64,
+    ) -> Result<FillReport, ScheduleError> {
+        let end = tempo
+            .seconds_to_cycle(absolute_seconds)
+            .map_err(ScheduleError::Transport)?;
+        let clock = SequencerClock::new(tempo, sequencer_origin_seconds)?;
+        self.fill_with_clock(end, tracks, &clock, sequencer)
     }
 
     pub fn fill_routed_to_seconds<'a>(
@@ -556,6 +613,24 @@ impl ProgramScheduler {
         self.fill_routed_program_to_tempo_map(end, tracks, runs, tempo, sequencer, routed)
     }
 
+    /// Fill an absolute transport window into a replacement sequencer whose
+    /// local clock begins at `sequencer_origin_seconds`.
+    pub fn fill_routed_program_to_seconds_tempo_map_from<'a>(
+        &mut self,
+        absolute_seconds: f64,
+        tracks: impl IntoIterator<Item = ScheduledTrack<'a>>,
+        runs: impl IntoIterator<Item = ScheduledRun<'a>>,
+        tempo: &TempoMap,
+        sequencer: &mut Sequencer,
+        routed: RoutedRuntime<'_>,
+    ) -> Result<FillReport, ScheduleError> {
+        let end = tempo
+            .seconds_to_cycle(absolute_seconds)
+            .map_err(ScheduleError::Transport)?;
+        let clock = SequencerClock::new(tempo, routed.sequencer_origin_seconds)?;
+        self.fill_routed_program_with_clock(end, tracks, runs, &clock, sequencer, routed)
+    }
+
     /// Forget event-to-event instantiation history while retaining the
     /// publication frontier.
     ///
@@ -592,6 +667,7 @@ fn prepare_window<'a>(
     sequencer: &Sequencer,
     voice_layout: VoiceLayout<'_>,
     previous_hz: &mut Vec<Option<f64>>,
+    reports: &mut Vec<TrackFillReport>,
 ) -> Result<Vec<PendingVoice>, ScheduleError> {
     let mut pending = Vec::new();
     for (track_index, track) in tracks.into_iter().enumerate() {
@@ -629,6 +705,11 @@ fn prepare_window<'a>(
         // but previous-note state is temporal: transforms may emit events in
         // a stable order that is not chronological.
         events.sort_by_key(|event| event.whole.expect("onsets always have a whole span").begin);
+        let voice_begin = pending.len();
+        let mut distinct_onsets = 0usize;
+        let mut previous_onset_seconds: Option<f64> = None;
+        let mut onsets_seconds = Vec::new();
+        let mut intervals_seconds = Vec::new();
         let mut event_index = 0;
         while event_index < events.len() {
             let onset = events[event_index]
@@ -641,6 +722,14 @@ fn prepare_window<'a>(
                     event.whole.expect("onsets always have a whole span").begin != onset
                 })
                 .map_or(events.len(), |offset| event_index + offset);
+            distinct_onsets += 1;
+            let onset_seconds = clock.cycle_to_seconds(onset);
+            onsets_seconds.push(onset_seconds);
+            if let Some(previous) = previous_onset_seconds {
+                let interval = onset_seconds - previous;
+                intervals_seconds.push(interval);
+            }
+            previous_onset_seconds = Some(onset_seconds);
             let preceding_hz = previous_hz[track_index];
             let mut last_hz = preceding_hz;
             for event in &events[event_index..group_end] {
@@ -716,6 +805,13 @@ fn prepare_window<'a>(
             previous_hz[track_index] = last_hz;
             event_index = group_end;
         }
+        reports.push(TrackFillReport {
+            voices: pending.len() - voice_begin,
+            distinct_onsets,
+            min_interval_seconds: intervals_seconds.iter().copied().reduce(f64::min),
+            onsets_seconds,
+            intervals_seconds,
+        });
     }
     Ok(pending)
 }
@@ -863,6 +959,39 @@ fn commit_window(pending: Vec<PendingVoice>, sequencer: &mut Sequencer) {
     }
 }
 
+/// A backend-local seconds projection over one absolute musical transport.
+/// Durations are unchanged; only absolute event timestamps are rebased.
+struct SequencerClock<'a> {
+    tempo: &'a TempoMap,
+    origin_seconds: f64,
+}
+
+impl<'a> SequencerClock<'a> {
+    fn new(tempo: &'a TempoMap, origin_seconds: f64) -> Result<Self, ScheduleError> {
+        if !origin_seconds.is_finite() {
+            return Err(ScheduleError::Transport(TransportError::InvalidSeconds));
+        }
+        Ok(Self {
+            tempo,
+            origin_seconds,
+        })
+    }
+}
+
+impl CycleTime for SequencerClock<'_> {
+    fn cycle_to_seconds(&self, cycle: Frac) -> f64 {
+        self.tempo.cycle_to_seconds(cycle) - self.origin_seconds
+    }
+
+    fn span_to_seconds(&self, span: Span) -> f64 {
+        self.tempo.span_to_seconds(span)
+    }
+
+    fn seconds_to_cycle(&self, seconds: f64) -> Result<Frac, TransportError> {
+        self.tempo.seconds_to_cycle(seconds + self.origin_seconds)
+    }
+}
+
 impl Default for PitchScheduler {
     fn default() -> Self {
         PitchScheduler::new(Frac::ZERO)
@@ -945,10 +1074,32 @@ fn numeric_param_value(value: &ControlValue) -> Option<ParamValue> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
+pub struct TrackFillReport {
+    /// Concrete voices instantiated, including simultaneous chord members.
+    pub voices: usize,
+    /// Unique transport positions that began one or more voices.
+    pub distinct_onsets: usize,
+    /// Smallest positive wall-clock distance between distinct onset groups.
+    pub min_interval_seconds: Option<f64>,
+    /// Sequencer-clock positions of distinct onset groups, in chronological
+    /// order. The ordinary sequencer origin is transport zero; a replacement
+    /// stream reports positions relative to its explicit nonzero origin.
+    /// These are scheduler coordinates, not audio-derived transients.
+    pub onsets_seconds: Vec<f64>,
+    /// Every wall-clock distance between consecutive distinct onset groups,
+    /// in chronological order. Chord members do not create zero intervals.
+    pub intervals_seconds: Vec<f64>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub struct FillReport {
     pub span: Span,
+    /// All scheduled units, including finite patch runs.
     pub voices: usize,
+    /// One entry per supplied note track, in input order. Finite patch runs do
+    /// not appear here because they are program activations, not note onsets.
+    pub tracks: Vec<TrackFillReport>,
 }
 
 #[derive(Clone, PartialEq, Debug)]

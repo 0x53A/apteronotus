@@ -15,6 +15,20 @@ needed by one of them is not needed yet.
 | `supersaws.eod` | an external Strudel port: stereo topology generation, weighted and polymetric event structure, per-event filter envelopes, channel-wise distortion, and probabilistic ratchets |
 | `drift.eod` | written *after* the engine: a stationary loop with no arrangement, variation derived from mutually prime transport periods, a stateless persistent noise floor, and live controls over it |
 | `outbound.eod` | also after the engine: polymetric loop lengths and offsets *as* the form, a fast pulse against a low event count, and pentatonic cells that stay consonant wherever the 8-bar harmony has got to |
+| `undertow.eod` | also after the engine: a 168 BPM broken beat heard in half-time, low-end headroom under dense onset structure, and a cyclic 16-bar form whose stochastic hats remain onset-distinct |
+| `nightshift.eod` | traditional low-density synthwave for studying: a cyclic 32-bar arrangement, two related harmonic sections, sparse mid-register melodies, and interest carried by form rather than fast treble notes |
+| `small-light.eod` | a finite forty-bar miniature: asymmetric wooden pulses, inharmonic bells, a minor-to-dorian harmonic opening, and a sparse ending |
+| `rust-and-voltage.eod` | sample-free dirty rock: struck-string partials through asymmetric saturation and clipping, chromatic chugging riffs, synthesized drums, a half-time breakdown, and a finite solo |
+| `nightshift-dub.eod` | a finite 32-bar variation: E minor organ chops, syncopated dub bass, filtered echoes and stripped sections |
+| `undertow-skipping-stones.eod` | a finite 32-bar variation: D dorian keys, dry two-step drums and exact swung ghost hats |
+| `small-light-afterimage.eod` | a finite 24-bar variation: beatless minor-to-dorian harmony, answering resonances and a sparse ending |
+| `seven-lanterns.eod` | thirty-two measures of 7/8, explicit finite capture durations, ramped tempo, plucked strings, reeds and clay drums |
+| `paper-orbits.eod` | a finite five-against-seven keyboard canon, long capture windows, recurring entrances and a thinning coda |
+| `seven-teeth.eod` | sample-free rock in 7/8, triangle/saw strings through one persistent stereo amp, overlapping-note distortion, a half-time breakdown and solo |
+| `organ-laboratory.eod` | Pipes Under Pressure: dry classic/revised additive and physical flue comparison, retained pipe with pressure changes, short/long valve closures and final wind shutdown |
+| `cathedral-organ.eod` | Iron Choir: four dry pipe ranks, full registration with live stops/expression, independent pedal, rhythmic keying and a shared cathedral tail |
+| `six-strings.eod` | minimal electric-guitar PoC: six retained string loops, partial strums, variable bend, repick while bent, hand/palm damping and a shared amp |
+| `iron-in-the-rain.eod` | full 68-bar rock arrangement: retained six-string rhythm guitar, independently bent lead and string bass, partial strums, palm damping, synthesized drums, half-time breakdown and ringing ending |
 
 The first four are cyclic and fix every parameter at onset. `neon.eod` and
 `jamming.eod` exist because that turned out to be a property of the author
@@ -23,18 +37,32 @@ rather than of music — see session 3 in
 by an external author, and exists to challenge the vocabulary with habits that
 the preceding six could still share.
 
-`drift.eod` and `outbound.eod` are written in the other direction — against a
-working backend rather than ahead of one — against a working
-backend rather than ahead of one — and so they specify nothing. They are here
-because the corpus is the only place the songs live, and because between them
-they test one thing the seven do not: all seven have an arrangement, and a
-curve over 64 bars is a thing that runs out. A piece meant to be left on has
-to get its variation from periods that do not divide the loop. `drift.eod`
+`drift.eod`, `outbound.eod`, `undertow.eod` and `nightshift.eod` are written in the other
+direction — against a working backend rather than ahead of one — and so they
+specify nothing. They are here because the corpus is the only place the songs
+live, and because together they test one thing the seven do not: all seven
+have an arrangement, and a curve over 64 bars is a thing that runs out. A
+piece meant to be left on has to get its variation from periods that do not
+divide the loop. `drift.eod`
 does that with parameters and `outbound.eod` does it with whole layers, and
-both are the same derive-from-coordinates rule the pattern algebra is built
-on, applied to form instead of to a query.
+`undertow.eod` puts a returning 16-bar form over four-, five-, seven-, nine-,
+eleven- and thirteen-bar detail. `nightshift.eod` makes the intentionally more
+ordinary choice: a recognisable 32-bar arrangement that returns instead of an
+intro/build/outro which runs out. All four apply the pattern algebra's same
+derive-from-coordinates rule to form instead of to a query.
 
 ## These files are the only copy
+
+`small-light.eod` and `rust-and-voltage.eod` are finite compositions written
+against the working engine. Their source headers describe their forms and give
+full-length render commands. The latter uses noise-excited Karplus–Strong
+strings blended with two filtered saw oscillators through two stages of
+distortion and cabinet filtering. This replaces the expensive 21-sine bank;
+the final ADSR now lets the engine retire silent upstream history. The dirty
+revision adds chromatic riffs, independently
+accented guitar takes and a slightly late snare;
+its drums combine pitch sweeps, filtered noise and inharmonic oscillators.
+Neither uses recorded audio. Their endings deliberately give way to silence.
 
 `crates/songs` embeds them with `include_str!`, so any application that wants
 the corpus — the editor, the study app in `~/src/idiosepius`, a renderer —
@@ -336,3 +364,12 @@ seed instead of replaying one identical burst at every onset.
   minutes every time it is opened.
 - Anything expressible by composition is stdlib and lives in readable source,
   not in Rust. `ring` is the example to imitate.
+
+## Auditioning the variations
+
+The three named variations above each own their complete source and arrangement;
+none needs the parent song to be loaded. Their headers give full-length render
+commands. The native/web editor's Library picker includes the complete corpus,
+and `apteronotus-render --list-songs` / `--song <name>` expose it without needing
+a checkout beside the binary. See [the renderer guide](../crates/render/README.md)
+for complete durations and measurement commands.

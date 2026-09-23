@@ -268,7 +268,35 @@ The scheduler already knows exact event coordinates and which track produced
 each voice. Reporting onset count and interval distribution from program data
 is cheaper and more accurate than recovering them from audio.
 
+**Implemented 2026-08-27.** Scheduler fill reports now carry, per input track,
+concrete voice count, distinct onset count and every tempo-projected interval
+between onset groups (plus the minimum for the short table). `--track-summary` maps those
+entries back to original zero-based program indices and prints them beside its
+isolated audio measurements. The same report now includes a deterministic
+32,768-sample Hann/Welch spectral centroid with 50% overlap. Full interval
+distributions remain. `--spectrum` reuses that FFT pass for the requested fixed
+0–200, 200–2000, 2000–8000 and 8000–Nyquist power levels on the selected full
+mix. `--json` emits `apteronotus.render-analysis.v1` on stdout, including the
+window, output shape, aggregate and per-lane measurements, those spectrum
+bands, scheduler attribution and isolated production-path measurements for
+every selected track, including the full interval distribution as
+`intervals_ms`. It implies the expensive per-track render pass and keeps
+diagnostics on stderr.
+
+The same JSON document includes stereo side/mid energy and the p95−p5 spread
+of a 20 ms RMS envelope. `--dynamics` exposes those two values as a short human
+line without paying for per-track isolation.
+
+`--reference <wav>` now turns those values and the 30-band third-octave curve
+into an automatic A/B report: per-band deltas after independent 1 kHz
+anchoring, six region means, side/mid delta and envelope-spread delta. Float32
+and integer PCM WAV inputs through 32 bits are supported, and the comparison is
+also embedded in `--json`.
+
 ### P0 — source-preserving track isolation
+
+**Implemented 2026-08-27.** The renderer accepts zero-based, comma-separated
+track filters after evaluation:
 
 Support:
 
@@ -282,9 +310,22 @@ Support:
 
 Isolation must happen after evaluation. Rewriting source is semantically wrong
 in a system whose randomness and provenance intentionally depend on source
-coordinates.
+coordinates. The implementation filters only the scheduler views and retains
+persistent runs, sends, buses and the production processing layout.
+`--cycles 16..20` is now an exact rational cycle window (and `--seconds a..b`
+provides the wall-clock equivalent). Rendering and DSP advance from transport
+zero before the prefix is discarded, so notes, delays and other persistent
+history entering the window are not reset at its boundary. `--bars` remains
+open because a cycle is not intrinsically a four-beat bar and the owned program
+does not yet carry meter.
 
 ### P0 — active-lane manifests
+
+**Implemented 2026-08-27.** Every `--stems` render prints the authoritative
+flattened lane order with RMS, peak, DC and exact-silence reporting. Main
+stereo lanes use `.L`/`.R`; buses use their declaration ordinal (`bus0.L`,
+etc.) because the owned `BusLayout` deliberately carries opaque identities,
+not Lua variable names.
 
 For `--stems`, emit lane metadata and measured activity:
 
@@ -297,7 +338,13 @@ lane 3  verb.R  silent
 
 Visualization can then omit silent lanes without guessing. This also exposes
 whether "stems" are pre-effect inputs, post-effect outputs, or cleared routing
-lanes—an ambiguity encountered here.
+lanes—an ambiguity encountered here. The first manifest confirmed the current
+files are post-processor lanes: send lanes cleared by their returns report
+silent rather than masquerading as active stems. `--raw-stems` is the distinct
+pre-processor mode: it writes the flattened sequencer lanes before returns and
+master processing, so raw event/graph sends remain measurable. Autonomous
+persistent sources live inside the skipped processor and are intentionally
+absent from that diagnostic view.
 
 ### P1 — compact plots by construction
 
@@ -327,6 +374,16 @@ track 2 / hat:  median onset fingerprint correlation 1.000 (suspicious)
 After provenance seeding, identical full renders remain reproducible while
 different onsets have low correlation.
 
+**Implemented 2026-08-27.** `--fingerprints` retains the scheduler's absolute
+distinct-onset coordinates and performs a source-preserving isolated render of
+each selected track. It compares consecutive 50 ms interleaved waveform
+windows with an amplitude-independent, phase-sensitive normalized dot product,
+then reports the median and maximum. The full chronological correlation
+distribution and exact onset coordinates are included per track in `--json`.
+Tracks with fewer than two complete nonsilent windows report unavailable. The
+tool deliberately does not label a value suspicious: the owned program cannot
+know whether a track is percussive or whether repeated hits were intended.
+
 ### P1 — automatic A/B reports
 
 Given two source revisions, produce:
@@ -350,6 +407,13 @@ The app or renderer could expose the current bar/cycle while playing and place
 a marker with one command. That turns “still chirpy” into a bounded render
 window immediately, while keeping the human listener as the final perceptual
 instrument.
+
+**Cycle coordinate implemented 2026-08-27.** The app status bar now advances
+the current audible cycle from the same tempo map, transport origin and browser
+latency compensation used by sounding-source highlights. It previously showed
+the most recent activation boundary under the label `CYCLE`, which froze after
+each Run and was not a listener coordinate. One-command feedback markers and
+owned meter/bar display remain separate work.
 
 ## Recommended debugging protocol
 

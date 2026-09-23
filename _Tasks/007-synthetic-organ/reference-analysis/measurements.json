@@ -1,0 +1,472 @@
+{
+  "sample_rate": 24000,
+  "normalization": "per-track overview; per-excerpt zoom, \u221220 dBFS stereo mean-power RMS",
+  "psd": "one-sided Hann PSD, mean channel powers; no source separation",
+  "sources": [
+    {
+      "id": "light",
+      "title": "Light of the Imperium",
+      "url": "https://www.youtube.com/watch?v=Tiw1sKOJz2w",
+      "path": "target/organ-reference-analysis/Tiw1sKOJz2w.wav",
+      "regions": [
+        {
+          "id": "L1",
+          "start": 10,
+          "end": 24,
+          "note": "Exposed harmonic passage; candidate organ/rank texture, source identity unconfirmed"
+        },
+        {
+          "id": "L2",
+          "start": 28,
+          "end": 40,
+          "note": "Layered sustained harmonic passage before the main rhythmic entry"
+        },
+        {
+          "id": "L3",
+          "start": 54,
+          "end": 62,
+          "note": "Dense rhythmic mix: compare production texture, not an isolated organ"
+        },
+        {
+          "id": "L4",
+          "start": 84,
+          "end": 98,
+          "note": "Reduced-texture passage before the next full entry"
+        }
+      ],
+      "duration_seconds": 272.93895833333335,
+      "sha256": "c35eecd5a43e9848789c8d8605ca5114f710f0de2964d74820bd5d477c26b8a9",
+      "measurements": {
+        "L1": {
+          "rms_dbfs": -19.255229968540384,
+          "peak_dbfs": -1.1765154689122768,
+          "centroid_hz": 835.7049255366087,
+          "bands_power_percent": {
+            "20-200": 7.577123293566415,
+            "200-1000": 69.24848599585839,
+            "1000-2000": 13.109013291965166,
+            "2000-4000": 9.071245937809698,
+            "4000-8000": 0.9470842278211823,
+            "8000-12000": 0.03187109540110076
+          },
+          "side_mid_db": -1.2228431685949872,
+          "start_seconds": 10,
+          "end_seconds": 24,
+          "normalization_gain_db": -0.7447700314596168,
+          "note": "Exposed harmonic passage; candidate organ/rank texture, source identity unconfirmed"
+        },
+        "L2": {
+          "rms_dbfs": -14.752826802036736,
+          "peak_dbfs": -0.7476289989042956,
+          "centroid_hz": 671.2122558791269,
+          "bands_power_percent": {
+            "20-200": 27.09038737834839,
+            "200-1000": 53.234299504287094,
+            "1000-2000": 14.06496403164232,
+            "2000-4000": 4.430604538769085,
+            "4000-8000": 0.8828003356304087,
+            "8000-12000": 0.22445448807340354
+          },
+          "side_mid_db": -2.5314931971873467,
+          "start_seconds": 28,
+          "end_seconds": 40,
+          "normalization_gain_db": -5.247173197963264,
+          "note": "Layered sustained harmonic passage before the main rhythmic entry"
+        },
+        "L3": {
+          "rms_dbfs": -10.268722082687745,
+          "peak_dbfs": 0.07195390946510628,
+          "centroid_hz": 351.4812218736756,
+          "bands_power_percent": {
+            "20-200": 69.90496208520932,
+            "200-1000": 21.13889662882663,
+            "1000-2000": 4.938259397523151,
+            "2000-4000": 3.246450046096101,
+            "4000-8000": 0.619939617152208,
+            "8000-12000": 0.08491106615542642
+          },
+          "side_mid_db": -8.10704290637666,
+          "start_seconds": 54,
+          "end_seconds": 62,
+          "normalization_gain_db": -9.731277917312255,
+          "note": "Dense rhythmic mix: compare production texture, not an isolated organ"
+        },
+        "L4": {
+          "rms_dbfs": -19.118757199077432,
+          "peak_dbfs": -1.584015138576789,
+          "centroid_hz": 1207.0778403404727,
+          "bands_power_percent": {
+            "20-200": 0.376004387382798,
+            "200-1000": 54.61612062145866,
+            "1000-2000": 28.509323451023683,
+            "2000-4000": 14.750077120198258,
+            "4000-8000": 1.622167023135653,
+            "8000-12000": 0.12107535756663561
+          },
+          "side_mid_db": 1.683966272789681,
+          "start_seconds": 84,
+          "end_seconds": 98,
+          "normalization_gain_db": -0.8812428009225686,
+          "note": "Reduced-texture passage before the next full entry"
+        }
+      }
+    },
+    {
+      "id": "empires",
+      "title": "Empires Will Fall",
+      "url": "https://www.youtube.com/watch?v=yzQ7IBpQd0Q",
+      "path": "target/organ-reference-analysis/yzQ7IBpQd0Q.wav",
+      "regions": [
+        {
+          "id": "E1",
+          "start": 18,
+          "end": 28,
+          "note": "Sustained upper harmonic ladder over a rhythmic low part; candidate organ texture"
+        },
+        {
+          "id": "E2",
+          "start": 28,
+          "end": 40,
+          "note": "Bright layered passage; multiple pitched sources overlap"
+        },
+        {
+          "id": "E3",
+          "start": 106,
+          "end": 118,
+          "note": "Exposed changing harmonic ladder; useful candidate for inspecting upper partials"
+        },
+        {
+          "id": "chord",
+          "start": 107.9,
+          "end": 108.7,
+          "note": "Pitch-probe window: peaks near 208, 247 and 311 Hz; mixed sources, not an isolated stop"
+        }
+      ],
+      "duration_seconds": 188.36070833333332,
+      "sha256": "98c96624df05bf5e59f6b43056a2f7bcec525dfe9d455e99d92f716a38b9100b",
+      "measurements": {
+        "E1": {
+          "rms_dbfs": -11.469439113845386,
+          "peak_dbfs": 0.008696747810390579,
+          "centroid_hz": 696.9826101544643,
+          "bands_power_percent": {
+            "20-200": 47.91678786921397,
+            "200-1000": 31.93815401963535,
+            "1000-2000": 10.93100393413211,
+            "2000-4000": 5.528125770571842,
+            "4000-8000": 2.3057439627561225,
+            "8000-12000": 0.6178506964665217
+          },
+          "side_mid_db": -8.008050711615152,
+          "start_seconds": 18,
+          "end_seconds": 28,
+          "normalization_gain_db": -8.530560886154616,
+          "note": "Sustained upper harmonic ladder over a rhythmic low part; candidate organ texture"
+        },
+        "E2": {
+          "rms_dbfs": -9.673547787661018,
+          "peak_dbfs": 0.48662481991786055,
+          "centroid_hz": 762.2615852465323,
+          "bands_power_percent": {
+            "20-200": 38.436761679808455,
+            "200-1000": 40.267465944375445,
+            "1000-2000": 13.345558008994118,
+            "2000-4000": 4.883847432348491,
+            "4000-8000": 2.029128036764281,
+            "8000-12000": 0.5155210598322431
+          },
+          "side_mid_db": -5.985872586571535,
+          "start_seconds": 28,
+          "end_seconds": 40,
+          "normalization_gain_db": -10.326452212338982,
+          "note": "Bright layered passage; multiple pitched sources overlap"
+        },
+        "E3": {
+          "rms_dbfs": -16.24076812103004,
+          "peak_dbfs": -0.15225310545481346,
+          "centroid_hz": 1279.301373699804,
+          "bands_power_percent": {
+            "20-200": 21.843117894774913,
+            "200-1000": 40.9931035518213,
+            "1000-2000": 17.748711563647124,
+            "2000-4000": 12.18116599831172,
+            "4000-8000": 5.71491599121886,
+            "8000-12000": 1.1735452322038786
+          },
+          "side_mid_db": -3.5969560999159436,
+          "start_seconds": 106,
+          "end_seconds": 118,
+          "normalization_gain_db": -3.759231878969958,
+          "note": "Exposed changing harmonic ladder; useful candidate for inspecting upper partials"
+        },
+        "chord": {
+          "rms_dbfs": -15.222676582840535,
+          "peak_dbfs": -0.3770762270565952,
+          "centroid_hz": 1212.239989657336,
+          "bands_power_percent": {
+            "20-200": 24.908898245069263,
+            "200-1000": 43.28252425736649,
+            "1000-2000": 14.701040279749316,
+            "2000-4000": 8.090459703328959,
+            "4000-8000": 6.907141995486583,
+            "8000-12000": 1.3601697330832052
+          },
+          "side_mid_db": -3.3828483595115486,
+          "start_seconds": 107.9,
+          "end_seconds": 108.7,
+          "normalization_gain_db": -4.777323417159465,
+          "note": "Pitch-probe window: peaks near 208, 247 and 311 Hz; mixed sources, not an isolated stop"
+        }
+      }
+    },
+    {
+      "id": "iron",
+      "title": "Our organ \u2014 Iron Choir",
+      "path": "target/auditions/iron-choir-refined.wav",
+      "regions": [
+        {
+          "id": "principal",
+          "start": 0,
+          "end": 3,
+          "note": "Known source: dry additive principal, D3"
+        },
+        {
+          "id": "reed",
+          "start": 12,
+          "end": 15,
+          "note": "Known source: dry additive reed, D3"
+        },
+        {
+          "id": "registration",
+          "start": 16,
+          "end": 24,
+          "note": "Known source: full additive registration, pedal and shared cathedral"
+        },
+        {
+          "id": "rhythm",
+          "start": 24,
+          "end": 32,
+          "note": "Known source: rhythmic organ keying with shared cathedral"
+        }
+      ],
+      "duration_seconds": 54.0,
+      "sha256": "edd98006ebbe2769794d877ed9e09b3f459d5a12e1eb9fc93e823d84f8613580",
+      "measurements": {
+        "principal": {
+          "rms_dbfs": -22.07659422538683,
+          "peak_dbfs": -16.953365555303353,
+          "centroid_hz": 218.47788423893334,
+          "bands_power_percent": {
+            "20-200": 71.38611927868308,
+            "200-1000": 28.219889415365014,
+            "1000-2000": 0.39399108957803464,
+            "2000-4000": 6.634534616539652e-10,
+            "4000-8000": 1.401521921179339e-10,
+            "8000-12000": 3.3707152114016336e-11
+          },
+          "side_mid_db": -160.0,
+          "start_seconds": 0,
+          "end_seconds": 3,
+          "normalization_gain_db": 2.0765942253868337,
+          "note": "Known source: dry additive principal, D3"
+        },
+        "reed": {
+          "rms_dbfs": -25.063414777735854,
+          "peak_dbfs": -15.794330052463954,
+          "centroid_hz": 407.84369512590547,
+          "bands_power_percent": {
+            "20-200": 37.090300067419015,
+            "200-1000": 56.03663031352774,
+            "1000-2000": 6.731135538644686,
+            "2000-4000": 0.1419335019881205,
+            "4000-8000": 8.845831140590194e-09,
+            "8000-12000": 2.73452184583165e-09
+          },
+          "side_mid_db": -160.0,
+          "start_seconds": 12,
+          "end_seconds": 15,
+          "normalization_gain_db": 5.063414777735855,
+          "note": "Known source: dry additive reed, D3"
+        },
+        "registration": {
+          "rms_dbfs": -17.61135452223614,
+          "peak_dbfs": -5.814309249186239,
+          "centroid_hz": 205.6832515127268,
+          "bands_power_percent": {
+            "20-200": 65.67828306415917,
+            "200-1000": 31.753563085183593,
+            "1000-2000": 2.179808082730451,
+            "2000-4000": 0.3578313801455131,
+            "4000-8000": 0.028082729841006786,
+            "8000-12000": 0.0008049316369696366
+          },
+          "side_mid_db": -30.539026147308263,
+          "start_seconds": 16,
+          "end_seconds": 24,
+          "normalization_gain_db": -2.388645477763859,
+          "note": "Known source: full additive registration, pedal and shared cathedral"
+        },
+        "rhythm": {
+          "rms_dbfs": -19.241432224504905,
+          "peak_dbfs": -3.7195956689221106,
+          "centroid_hz": 254.6495367396243,
+          "bands_power_percent": {
+            "20-200": 54.624270481855056,
+            "200-1000": 43.53299773182669,
+            "1000-2000": 1.6342295722425217,
+            "2000-4000": 0.12650311913480403,
+            "4000-8000": 0.0068085820822812925,
+            "8000-12000": 6.57721415785411e-05
+          },
+          "side_mid_db": -28.704667932695887,
+          "start_seconds": 24,
+          "end_seconds": 32,
+          "normalization_gain_db": -0.758567775495093,
+          "note": "Known source: rhythmic organ keying with shared cathedral"
+        }
+      }
+    },
+    {
+      "id": "lab",
+      "title": "Our organ \u2014 Pipes Under Pressure",
+      "path": "target/auditions/pipes-under-pressure.wav",
+      "regions": [
+        {
+          "id": "classic",
+          "start": 2,
+          "end": 4,
+          "note": "Known source: classic additive flute, A3, dry"
+        },
+        {
+          "id": "speech",
+          "start": 8,
+          "end": 10,
+          "note": "Known source: refined additive flute, A3, dry"
+        },
+        {
+          "id": "physical",
+          "start": 14,
+          "end": 16,
+          "note": "Known source: pressure-driven physical flue, nominal A3, dry"
+        }
+      ],
+      "duration_seconds": 31.0,
+      "sha256": "fd5436c5b8246fd159e254682a49c1d41cbafb5973b4e5b9251038ea2bbb268c",
+      "measurements": {
+        "classic": {
+          "rms_dbfs": -17.136486374808054,
+          "peak_dbfs": -14.724498194720558,
+          "centroid_hz": 238.59590466916248,
+          "bands_power_percent": {
+            "20-200": 0.0003461321315027168,
+            "200-1000": 99.6693576507175,
+            "1000-2000": 0.3302960957071612,
+            "2000-4000": 4.641573256802914e-08,
+            "4000-8000": 1.6287881164458135e-08,
+            "8000-12000": 5.411148499967251e-09
+          },
+          "side_mid_db": -160.0,
+          "start_seconds": 2,
+          "end_seconds": 4,
+          "normalization_gain_db": -2.863513625191947,
+          "note": "Known source: classic additive flute, A3, dry"
+        },
+        "speech": {
+          "rms_dbfs": -17.11805366496012,
+          "peak_dbfs": -14.203320854171938,
+          "centroid_hz": 238.59553243873734,
+          "bands_power_percent": {
+            "20-200": 0.0003474535601806863,
+            "200-1000": 99.6693518639515,
+            "1000-2000": 0.33030057487549336,
+            "2000-4000": 1.2623037372654693e-08,
+            "4000-8000": 6.876875886875058e-11,
+            "8000-12000": 2.4129650560306026e-11
+          },
+          "side_mid_db": -160.0,
+          "start_seconds": 8,
+          "end_seconds": 10,
+          "normalization_gain_db": -2.8819463350398795,
+          "note": "Known source: refined additive flute, A3, dry"
+        },
+        "physical": {
+          "rms_dbfs": -17.652055780304153,
+          "peak_dbfs": -15.723034199220542,
+          "centroid_hz": 303.75220324258686,
+          "bands_power_percent": {
+            "20-200": 0.013010918394274444,
+            "200-1000": 96.08989906720714,
+            "1000-2000": 3.5761339915368424,
+            "2000-4000": 0.2922349289068507,
+            "4000-8000": 0.02031544990091473,
+            "8000-12000": 0.00010842423480435557
+          },
+          "side_mid_db": -160.0,
+          "start_seconds": 14,
+          "end_seconds": 16,
+          "normalization_gain_db": -2.347944219695846,
+          "note": "Known source: pressure-driven physical flue, nominal A3, dry"
+        }
+      }
+    },
+    {
+      "id": "probe",
+      "title": "Our organ \u2014 approximate pitch-matched chord",
+      "path": "target/organ-reference-analysis/matched-probe.wav",
+      "regions": [
+        {
+          "id": "dry",
+          "start": 1,
+          "end": 1.8,
+          "note": "Same registration as Iron Choir; G#3/B3/D#4, no pedal, dry"
+        },
+        {
+          "id": "hall",
+          "start": 5,
+          "end": 5.8,
+          "note": "Same approximate pitch probe and registration, shared Iron Choir hall"
+        }
+      ],
+      "duration_seconds": 11.0,
+      "sha256": "37d94fc4cf6eb7e1fb6a73606e51ebb6f8e481d5b8fef3395f596dedff2a9fb1",
+      "measurements": {
+        "dry": {
+          "rms_dbfs": -24.26610725115763,
+          "peak_dbfs": -13.153365025050569,
+          "centroid_hz": 388.2636211748374,
+          "bands_power_percent": {
+            "20-200": 17.43030113026611,
+            "200-1000": 75.6042665654749,
+            "1000-2000": 5.950922270809926,
+            "2000-4000": 0.9228124512922483,
+            "4000-8000": 0.08999951158088128,
+            "8000-12000": 0.0016980674270661064
+          },
+          "side_mid_db": -160.0,
+          "start_seconds": 1,
+          "end_seconds": 1.8,
+          "normalization_gain_db": 4.26610725115763,
+          "note": "Same registration as Iron Choir; G#3/B3/D#4, no pedal, dry"
+        },
+        "hall": {
+          "rms_dbfs": -24.25528317152486,
+          "peak_dbfs": -13.220080719156167,
+          "centroid_hz": 386.56790282384287,
+          "bands_power_percent": {
+            "20-200": 17.209918417025975,
+            "200-1000": 75.61031251954184,
+            "1000-2000": 6.178834394818477,
+            "2000-4000": 0.9083570652962343,
+            "4000-8000": 0.09091352316282825,
+            "8000-12000": 0.0016640769420691046
+          },
+          "side_mid_db": -21.53662064645775,
+          "start_seconds": 5,
+          "end_seconds": 5.8,
+          "normalization_gain_db": 4.255283171524861,
+          "note": "Same approximate pitch probe and registration, shared Iron Choir hall"
+        }
+      }
+    }
+  ]
+}

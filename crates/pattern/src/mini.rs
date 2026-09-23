@@ -26,12 +26,23 @@ use crate::pattern::Pattern;
 #[derive(Clone, PartialEq, Debug)]
 pub struct ParseError {
     pub message: String,
+    /// Coordinate inside the mini-notation string itself.
     pub span: SrcSpan,
+    /// Coordinate inside the containing source document, when the frontend
+    /// could locate the literal without approximation.
+    pub document: Option<SrcSpan>,
 }
 
 impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{} (at byte {})", self.message, self.span.start)
+        match self.document {
+            Some(span) => write!(f, "{} (at byte {})", self.message, span.start),
+            None => write!(
+                f,
+                "{} (at byte {} of the pattern text)",
+                self.message, self.span.start
+            ),
+        }
     }
 }
 
@@ -74,6 +85,14 @@ pub fn parse(src: &str) -> Result<Pattern, ParseError> {
 /// supplies `binding` so two identical strings written at different call sites
 /// remain distinct event provenance.
 pub fn parse_at(src: &str, binding: u64) -> Result<Pattern, ParseError> {
+    parse_in(src, binding, Some(0))
+}
+
+/// Parse with provenance identity and an optional document coordinate for the
+/// first byte of the mini-notation text. `None` deliberately removes editor
+/// spans instead of exposing misleading string-local offsets as document
+/// coordinates.
+pub fn parse_in(src: &str, binding: u64, base: Option<usize>) -> Result<Pattern, ParseError> {
     let mut p = Parser {
         chars: src.char_indices().collect(),
         end: src.len(),
@@ -82,6 +101,7 @@ pub fn parse_at(src: &str, binding: u64) -> Result<Pattern, ParseError> {
         depth: 0,
         nodes: 0,
         binding,
+        base,
     };
     let pat = p.stack(&[])?;
     p.skip_ws();
@@ -99,6 +119,7 @@ pub fn parse_at(src: &str, binding: u64) -> Result<Pattern, ParseError> {
                 limits::EVENTS
             ),
             span: SrcSpan::new(0, src.len()),
+            document: base.and_then(|base| SrcSpan::new(0, src.len()).offset(base)),
         });
     }
     Ok(pat)
@@ -115,6 +136,7 @@ struct Parser {
     depth: u32,
     nodes: usize,
     binding: u64,
+    base: Option<usize>,
 }
 
 struct Step {
@@ -176,6 +198,9 @@ impl Parser {
         ParseError {
             message: msg.to_string(),
             span: SrcSpan::new(self.pos(), self.pos_after()),
+            document: self
+                .base
+                .and_then(|base| SrcSpan::new(self.pos(), self.pos_after()).offset(base)),
         }
     }
 
@@ -184,6 +209,9 @@ impl Parser {
         ParseError {
             message: msg.to_string(),
             span: SrcSpan::new(start, self.pos().max(start)),
+            document: self
+                .base
+                .and_then(|base| SrcSpan::new(start, self.pos().max(start)).offset(base)),
         }
     }
 
@@ -408,7 +436,10 @@ impl Parser {
                 };
                 Ok(Pattern::Pure {
                     value,
-                    src: Some(span),
+                    // Provenance remains string-local. Rebasing the origin
+                    // would change Event::seed when a call moves in the outer
+                    // document; only the editor coordinate is shifted.
+                    src: self.base.and_then(|base| span.offset(base)),
                     origin: EventOrigin::source(self.binding, Some(span)),
                 })
             }

@@ -3,7 +3,9 @@
 This crate is the first user-facing desktop and browser path: a lexically
 highlighted Lua text editor, explicit **Run** (`Ctrl/Cmd+Enter`) and **Stop**
 (`Ctrl/Cmd+Period`) commands, activation diagnostics, program-control faders,
-and realtime audio output.
+realtime audio output, and sounding mini-notation tokens derived from the
+audible transport revision. While audio is live, the status bar advances the
+latency-adjusted audible cycle rather than displaying the last edit boundary.
 
 Run the native app from the repository's Nix development shell:
 
@@ -64,16 +66,19 @@ For a Run, the player:
 4. opens audio if necessary;
 5. publishes an ordinary revision at the live scheduler's next unscheduled
    exact cycle coordinate when it is voice-only or its persistent data matches
-   the live arena; otherwise it prepares a complete replacement stream at cycle
+   the live arena; on native, an incompatible persistent-to-persistent edit
+   with the same tempo and output layout prepares a second stream at a future
+   exact frontier; remaining incompatible edits prepare a replacement at cycle
    zero;
 6. fills the audible sequencer and, on the first Run, starts the stream.
 
 Nothing in steps 1–4 changes the active revision or audible sequencer. A
 failure therefore leaves the current program filling lookahead. On an ordinary
 frontier edit, voices already submitted are not removed; their declared tails
-drain while the new revision begins. A hard reset instead replaces the stream
-and cuts those voices by definition. There is no implicit keystroke-to-sound
-path and no audio-thread Lua callback.
+drain while the new revision begins. Native persistent replacement overlaps
+the old tails and new stream for a bounded 80 ms. A hard reset instead replaces
+the stream and cuts those voices by definition. There is no implicit
+keystroke-to-sound path and no audio-thread Lua callback.
 
 Multi-track scheduling is all-or-nothing per window. If a later window of a new
 revision nevertheless fails (for example, a latent non-pitch pattern value),
@@ -112,32 +117,36 @@ change. New voice graphs and patterns are rebound to that live arena and
 activate at the ordinary monotonic frontier, so score editing neither rewinds
 transport nor resets faders.
 
-Until replacement crossfade and clock-map reconciliation are implemented, a Run
-that introduces, removes, or changes persistent state, changes the device
-output layout, or changes the tempo map performs an explicit hard reset. The
-player fully evaluates, validates, lowers, fills, and opens the replacement
-while the old stream is still active. Only then does it pause the old stream,
-start the replacement, and restart transport at cycle zero. A failure before
-that switch leaves the old program sounding; if starting the replacement fails
-after pausing, the player attempts to resume it.
+On native, changing one persistent program into another while retaining the
+tempo map and output layout uses a bounded two-stream replacement. The player
+fills the incumbent to a future exact frontier, initializes coordinate-derived
+candidate controls from that absolute transport position, proves and opens the
+candidate while the incumbent remains active, then starts it silent at the
+frontier and overlaps the two device-edge gain stages for 80 ms. Failures before
+the candidate starts leave every active handle untouched. Stateful candidate
+DSP starts with empty history; retained-input pre-roll remains separate work.
 
-This reset is a temporary host policy, not revision reconciliation. It discards
-DSP state and resets program controls to their declared defaults, and it may
-click because there is no blend. Ordinary and persistent-compatible edits with
-an unchanged layout activate at the monotonic scheduling frontier. The
-remaining milestone is a bounded crossfade for incompatible replacement, so
-reset must not become the permanent answer.
+Introducing or removing persistent state, changing the output layout or tempo
+map, and all incompatible browser edits still use the transactional hard reset.
+That path fully evaluates, validates, lowers, fills, and opens the replacement
+before pausing the incumbent and restarting transport at cycle zero. It resets
+DSP and control state and may click. Ordinary and persistent-compatible edits
+continue to activate at the monotonic frontier without opening another stream.
 
-Choosing a shipped example retains the displaced editor contents in one
-in-memory restore slot exposed at the top of the Examples menu. This avoids a
-confirmation dialog on the common path while making the only unsaved user state
-recoverable. A later example choice replaces that slot; it is not file history.
+Choosing a library document retains the last edited buffer in one restore slot.
+Browsing further untouched library documents keeps that slot; editing a loaded
+document makes it the next buffer to preserve. Native recovery also restores
+its saved-file association. This is a single recovery slot, not file history.
 
-The editor's colouring is deliberately lexical and presentation-only.
-Not present yet: parser/type diagnostics while typing, sounding-source
-highlighting, files/recent documents, transport controls, MIDI/device
-selection and input-lane attachment, threaded browser evaluation, or blended/continuous
-persistent patch replacement.
+The editor's base colouring is deliberately lexical and presentation-only.
+Sounding-source highlights appear only while the buffer is byte-identical to
+the revision actually audible at the device clock; editing hides them until the
+next successful Run. The layouter checks that equality again after same-frame
+text edits, so old offsets cannot split new Unicode characters. Not present yet:
+graph/type diagnostics while typing, recent documents, autosave, transport
+controls, MIDI/device selection and
+input-lane attachment, threaded browser evaluation, browser persistent
+replacement, retained-input pre-roll, or tempo/layout reconciliation.
 Those are UI and host integrations over framework types that already exist;
 they are not new Lua syntax.
 
@@ -158,14 +167,13 @@ Worker boundary that returns an owned/transferable program to the UI runtime,
 or an AudioWorklet rendering path that no longer depends on CPAL's main-thread
 buffer scheduler. Neither boundary is implemented yet.
 
-Any of the three hard-reset conditions listed under “Activation and failure
-semantics”—incompatible persistent state, changed device output layout, or a
-changed tempo map—uses the transactional reset described there. The old stream
-and its tails stop before the replacement starts at cycle zero, with no gain
-overlap, so the transition may click and resets persistent DSP and control
-state. The intended fix is a bounded two-stream crossfade after the candidate
-has been completely prepared; increasing the device buffer does not address
-this transition.
+The browser still sends every incompatible persistent edit through the
+transactional cycle-zero reset described above; its main-thread event-loop host
+cannot block for the native two-stream handoff. Changed layout or tempo also
+hard-resets on every host. The native same-clock/same-layout path now performs
+the bounded overlap after preparing the candidate, but device-buffer latency
+still bounds how precisely two independent cpal streams meet. Increasing the
+buffer does not improve that transition.
 
 ## Realtime headroom
 
@@ -186,3 +194,89 @@ The workspace development profile optimizes `fundsp`, `apteronotus-synth` and
 `apteronotus-live` while leaving the GUI and Lua boundary debuggable. A normal
 `cargo run -p apteronotus-app` therefore no longer asks audio-rate DSP to meet
 device deadlines using unoptimized code.
+
+## Song library
+
+The **Library** menu contains the four short teaching examples followed by the
+complete embedded song corpus, including the three variations `nightshift-dub`,
+`undertow-skipping-stones` and `small-light-afterimage`, and the newer finite
+pieces `seven-lanterns` and `paper-orbits`. The list scrolls on
+small windows. Opening a document preserves the displaced editor buffer under
+**Restore previous buffer**, and does not evaluate or activate it until Run.
+The same sources can be auditioned without an audio device through the
+[renderer](../render/README.md), using `--list-songs` and `--song <name>`.
+
+Browsing further untouched library documents retains that recovery buffer.
+If you edit a loaded document, its edited text becomes the next buffer saved
+when you choose another document. There is one recovery slot.
+
+## Syntax feedback
+
+After 250 ms without a source change, the editor parses and compiles Lua without
+executing it. Native checks run on a separate worker with a bounded request
+queue; browser checks run after the same debounce on the event loop. The first
+problem appears as **Syntax — current buffer**, independently of **Last Run**
+errors and of the program still playing. A new edit immediately invalidates the
+old result, and results for different source text are discarded.
+
+The red gutter line and **Go to line** / **F8** use original-source coordinates.
+The compiler supplies a line, not a token column, so the app does not pretend to
+know a narrower location. This checks Lua grammar and compiler rules, including
+invalid jumps and const assignments. Unknown binding names, graph types and
+mini-notation inside strings still need Run. No evaluation happens while typing.
+
+## Find in the score
+
+**Find** or **Ctrl/Cmd+F** opens a literal, case-sensitive search. **F3** /
+**Shift+F3** navigate forwards/backwards and wrap at either end; **Enter** /
+**Shift+Enter** do the same while the search field is focused. The counter shows
+the selected occurrence and total matches; an amber highlight keeps that occurrence
+visible while the search field has focus. Reopening Find selects the previous
+query for replacement and searches from the current editor position.
+**Escape** closes Find and returns
+focus to the selected source text, ready for editing. Matches are nonoverlapping
+and recomputed when the query or document changes. Unicode selections use editor
+character coordinates; no source text is normalized or evaluated by searching.
+
+## Source files
+
+On desktop, **File** or **Ctrl/Cmd+O** opens a path dialog. Relative paths use the
+launch directory. **Save As New File** requires a new destination; **Save** or
+**Ctrl/Cmd+S** writes the currently opened/saved path. The `*` on the File button
+means the current source is unsaved or differs from that saved snapshot.
+You can also open a file without evaluating it from the command line:
+
+```sh
+cargo run -- songs/seven-lanterns.eod
+```
+
+Writes finish in a temporary file beside the destination before publication.
+Save As claims a new name without replacing existing material. Save preserves
+ordinary file permissions and refuses an on-disk copy that differs from the
+last opened/saved snapshot. That conflict check detects changes already present
+at Save; it is not an interprocess lock. Failed reads or writes keep the editor
+contents and the current audio program. Reading is limited to the default
+one-MiB source budget and requires UTF-8.
+
+In the browser, **File → Import Source** / **Ctrl/Cmd+O** uses the browser's
+picker. **Download Source** / **Ctrl/Cmd+S** exports the exact UTF-8 source under
+an editable filename. The app cannot silently overwrite a local browser file.
+An import which completes after a newer editor change is refused, and invalid
+UTF-8 or oversized imports leave the current source intact. Importing, opening
+or saving never activates a program; Run remains explicit.
+
+## Browser smoke test
+
+After `./tools/build-web.sh --dev`, run:
+
+```sh
+nix-shell -p chromium --run 'node tools/test-web.mjs'
+```
+
+Node 22+ and Chromium are the only harness requirements. Set
+`APTERONOTUS_CHROMIUM` to an executable path if Chromium is not on `PATH`.
+The script serves the local web build, uses a fresh headless browser profile,
+and checks UTF-8 search selections, CRLF round trips, stale/oversized import protection, source-line
+navigation, zero audio contexts before Run, and continued audio-context lifetime
+while an invalid replacement is typed. Screenshots and logs go under
+`target/browser-smoke/`. It does not contact a deployed site.

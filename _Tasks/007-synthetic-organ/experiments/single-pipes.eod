@@ -1,0 +1,11 @@
+-- Four existing dry stops plus trumpet trial, A3, at 0/4/8/12/16 s.
+tempo(120)
+for i, kind in ipairs({"principal","flute","string","reed"}) do
+  local instrument = voice {graph=function(n)
+    return organ_pipe(n.hz,{kind=kind,feet=8,chiff=0}) * .25 >> pan(0)
+  end}
+  play(instrument,timeline {at(secs((i-1)*4),pattern("a3") >> hold(beats(6)))})
+end
+
+local trial=voice {graph=function(n) return trumpet_trial(n.hz,8,1,0)*.25 >> pan(0) end}
+play(trial,timeline {at(secs(16),pattern("a3") >> hold(beats(6)))})

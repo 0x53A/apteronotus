@@ -1,0 +1,296 @@
+-- iron-in-the-rain.eod — Iron in the Rain
+-- Original instrumental rock, 128 BPM, E minor, 68 bars (~2:08).
+-- Eight retained strings: six rhythm, one lead, one bass. No recorded audio.
+-- Render: cargo run --release -p apteronotus-render -- --song iron-in-the-rain --cycles 68 --tail 3
+-- Form: 4 intro / 8 verse / 4 lift / 8 chorus / 8 verse / 8 chorus /
+--       8 half-time breakdown / 8 solo / 8 final chorus / 4 ringing ending.
+tempo(128)
+local bars_total, steps_per_bar = 68, 16
+local bar_seconds = 240 / 128
+local drive = control { name = "Guitar drive", range = {3, 30}, default = 16 }
+local lead_level = control { name = "Lead guitar", range = {0, 1}, default = 0.62 }
+local extra_palm = control { name = "Extra palm pressure", range = {0, 0.08}, default = 0 }
+local tuning = {40, 45, 50, 55, 59, 64, 64, 28}
+local strings, pickers, picks, pitches, pressures = {}, {}, {}, {}, {}
+local bends = {[1] = 0}
+local function hz(midi) return 440 * 2 ^ ((midi - 69) / 12) end
+for i = 1, 8 do
+  strings[i] = bus { channels = 1 }
+  pitches[i], pressures[i], picks[i] = {[1] = hz(tuning[i])}, {[1] = 1}, {}
+  local destination = strings[i]
+  local cutoff, pick_highpass, pick_gain = 4800, 65, 1
+  if i == 7 then cutoff = 6500 end
+  if i == 8 then cutoff, pick_highpass, pick_gain = 1000, 25, 3 end
+  pickers[i] = voice {
+    graph = function(n)
+      local pick = noise() >> highpass(pick_highpass, 0.7) >> lowpass(cutoff, 0.7)
+      return pick * adsr(ms(0.3), ms(3), 0.16, ms(2)) * n.velocity * pick_gain
+        >> to(destination, 1) >> mul(0) >> pan(0)
+    end,
+  }
+end
+
+-- These helpers execute once during evaluation and produce ordinary owned
+-- patterns. A rest sends no excitation; a pressure change damps existing waves.
+local function set(lane, step, value) lane[step + 1] = value end
+local function pick(slot, step, strength, offset)
+  table.insert(picks[slot], at(secs(step / 16 * bar_seconds + (offset or 0.008)),
+    pattern("x") >> hold(beats(0.016)) >> velocity(strength)))
+end
+local function fret(step, shape, pressure)
+  for slot = 1, 6 do
+    if shape[slot] == "x" then
+      set(pressures[slot], step, 1)
+    elseif shape[slot] ~= "-" then
+      set(pitches[slot], step, hz(tuning[slot] + shape[slot]))
+      set(pressures[slot], step, pressure)
+    end
+  end
+end
+local function strum(step, shape, pressure, strength, upper_only)
+  fret(step, shape, pressure)
+  local position = 0
+  for slot = 1, 6 do
+    if type(shape[slot]) == "number" and (not upper_only or slot >= 4) then
+      pick(slot, step, strength * (1 - position * 0.025), 0.008 + position * 0.008)
+      position = position + 1
+    end
+  end
+end
+local function choke(step)
+  for slot = 1, 6 do set(pressures[slot], step, 1) end
+end
+local function bass(step, midi, strength, pressure)
+  set(pitches[8], step, hz(midi))
+  set(pressures[8], step, pressure or 0.018)
+  pick(8, step, strength, 0.005)
+end
+local function lead(step, midi, strength)
+  set(pitches[7], step, hz(midi))
+  set(pressures[7], step, 0.002)
+  set(bends, step, 0)
+  pick(7, step, strength or 0.8, 0.014)
+end
+
+local em = {0, 2, 2, 0, 0, 0}
+local c = {"x", 3, 2, 0, 1, 0}
+local g = {3, 2, 0, 0, 0, 3}
+local d = {"x", "x", 0, 2, 3, 2}
+local a = {"x", 0, 2, 2, 1, 0}
+local chorus_shapes = {c, g, d, em}
+local chorus_bass = {36, 31, 38, 28}
+-- Sixteenth-grid riff: pedal E, a climbing answer, then a pulled-back landing.
+local riff_times = {0, 2, 5, 8, 10, 14}
+local riff_frets = {
+  {0, 0, 0, 3, 5, 3}, {0, 0, 0, 7, 5, 3},
+  {0, 0, 0, 3, 5, 7}, {5, 3, 2, 0, 0, 0},
+}
+local solo = {
+  {64, 67, 69, 71, 74, 71, 69, 67},
+  {67, 69, 71, 74, 76, 74, 71, 69},
+  {69, 71, 74, 76, 78, 76, 74, 71},
+  {76, 74, 71, 69, 67, 66, 64, 64},
+  {67, 71, 74, 76, 79, 76, 74, 71},
+  {74, 76, 79, 81, 79, 76, 74, 71},
+  {78, 76, 74, 71, 69, 67, 66, 62},
+  {67, 69, 71, 74, 76, 76, 74, 64},
+}
+
+for bar = 0, 63 do
+  local start, row = bar * 16, bar % 4 + 1
+  local chorus = (bar >= 16 and bar < 24) or (bar >= 32 and bar < 40) or bar >= 56
+  local soloing = bar >= 48 and bar < 56
+  local broken = bar >= 40 and bar < 48
+  if chorus or soloing then
+    local shape, root = chorus_shapes[row], chorus_bass[row]
+    strum(start, shape, 0, 0.94)
+    -- Higher-string replies leave the low chord ringing.
+    strum(start + 6, {"-", "-", "-", shape[4], shape[5], shape[6]}, 0, 0.68, true)
+    strum(start + 10, shape, 0.0015, 0.81)
+    for _, step in ipairs({0, 4, 6, 8, 12, 14}) do
+      bass(start + step, root, 0.85, 0.009)
+    end
+    -- A short breath before the next harmony, not an ADSR on every pick.
+    choke(start + 15)
+    if chorus and row == 4 then
+      lead(start + 4, 71, 0.65)
+      set(bends, start + 6, 2)
+      pick(7, start + 8, 0.6)
+      lead(start + 12, 67, 0.62)
+      lead(start + 14, 64, 0.7)
+      set(pressures[7], start + 16, 1)
+    end
+  elseif broken then
+    local fret_number = ({0, 0, 3, 5})[row]
+    local shape = {fret_number, fret_number + 2, fret_number + 2, "x", "x", "x"}
+    strum(start, shape, 0.003, 1.0)
+    bass(start, 28 + fret_number, 0.95, 0.006)
+    choke(start + 5)
+    strum(start + 8, shape, 0.018, 0.92)
+    bass(start + 8, 28 + fret_number, 0.9)
+    strum(start + 11, shape, 0.035, 0.75)
+    choke(start + 13)
+  elseif bar >= 12 and bar < 16 then
+    local shape, root = ({a, c, d, d})[row], ({33, 36, 38, 38})[row]
+    for _, step in ipairs({0, 4, 8, 12}) do
+      strum(start + step, shape, 0.008, 0.75 + step * 0.012)
+      bass(start + step, root, 0.82)
+    end
+    choke(start + 15)
+  else
+    for index, step in ipairs(riff_times) do
+      local f = riff_frets[row][index]
+      local pressure = 0.024
+      if index >= 4 then pressure = 0.007 end
+      strum(start + step, {f, f + 2, f + 2, "x", "x", "x"},
+        pressure, index == 1 and 0.95 or 0.78)
+      if bar >= 4 then bass(start + step, 28 + f, 0.87) end
+    end
+    choke(start + 7)
+    choke(start + 15)
+  end
+  if soloing then
+    local phrase = solo[bar - 47]
+    -- Alternate flowing runs with sustained bends; silence gives the lead breath.
+    if bar % 2 == 0 then
+      for i = 1, 8 do lead(start + (i - 1) * 2, phrase[i], 0.82) end
+    else
+      lead(start, phrase[1], 0.86)
+      lead(start + 2, phrase[3], 0.78)
+      lead(start + 4, phrase[5], 0.9)
+      set(bends, start + 6, 2)
+      pick(7, start + 8, 0.82)
+      set(bends, start + 10, 0)
+      lead(start + 12, phrase[7], 0.83)
+      lead(start + 14, phrase[8], 0.8)
+    end
+    if bar == 55 then set(pressures[7], start + 16, 1) end
+  end
+end
+-- One last E. A treble-only reply, then let the actual string energy die away.
+strum(64 * 16, em, 0, 1.0)
+bass(64 * 16, 28, 1, 0)
+lead(64 * 16, 76, 0.8)
+strum(65 * 16, {"-", "-", "-", 0, 0, 0}, 0, 0.65, true)
+for slot = 1, 8 do set(pressures[slot], 67 * 16, 1) end
+
+-- Compress held control values into weighted notation; never query Lua at
+-- playback time. The finite pick timeline ends before these controls repeat.
+local function lane(values)
+  local parts, current, count = {}, values[1], 0
+  for step = 1, bars_total * steps_per_bar do
+    local value = values[step]
+    if value ~= nil and value ~= current then
+      table.insert(parts, tostring(current) .. "@" .. tostring(count))
+      current, count = value, 0
+    end
+    count = count + 1
+  end
+  table.insert(parts, tostring(current) .. "@" .. tostring(count))
+  return pattern(table.concat(parts, " ")) >> slow(bars_total)
+end
+local pitch_score, pressure_score = {}, {}
+for i = 1, 8 do pitch_score[i], pressure_score[i] = lane(pitches[i]), lane(pressures[i]) end
+local bend_score = lane(bends)
+
+local rig = patch {
+  inputs = 10,
+  graph = function(cv)
+    local rhythm, lead_string, bass_string = dc(0), dc(0), dc(0)
+    for i = 1, 8 do
+      local frequency = control_signal(pitch_score[i], bars(bars_total))
+      local pressure = control_signal(pressure_score[i], bars(bars_total))
+      local minimum, decay_time = 40, 30
+      if i <= 6 then pressure = pressure + extra_palm end
+      if i == 7 then
+        frequency = slew(frequency, 0.035)
+          * (2 ^ ((slew(control_signal(bend_score, bars(bars_total)), 0.09)
+            + sine(5.6) * 0.065) / 12))
+      end
+      if i == 8 then minimum, decay_time = 20, 22 end
+      local sound = string_resonator(cv.inputs[i + 2], frequency, pressure,
+        {min_hz = minimum, decay = secs(decay_time)})
+      if i <= 6 then rhythm = rhythm + sound
+      elseif i == 7 then lead_string = sound
+      else bass_string = sound end
+    end
+    rhythm = rhythm >> highpass(85, 0.7) >> shape("tanh", drive)
+      >> lowpass(4700, 0.7) >> shape("tanh", 1.7) >> lowpass(3300, 0.7)
+      >> mul(0.56)
+    lead_string = lead_string >> highpass(230, 0.7) >> shape("tanh", drive * 1.8)
+      >> lowpass(4800, 0.65) >> mul(lead_level)
+      >> (mul(1) + delay(ms(285)) * 0.22)
+    bass_string = bass_string >> highpass(28, 0.7) >> shape("tanh", 10)
+      >> lowpass(650, 0.7) >> mul(0.8)
+    local left = cv.inputs[1] + rhythm * 0.85 + lead_string * 0.45 + bass_string * 0.707
+    local right = cv.inputs[2] + rhythm * 0.55 + lead_string * 0.89 + bass_string * 0.707
+    local band = left | right
+    return band >> ((mul(0.96) | mul(0.96)) + reverb(12, secs(0.65), 0.65) * 0.07)
+      >> limiter(ms(4), ms(140)) >> mul(0.85)
+  end,
+}
+run(rig)
+for i = 1, 8 do play(pickers[i], timeline(picks[i])) end
+
+-- A compact synthesized kit: pitch-swept drum skins and noisy wires/metal.
+local kick = voice { graph = function(n)
+  return (sine(51 + decay(ms(18)) * 65) * decay(ms(180))
+    + (noise() >> highpass(2200, 0.7)) * decay(ms(8)) * 0.2)
+    >> shape("tanh", 1.8) >> mul(n.velocity * 0.37) >> pan(0)
+end }
+local snare = voice { graph = function(n)
+  local skin = (sine(181) + sine(327) * 0.3) * decay(ms(110))
+  local wires = noise() >> highpass(1300, 0.7) >> lowpass(7600, 0.7)
+  return (skin * 0.5 + wires * decay(ms(210)) * 2.6)
+    >> shape("tanh", 1.6) >> mul(n.velocity * 0.35) >> pan(-0.08)
+end }
+local hat = voice { graph = function(n)
+  return noise() >> highpass(5300, 0.7) >> lowpass(10800, 0.7)
+    >> mul(decay(ms(58)) * n.velocity * 0.2) >> pan(0.35)
+end }
+local crash = voice { graph = function(n)
+  local metal = noise() + sine(3691) * sine(5813) * 0.22
+  return metal >> highpass(1900, 0.7) >> lowpass(9800, 0.7)
+    >> mul(decay(secs(1.1)) * n.velocity * 0.13) >> pan(-0.4)
+end }
+local tom = voice { graph = function(n)
+  return (sine(n.hz + decay(ms(20)) * 25) + sine(n.hz * 1.57) * 0.23)
+    * decay(ms(180)) * n.velocity * 0.28 >> pan(n.pan)
+end }
+local kd, sd, hd, cd, td = {}, {}, {}, {}, {}
+local function hit(events, bar, notes, strength, late)
+  table.insert(events, at(secs(bar * bar_seconds + (late or 0)),
+    notes >> velocity(strength)))
+end
+for bar = 0, 63 do
+  if bar >= 4 then
+    local broken = bar >= 40 and bar < 48
+    local bd, sn = pattern("x ~ ~ x x ~ x ~"), pattern("~ x ~ x")
+    if broken then bd, sn = pattern("x ~ ~ ~ x ~ x ~"), pattern("~ ~ x ~") end
+    if bar % 4 == 3 and not broken then bd = pattern("x ~ x ~ x ~ x x") end
+    hit(kd, bar, bd, 0.92)
+    hit(sd, bar, sn, 0.85, 0.009)
+    local hats = pattern("x x x x x x x x")
+    if broken then hats = pattern("x ~ x ~ x ~ x ~") end
+    table.insert(hd, at(bars(bar), hats
+      >> velocity(pattern("0.75 0.35 0.55 0.38 0.8 0.35 0.6 0.4"))))
+    if bar % 8 == 7 then
+      hit(td, bar, pattern("~ ~ ~ ~ ~ a2 g2 e2") >> pan(-0.3), 0.9)
+      hit(sd, bar, pattern("~ ~ ~ ~ ~ ~ [x x] ~"), 0.5, 0.006)
+    end
+  else
+    hit(hd, bar, pattern("x ~ x ~"), 0.5)
+    if bar == 3 then
+      hit(sd, bar, pattern("~ ~ x x [x x] [x x] [x x] [x x]"), 0.6)
+    end
+  end
+  if bar == 4 or bar == 16 or bar == 24 or bar == 32 or bar == 40
+    or bar == 48 or bar == 56 or bar == 60 then hit(cd, bar, pattern("x ~ ~ ~"), 0.9) end
+end
+hit(kd, 64, pattern("x ~ ~ ~"), 1)
+hit(cd, 64, pattern("x ~ ~ ~"), 1)
+play(kick, timeline(kd))
+play(snare, timeline(sd))
+play(hat, timeline(hd))
+play(crash, timeline(cd))
+play(tom, timeline(td))

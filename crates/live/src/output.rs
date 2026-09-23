@@ -18,8 +18,8 @@ use cpal::{
 };
 use fundsp::net::Net;
 use fundsp::prelude32::{
-    AudioUnit, BufferVec, MAX_BUFFER_SIZE, ReplayMode, Sequencer, Shared, follow, pass, shared,
-    var, zero,
+    AudioUnit, BufferMut, BufferRef, BufferVec, MAX_BUFFER_SIZE, ReplayMode, Sequencer, Shared,
+    Signal, SignalFrame, shared, zero,
 };
 
 /// About 43 ms at 48 kHz.
@@ -93,6 +93,12 @@ impl MasterGain {
         MasterGain { level: shared(1.0) }
     }
 
+    fn at_decibels(decibels: f32) -> MasterGain {
+        let master = MasterGain::unity();
+        master.set_decibels(decibels);
+        master
+    }
+
     /// The linear amplitude the graph is currently multiplying by.
     pub fn amplitude(&self) -> f32 {
         self.level.value()
@@ -120,7 +126,85 @@ impl MasterGain {
 
     /// One channel of the gain stage: pass-through scaled by the smoothed level.
     fn stage(&self) -> Box<dyn AudioUnit> {
-        Box::new(pass() * (var(&self.level) >> follow(MASTER_RESPONSE_SECONDS)))
+        Box::new(MasterGainUnit::new(self.level.clone()))
+    }
+}
+
+/// Allocation-free stream-edge gain whose initial value is fixed at graph
+/// construction time.
+///
+/// fundsp's general `follow` intentionally snaps to its input on the first
+/// sample. That is convenient for an ordinary parameter, but a paused
+/// replacement stream can have its target changed between `play()` and its
+/// first callback; snapping there would skip the fade-in. This node preserves
+/// the level with which the stream was opened and smooths every later target.
+#[derive(Clone)]
+struct MasterGainUnit {
+    target: Shared,
+    value: f32,
+    coefficient: f32,
+}
+
+impl MasterGainUnit {
+    fn new(target: Shared) -> Self {
+        let value = target.value();
+        let mut unit = Self {
+            target,
+            value,
+            coefficient: 1.0,
+        };
+        unit.set_sample_rate(44_100.0);
+        unit
+    }
+
+    fn update(&mut self) -> f32 {
+        self.value += self.coefficient * (self.target.value() - self.value);
+        self.value
+    }
+}
+
+impl AudioUnit for MasterGainUnit {
+    fn reset(&mut self) {
+        self.value = self.target.value();
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f64) {
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let halfway_samples = f64::from(MASTER_RESPONSE_SECONDS) * sample_rate;
+            self.coefficient = (1.0 - 0.5_f64.powf(1.0 / halfway_samples.max(1.0))) as f32;
+        }
+    }
+
+    fn tick(&mut self, input: &[f32], output: &mut [f32]) {
+        output[0] = input[0] * self.update();
+    }
+
+    fn process(&mut self, size: usize, input: &BufferRef, output: &mut BufferMut) {
+        for sample in 0..size {
+            output.set_f32(0, sample, input.at_f32(0, sample) * self.update());
+        }
+    }
+
+    fn inputs(&self) -> usize {
+        1
+    }
+
+    fn outputs(&self) -> usize {
+        1
+    }
+
+    fn route(&mut self, _input: &SignalFrame, _frequency: f64) -> SignalFrame {
+        let mut output = SignalFrame::new(1);
+        output.fill(Signal::Unknown);
+        output
+    }
+
+    fn get_id(&self) -> u64 {
+        0x4150_5445_4d47_4149
+    }
+
+    fn footprint(&self) -> usize {
+        std::mem::size_of::<Self>()
     }
 }
 
@@ -148,7 +232,15 @@ impl AudioOutput {
     /// Open the default output device. The returned stream is paused, so the
     /// caller can fill its initial lookahead before calling [`play`](Self::play).
     pub fn open(synth_channels: usize) -> Result<AudioOutput, OutputError> {
-        Self::open_inner(synth_channels, synth_channels, None, 0, 0)
+        Self::open_at_level(synth_channels, MasterGain::MAX_DECIBELS)
+    }
+
+    /// Open the default output at an explicit initial device-edge level.
+    pub fn open_at_level(
+        synth_channels: usize,
+        master_decibels: f32,
+    ) -> Result<AudioOutput, OutputError> {
+        Self::open_inner(synth_channels, synth_channels, None, 0, 0, master_decibels)
     }
 
     /// Open an output whose sequencer emits routed stems through one persistent
@@ -176,7 +268,14 @@ impl AudioOutput {
                 main: main_channels,
             });
         }
-        Self::open_inner(stem_channels, main_channels, Some(processor), 0, 0)
+        Self::open_inner(
+            stem_channels,
+            main_channels,
+            Some(processor),
+            0,
+            0,
+            MasterGain::MAX_DECIBELS,
+        )
     }
 
     /// Open a processed output and bind the first declared logical input to
@@ -192,6 +291,27 @@ impl AudioOutput {
         processor: Box<dyn AudioUnit>,
         external_channels: usize,
         requested_channels: usize,
+    ) -> Result<AudioOutput, OutputError> {
+        Self::open_processed_with_default_input_at_level(
+            stem_channels,
+            main_channels,
+            processor,
+            external_channels,
+            requested_channels,
+            MasterGain::MAX_DECIBELS,
+        )
+    }
+
+    /// Open a processed input-bearing output at an explicit initial master
+    /// level. Replacement hosts use silence; ordinary hosts use their retained
+    /// fader value.
+    pub fn open_processed_with_default_input_at_level(
+        stem_channels: usize,
+        main_channels: usize,
+        processor: Box<dyn AudioUnit>,
+        external_channels: usize,
+        requested_channels: usize,
+        master_decibels: f32,
     ) -> Result<AudioOutput, OutputError> {
         if processor.inputs() != stem_channels + external_channels {
             return Err(OutputError::ProcessorInputChannels {
@@ -217,6 +337,7 @@ impl AudioOutput {
             Some(processor),
             external_channels,
             requested_channels,
+            master_decibels,
         )
     }
 
@@ -226,6 +347,7 @@ impl AudioOutput {
         processor: Option<Box<dyn AudioUnit>>,
         external_channels: usize,
         requested_channels: usize,
+        master_decibels: f32,
     ) -> Result<AudioOutput, OutputError> {
         if sequencer_channels == 0 || synth_channels == 0 {
             return Err(OutputError::NoSynthChannels);
@@ -257,7 +379,7 @@ impl AudioOutput {
         // including the one with no persistent processor, so there is always a
         // net here even when the sequencer backend alone would have rendered.
         // One multiply per sample per channel; at unity it changes nothing.
-        let master = MasterGain::unity();
+        let master = MasterGain::at_decibels(master_decibels);
         let renderer: Box<dyn AudioUnit> = {
             let mut net = Net::new(0, synth_channels);
             let source = match processor {
@@ -317,7 +439,7 @@ impl AudioOutput {
         })
     }
 
-    /// This stream's master fader, at unity until a host moves it.
+    /// This stream's master fader, at the level selected when it was opened.
     ///
     /// The handle belongs to the stream, so it does not outlive one: a host
     /// that keeps a level across a hard reset holds the *number* and reapplies
@@ -781,5 +903,52 @@ mod tests {
         let master = MasterGain::unity();
         master.set_decibels(f32::NAN);
         assert_eq!(master.amplitude(), 0.0);
+    }
+
+    #[test]
+    fn opposed_master_moves_keep_one_bounded_crossfade_gain() {
+        let old = MasterGain::unity();
+        let new = MasterGain::unity();
+        new.set_decibels(MasterGain::MIN_DECIBELS);
+        let mut old_stage = old.stage();
+        let mut new_stage = new.stage();
+        old_stage.set_sample_rate(48_000.0);
+        new_stage.set_sample_rate(48_000.0);
+
+        let mut old_out = [0.0];
+        let mut new_out = [0.0];
+        for _ in 0..4_800 {
+            old_stage.tick(&[1.0], &mut old_out);
+            new_stage.tick(&[1.0], &mut new_out);
+        }
+
+        old.set_decibels(MasterGain::MIN_DECIBELS);
+        new.set_decibels(MasterGain::MAX_DECIBELS);
+        for _ in 0..3_840 {
+            old_stage.tick(&[1.0], &mut old_out);
+            new_stage.tick(&[1.0], &mut new_out);
+            assert!(((old_out[0] + new_out[0]) - 1.0).abs() < 1.0e-4);
+        }
+        assert!(old_out[0] < 0.01);
+        assert!(new_out[0] > 0.99);
+    }
+
+    #[test]
+    fn a_silent_stream_initialization_cannot_race_its_first_callback() {
+        let master = MasterGain::at_decibels(MasterGain::MIN_DECIBELS);
+        let mut stage = master.stage();
+        stage.set_sample_rate(48_000.0);
+
+        // Model the control thread publishing the target immediately after
+        // `play`, before the device has rendered even one sample.
+        master.set_decibels(MasterGain::MAX_DECIBELS);
+        let mut output = [0.0];
+        stage.tick(&[1.0], &mut output);
+        assert!(output[0] < 0.01, "first sample jumped to {}", output[0]);
+
+        for _ in 1..3_840 {
+            stage.tick(&[1.0], &mut output);
+        }
+        assert!(output[0] > 0.99);
     }
 }

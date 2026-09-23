@@ -110,6 +110,12 @@ any. A spectrogram shows time-frequency structure, which matters for a
 transient defect; for mix balance a time-averaged curve is strictly better and
 about a thousand times cheaper in context.
 
+**Implemented 2026-08-27.** `--third-octaves` accumulates 30 contiguous exact
+base-2 bands from nominal 25 Hz through 20 kHz during the renderer's existing
+32,768-sample Hann/Welch pass. The human table shows absolute dBFS and the curve
+relative to 1 kHz; `--json` carries both values per band. Channel power is
+combined only after each channel's FFT, preserving antiphase stereo energy.
+
 ### 3. Reference delta table
 
 For `outbound.eod` the user supplied a reference recording, so the third-octave
@@ -157,6 +163,12 @@ spread 3.7 dB   peak max -9.2
 
 Cheap, and it would immediately catch a runaway feedback path or an arrangement
 curve accidentally decaying to nothing.
+
+**Implemented 2026-08-27.** `--stability <seconds>` prints the window count,
+minimum and maximum whole-layout RMS, spread and maximum peak. It measures only
+scheduled music and excludes the explicit response tail, which would otherwise
+manufacture a fade at the end of every healthy render. `--json` carries a
+five-second summary by default.
 
 ### 5. Structural period verification
 
@@ -298,8 +310,12 @@ source offsets feed the deterministic seeds for `degrade`, `sometimes` and
 event selection as the full render. For level balancing this is tolerable. For
 anything provenance-sensitive it is silently wrong.
 
-`--solo-track` / `--mute-track` after evaluation would remove ~60 lines of
-fragile scripting from every future session of this kind.
+`--solo-track` / `--mute-track` after evaluation removes ~60 lines of fragile
+scripting from every future session of this kind.
+
+**Implemented 2026-08-27.** `--list-tracks`, `--solo-track` and `--mute-track`
+now filter the owned program's scheduler views after evaluation while leaving
+source coordinates, persistent runs and routed processing untouched.
 
 ### New requests
 
@@ -311,15 +327,49 @@ without a reference: comparing a song against another song in the corpus is the
 same operation, and is how "is this darker than `synthwave.eod`?" gets
 answered.
 
+**Implemented 2026-08-27 for WAV references.** `--reference <wav>` reads
+float32 or integer PCM through 32 bits without an optional Python stack, independently anchors the
+candidate and reference third-octave curves at 1 kHz, prints all band deltas
+and the six region means above, then reports side/mid and 20 ms envelope-spread
+deltas. The versioned JSON report contains the same typed comparison. Different
+sample rates and durations are allowed because these are time-averaged energy
+measurements; alignment remains the caller's explicit window choice.
+
 **Per-track summary as part of a normal render.** The solo loop exists only
 because the renderer reports one aggregate voice count. Printing per-track RMS,
 peak and centroid alongside it — which the scheduler can attribute directly,
 per 002's P0 — would make the most-used measurement in this session free.
 
+**Partially implemented 2026-08-27.** `--track-summary` performs one
+source-preserving isolated render per selected track and prints voice count,
+scheduler-native distinct onset count/minimum interval, RMS, peak and DC through
+the production processing path. It is explicit rather than part of every render
+because those audio levels cannot be attributed through shared nonlinear
+processors without actually rendering each solo. The report also includes the
+same power-weighted 32,768-sample, 50%-overlap Hann/Welch spectral centroid used
+during this retrospective, accumulated per channel so antiphase stereo cannot
+cancel out.
+
+**Implemented 2026-08-27.** `--dynamics` now reports the exact side/mid ratio
+used above and the p95−p5 spread of a 20 ms whole-layout RMS envelope. Silent
+envelope windows have a declared −120 dBFS floor. Both measurements are also
+fields in the versioned `--json` report, so a future `--reference` comparison
+can subtract typed values instead of parsing terminal prose.
+
 **A structural-period report.** Given a program, report each track's pattern
 period in cycles from the AST rather than from audio. Trivial compared to the
 audio version, exact where the audio version is pitch-blind, and it turns "the
 polymetric claim in the header comment" into something checkable.
+
+**Audited 2026-08-27; the word “trivial” was wrong.** An exact report needs a
+declared equivalence relation (event values and relative spans only, or source
+and provenance identity too) and at least `Periodic / Aperiodic / Unknown`, not
+an `Option<Frac>` guessed from syntax. `Choose`, `Degrade` and randomized `Ply`
+hash absolute rational coordinates; `Rand`, `Perlin` and `Time` signals are not
+ordinary one-cycle repeats; a `Timeline` is finite rather than periodic; and
+`Slowcat` composed with rational `Fast`, `When` and shifts needs exact rational
+LCM rules. Implementing a plausible-looking recursive number before those
+semantics are fixed would make prose claims look verified when they are not.
 
 ### Operational notes
 

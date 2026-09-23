@@ -28,7 +28,7 @@ The current slice supports:
   seconds are available only under a constant tempo, where the conversion is
   unambiguous;
 - `tempo(bpm)` and step/ramped `tempo { ... }` maps, plus finite
-  `timeline { at(time, pattern), ... }` placement;
+  `timeline { at(time, pattern[, capture_duration]), ... }` placement;
 - typed program tonal context through `key(tonic, mode)` for major, minor, and
   dorian. It is stored and validated but degree notation does not consume it
   yet;
@@ -57,6 +57,10 @@ The current slice supports:
   parameter-bound `decay(n.seconds)`;
 - readable graph helpers `zero()` and `soft_saw(hz)`; the latter stages an
   ordinary saw/fundamental blend and is not a new backend primitive;
+- a band-limited graph-rate `triangle(hz)` oscillator, also available as
+  `hz >> triangle()`. Frequency accepts symbolic/modulated graph inputs in
+  voices and persistent patches; this spelling is not a transport pattern
+  signal. Like `saw`, it uses shared generated waveform tables, not recordings;
 - persistent `patch` graphs with explicit audio inputs, arena-scoped writable
   controls, `run`, buses, and graph-local `to(bus, level)` sends;
 - program-scope `send { graph, level }` returns and `master(processor)`,
@@ -70,6 +74,21 @@ The current slice supports:
   original Lua call site's byte offset; fixed-frequency voices whose graph
   does not read `n.hz` accept trigger labels such as `bd` and `x`, while the
   same labels remain pitch diagnostics for a graph that does read `n.hz`.
+
+`excitation >> pluck(hz, gain_per_second, damping)` builds a Karplus–Strong
+string from a synthesized excitation; it does not load a sample. The gain is
+strictly between zero and one, and damping is a coefficient in `[0, 1]`, not a
+filter cutoff in Hertz. Pitch and damping currently accept a literal or a
+direct note parameter (for example `n.hz`), but not graph arithmetic, even when
+its operands are fixed at onset. Apply modulatable filtering after the string.
+`songs/rust-and-voltage.eod` combines this primitive with oscillator fifths and
+distortion to build its sample-free rhythm instruments.
+
+For sounding-token highlighting in generated arrangements, store patterns:
+`local riffs = { pattern("e2 g2"), pattern("a2 e2") }`, then pass `riffs[i]`
+through transforms and timeline placement. Storing plain strings and later
+calling `pattern(riffs[i])` currently loses their document source offsets.
+Loops and tables preserve attribution once the literal has become a pattern.
 
 The crate vendors an exact unreleased Piccolo revision. The 0.3.3 crates.io
 release does not dispatch arithmetic or bitwise metamethods and can panic when
@@ -102,6 +121,46 @@ data, and publication budgets. Cross-crate acceptance coverage is described
 below.
 
 ## Current compatibility boundary
+
+### Retained-string proof of concept
+
+`string_resonator(excitation, hz, mute, { min_hz = 40, decay = secs(35) })`
+is a graph-only mono primitive. All three signal inputs accept signals or
+scalars. `min_hz` (1–20000 Hz) bounds allocation; `decay` (positive, at most
+120 seconds) is nominal T60, fixed at staging. Interpolation and brightness
+losses shorten actual decay. Pitch is clamped to `min_hz..sample_rate/4`
+(the sample-rate ceiling wins if those bounds conflict), and smoothed over
+approximately 2 ms. This is a delay-loop approximation, not physical fretting.
+
+In a persistent patch, excitation adds energy to the same string on every
+pick. Zero excitation leaves it ringing. `mute` is clamped to 0–1 and increases
+loss **inside** the loop: full pressure gives approximately 25 ms nominal T60.
+Releasing pressure does not restore old vibration. Leaving pressure engaged
+also damps subsequent picks. Input and internal state are bounded; extreme
+excitation clips at an internal magnitude of 16. There is no implicit oscillator,
+new voice, or reset when frequency changes. Memory is one delay of at most
+`1/min_hz` seconds plus up to eight padding samples per string (including
+room for the sample-rate-dependent pitch ceiling).
+
+[`six-strings.eod`](../../songs/six-strings.eod) is a runnable 32-second electric
+guitar demonstration. Six tiny noise-pick voices feed six mono buses; one
+persistent patch contains six strings and one shared amp. It demonstrates all
+six strings, an upper-three-only strum, a two-semitone bend, repicking while
+bent, release, a hand mute, a new chord and palm-muted picks. Faders provide amp
+drive, additional high-string bend, and palm pressure. Open **Six Strings, One
+Amplifier** in the app, or render it with:
+
+```sh
+cargo run --release -p apteronotus-render -- --song six-strings --seconds 32 --tail 1 -o /tmp/six-strings.wav
+```
+
+The score uses existing `control_signal` transport patterns and short scheduled
+audio excitations. The proposed addressed fret/pick/mute API is still a TODO;
+there is no `guitar` or `strings.bank` builder yet. Scheduled curves repeat after
+the demo's 32-second control period, while its excitation timeline is finite.
+Source highlights identify pick events, not the full subsequent vibration.
+Harmonics, realistic fret contact, bowed excitation and string coupling remain
+in the [design ledger](../../_Tasks/006-persistent-strings/README.md).
 
 The binding can run finite or cyclic polyphonic, transformed multi-track scores
 with scalar or note-curve event controls and mapped tempo, plus persistent
@@ -200,3 +259,103 @@ cargo test --workspace
 cargo check -p apteronotus-lua --target wasm32-unknown-unknown
 cargo clippy -p apteronotus-lua --all-targets --no-deps -- -D warnings
 ```
+
+## Compile-only feedback
+
+`check_syntax(source)` and `check_syntax_with_limit(source, source_bytes)` parse
+and compile the original Lua text with Piccolo's compiler and a temporary string
+interner. They create no VM, install no bindings and execute no code. Returned
+`SyntaxDiagnostic`s contain a message, an optional one-based Lua line, and that
+whole line's original UTF-8 byte range. CR, LF, CRLF and LFCR follow the lexer’s
+own line-counting rules. Token columns are deliberately absent. This is grammar
+and compiler validation, not graph type checking or mini-notation validation.
+
+## Finite capture windows
+
+`at(start, pattern)` captures onsets in one local cycle, as before. Its optional
+third argument is an explicit positive `bars`, `beats`, `secs` or `ms` duration:
+
+```lua
+tempo(112)
+local phrase = pattern("c4 d4 e4 f4 g4 a4 b4") >> slow(7 / 8)
+local score = timeline {
+  at(bars(0), phrase, bars(7 / 8)),
+  at(bars(7 / 8), phrase, bars(7 / 8)),
+}
+```
+
+The child starts at local cycle zero for each placement. Only onsets within the
+half-open capture window are copied; held notes and response tails can extend
+beyond it. Longer windows advance cyclic alternation normally. A duration in
+seconds is projected from the placement's start through the owned tempo map,
+including any tempo changes crossed, and requires `tempo(...)` earlier in the
+evaluation. It is not an absolute wall-clock endpoint.
+
+`Limits::max_timeline_capture_cycles` defaults to 4096. Capture length and
+estimated event count are checked before querying; the existing pattern-node
+budget also limits the result. Unrepresentable shifted onset/release coordinates
+produce diagnostics instead of overflowing rational arithmetic.
+
+### Synthetic pipe organ
+
+`organ_pipe(hz, stop)` produces a mono keyed pipe; `organ(hz, stops)` sums
+1–16 ranks. They are shipped as readable [Lua source](src/stdlib/organ.lua).
+Use them inside a `voice.graph`, then pan or route the result as usual:
+
+```lua
+local cathedral = voice { graph = function(n)
+  return organ(n.hz, {
+    {kind="flute", feet=16, level=.25},
+    {kind="principal", feet=8, level=.65},
+    {kind="principal", feet=4, level=.30, cents=1.2},
+    {kind="reed", feet=8, level=.25, cents=-1},
+  }) * .2 >> pan(n.pan)
+end }
+play(cathedral, pattern("[d3,a3,d4,f4] ~") >> hold(beats(3.5)))
+```
+
+Kinds are `principal` (default), `flute`, `string`, `reed`. Stop fields are
+`feet` (0.5–32, default 8), `cents` (±100, default 0), `level` (scalar or graph
+signal, default 1), optional `attack`/`release` durations, and `chiff` (0–0.2,
+rank-specific default), and `voicing` (`"speech"` by default, or `"classic"`). `hz` is modulatable. Voice sustain stays constant until
+key release; velocity response and room acoustics are explicit score choices.
+Stop gains are added without registration normalization. Use sensible gain
+for chords; no limiter is hidden inside the instrument.
+
+The underlying reusable graph source `harmonics(hz, {a1, a2, ...})` accepts
+1–32 finite amplitudes with absolute sum ≤1, fundamental first. It fades
+ultrasonic partials at the device's actual sample rate. The organ is a designed
+additive approximation, not a wind/pipe physical model. See the
+[design and acceptance contract](../../_Tasks/007-synthetic-organ/README.md)
+and the Library's **Iron Choir** (`cathedral-organ`) for dry stops, full
+registration, independent pedals and a shared hall.
+
+The default organ `voicing="speech"` gives foundation, middle and upper
+harmonics different attacks, a brief upper-mode overshoot, and gentle voicing
+across pitch. Use `voicing="classic"` on a stop for the original common-envelope,
+fixed-spectrum variant. Both sustain while held and release cleanly; explicit
+`attack` overrides each group's attack, and `release` controls their release.
+The speech variant can have higher transient/bass peaks than the classic rank.
+
+`flue_pipe(hz, pressure, turbulence, {min_hz=40})` is an **experimental physical
+flue** available in both voice and patch graphs. It has retained bore/jet state,
+normalized pressure (0–1), and explicit inlet turbulence (±1; use `noise()` or
+`0`). Start around pressure 0.85; low pressure can fall below its speaking
+threshold. Closing pressure lets vibration drain. In a voice, put the note
+envelope on **pressure**, rather than merely fading the final audio:
+
+```lua
+local flue = voice {graph=function(n)
+  local pressure = adsr(ms(20), ms(1), 1, ms(35)) * .85
+  return flue_pipe(n.hz, pressure, noise(), {min_hz=40}) * .4 >> pan(n.pan)
+end}
+```
+
+Put the node in a persistent `patch` when repeated keying must act on the same
+vibration. `min_hz` is a staged allocation bound in 20–1000 Hz; pitch is limited
+to min(1200 Hz, device rate/32). It uses 4× internal processing and has bounded
+state, but is a reduced open-flue model with approximate tuning, not a physical
+replacement for every named stop. Its pressure response is nonlinear and its
+output deliberately dark. **Pipes Under Pressure** (`organ-laboratory`) gives a
+dry comparison and a retained-pipe demonstration. The design document above
+specifies smoothing, lifetime, memory budgets and the tested tuning region.

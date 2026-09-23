@@ -1,0 +1,73 @@
+-- six-strings.eod — Six Strings, One Amplifier
+-- Minimal retained-string electric guitar; no recordings or sample playback.
+-- Render: cargo run -p apteronotus-render -- songs/six-strings.eod --seconds 32 --tail 1
+-- 0s: E minor, all six. 6s: upper three only; bass strings keep ringing.
+-- 12s: bend high E up two semitones. 14s: repick while bent. 16s: release.
+-- 18s: hand mute. 20s: C major. 26s: palm-muted repicks. 30s: final mute.
+-- This is the low-level working PoC, not the proposed guitar gesture API.
+tempo(120)
+
+local drive = control { name = "Amp drive", range = {1, 30}, default = 9 }
+local bend = control { name = "High string bend (semitones)", range = {-5, 7}, default = 0 }
+local palm = control { name = "Palm pressure", range = {0, 1}, default = 0 }
+local pickups, picks, events = {}, {}, {}
+for i = 1, 6 do
+  pickups[i] = bus { channels = 1 }
+  local destination = pickups[i]
+  picks[i] = voice {
+    graph = function(n)
+      local excitation = noise() >> highpass(120, 0.7) >> lowpass(4500, 0.7)
+      return excitation * adsr(ms(0.3), ms(3), 0.15, ms(2)) * n.velocity * 0.8
+        >> to(destination, 1) >> mul(0) >> pan(0)
+    end,
+  }
+  events[i] = {}
+end
+
+-- These contain one value per second for a 32-second transport period.
+local bend_score = pattern("0@12 2@4 0@16") >> slow(16)
+local mute_score = pattern("0@18 1@2 0@6 0.035@4 1@2") >> slow(16)
+local low_mute = pattern("0@18 1@14") >> slow(16)
+local change = pattern("0@20 1@12") >> slow(16)
+local em = {82.4069, 123.4708, 164.8138, 195.9977, 246.9417, 329.6276}
+local c = {82.4069, 130.8128, 164.8138, 195.9977, 261.6256, 329.6276}
+
+local instrument = patch {
+  inputs = 8, -- stereo main, then one excitation lane per physical string
+  graph = function(cv)
+    local fret_change = control_signal(change, bars(16))
+    local choke = control_signal(mute_score, bars(16))
+    local bass_choke = control_signal(low_mute, bars(16))
+    local high_bend = slew(control_signal(bend_score, bars(16)) + bend, 0.15)
+    local sum = dc(0)
+    for i = 1, 6 do
+      local hz = em[i] + (c[i] - em[i]) * fret_change
+      local pressure = choke + palm
+      if i == 1 then pressure = bass_choke + palm end
+      if i == 6 then hz = hz * (2 ^ (high_bend / 12)) end
+      sum = sum + string_resonator(cv.inputs[i + 2], hz, pressure,
+        { min_hz = 40, decay = secs(35) })
+    end
+    -- String motion is summed BEFORE distortion. This amp never feeds back
+    -- into the strings: untouched strings retain exactly their own history.
+    return sum >> highpass(65, 0.7) >> shape("tanh", drive)
+      >> lowpass(4200, 0.7) >> shape("tanh", 1.4)
+      >> lowpass(3000, 0.7) >> mul(0.38) >> pan(0)
+  end,
+}
+run(instrument)
+
+local function strum(seconds, selection, strength)
+  for position, slot in ipairs(selection) do
+    table.insert(events[slot], at(secs(seconds + (position - 1) * 0.012),
+      pattern("x") >> hold(beats(0.016)) >> velocity(strength)))
+  end
+end
+strum(0, {1, 2, 3, 4, 5, 6}, 0.85)
+strum(6, {4, 5, 6}, 0.7)
+strum(14, {6}, 0.8)
+strum(20.05, {2, 3, 4, 5, 6}, 0.85)
+strum(26, {2, 3, 4, 5, 6}, 0.8)
+strum(27, {2, 3, 4, 5, 6}, 0.8)
+strum(28, {2, 3, 4, 5, 6}, 0.8)
+for i = 1, 6 do play(picks[i], timeline(events[i])) end

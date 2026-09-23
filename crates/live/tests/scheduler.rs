@@ -1,6 +1,6 @@
 use apteronotus_live::{
-    PitchScheduler, ProgramScheduler, RoutedRuntime, ScheduleError, ScheduledTrack, Transport,
-    schedule_external_routed,
+    PitchScheduler, ProgramScheduler, RoutedRuntime, ScheduleError, ScheduledTrack, TempoMap,
+    Transport, schedule_external_routed,
 };
 use apteronotus_pattern::{Frac, mini};
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
@@ -104,6 +104,12 @@ fn four_repetitions_at_120_bpm_land_on_quarter_note_beats() {
         .fill_to(Frac::ONE, &pattern, &voice, transport, &mut sequencer)
         .unwrap();
     assert_eq!(report.voices, 4);
+    assert_eq!(report.tracks.len(), 1);
+    assert_eq!(report.tracks[0].voices, 4);
+    assert_eq!(report.tracks[0].distinct_onsets, 4);
+    assert!((report.tracks[0].min_interval_seconds.unwrap() - 0.5).abs() < 1.0e-12);
+    assert_eq!(report.tracks[0].onsets_seconds, [0.0, 0.5, 1.0, 1.5]);
+    assert_eq!(report.tracks[0].intervals_seconds, [0.5, 0.5, 0.5]);
 
     let audio = render(&mut sequencer, SR, 2.0);
     let audible: Vec<usize> = audio[0]
@@ -116,6 +122,49 @@ fn four_repetitions_at_120_bpm_land_on_quarter_note_beats() {
         vec![0, 24_000, 48_000, 72_000],
         "`x*4` must mean four quarter-note onsets in one 4/4 cycle"
     );
+}
+
+#[test]
+fn a_replacement_sequencer_rebases_absolute_transport_onsets_to_local_zero() {
+    let pattern = mini::parse("x*2").unwrap();
+    let mut graph = GraphBuilder::new();
+    let impulse = graph.impulse();
+    let voice = graph.out_mono(impulse).unwrap();
+    let tempo = TempoMap::constant(120.0, 4.0).unwrap();
+    let boundary = Frac::new(2, 1);
+    let origin_seconds = tempo.cycle_to_seconds(boundary);
+    let mut scheduler = ProgramScheduler::new(boundary);
+    let mut sequencer = PitchScheduler::sequencer(&voice);
+    sequencer.set_sample_rate(SR);
+
+    let report = scheduler
+        .fill_to_seconds_tempo_map_from(
+            origin_seconds + 0.5,
+            [ScheduledTrack::new(&pattern, &voice)],
+            &tempo,
+            &mut sequencer,
+            origin_seconds,
+        )
+        .unwrap();
+
+    assert_eq!(report.voices, 1);
+    assert_eq!(report.tracks[0].onsets_seconds, [0.0]);
+
+    let later = scheduler
+        .fill_to_seconds_tempo_map_from(
+            origin_seconds + 1.5,
+            [ScheduledTrack::new(&pattern, &voice)],
+            &tempo,
+            &mut sequencer,
+            origin_seconds,
+        )
+        .unwrap();
+    assert_eq!(later.voices, 1);
+    assert_eq!(later.tracks[0].onsets_seconds, [1.0]);
+
+    let audio = render(&mut sequencer, SR, 1.01);
+    assert!(audio[0][0] > 0.5);
+    assert!(audio[0][SR as usize] > 0.5);
 }
 
 #[test]
@@ -213,6 +262,14 @@ fn a_program_window_is_atomic_across_tracks() {
         )
         .unwrap();
     assert_eq!(report.voices, 4);
+    assert_eq!(report.tracks.len(), 2);
+    for track in report.tracks {
+        assert_eq!(track.voices, 2);
+        assert_eq!(track.distinct_onsets, 2);
+        assert!((track.min_interval_seconds.unwrap() - 1.0).abs() < 1.0e-12);
+        assert_eq!(track.onsets_seconds, [0.0, 1.0]);
+        assert_eq!(track.intervals_seconds, [1.0]);
+    }
 }
 
 #[test]

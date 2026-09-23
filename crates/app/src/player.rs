@@ -7,6 +7,8 @@ use apteronotus_pattern::{ControlValue, Frac, Span, Value};
 // The device-free half of a Run — what the program is, and whether it reaches
 // audio at all — is shared with the offline renderer. Two copies of this would
 // mean the file a render is measured from could disagree with the sound.
+#[cfg(not(target_arch = "wasm32"))]
+use apteronotus_render::persistent_runtime_at;
 pub(crate) use apteronotus_render::{
     needs_persistent_runtime, persistent_runtime, playable_channels, scheduled_runs,
     scheduled_tracks,
@@ -27,6 +29,10 @@ const MIN_REVISION_WINDOW_SECONDS: f64 = 0.05;
 const MIN_EXTERNAL_LATENCY_SECONDS: f64 = 0.03;
 #[cfg(not(target_arch = "wasm32"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+#[cfg(not(target_arch = "wasm32"))]
+const REPLACEMENT_LEAD_SECONDS: f64 = LOOKAHEAD_SECONDS * 2.0;
+#[cfg(not(target_arch = "wasm32"))]
+const REPLACEMENT_CROSSFADE: Duration = Duration::from_millis(80);
 
 pub enum Command {
     Run {
@@ -58,7 +64,9 @@ pub enum PlayerEvent {
     Active {
         request: u64,
         generation: u64,
-        boundary: String,
+        program: Arc<Program>,
+        origin: Instant,
+        effective_at: Frac,
         voices: usize,
         controls: Vec<ControlView>,
         warning: Option<String>,
@@ -73,7 +81,9 @@ pub enum PlayerEvent {
 
 struct Activation {
     generation: u64,
-    boundary: String,
+    program: Arc<Program>,
+    origin: Instant,
+    effective_at: Frac,
     voices: usize,
     controls: Vec<ControlView>,
     warning: Option<String>,
@@ -153,7 +163,9 @@ impl PlayerWorker {
                         Ok(activation) => PlayerEvent::Active {
                             request,
                             generation: activation.generation,
-                            boundary: activation.boundary,
+                            program: activation.program,
+                            origin: activation.origin,
+                            effective_at: activation.effective_at,
                             voices: activation.voices,
                             controls: activation.controls,
                             warning: activation.warning,
@@ -198,6 +210,9 @@ struct Player {
     output: Option<AudioOutput>,
     output_channels: Option<usize>,
     clock_started: Option<Instant>,
+    /// Absolute transport seconds represented by local time zero in the
+    /// current output stream's sequencer.
+    sequencer_origin_seconds: f64,
     fallback: Option<Arc<Program>>,
     persistent: Option<PersistentRuntime>,
     external_levels: Vec<bool>,
@@ -219,6 +234,7 @@ impl Player {
             output: None,
             output_channels: None,
             clock_started: None,
+            sequencer_origin_seconds: 0.0,
             fallback: None,
             persistent: None,
             external_levels: Vec::new(),
@@ -228,7 +244,7 @@ impl Player {
         }
     }
 
-    /// Open a stream at the player's current level.
+    /// Open a stream at an explicit initial level.
     ///
     /// Every open goes through here. A stream is built paused, so applying the
     /// level before anyone can call `play` is what stops a replacement from
@@ -239,13 +255,13 @@ impl Player {
         candidate: &Program,
         channels: usize,
         persistent: Option<&mut PersistentRuntime>,
+        initial_decibels: f32,
     ) -> Result<AudioOutput, String> {
         let output = match persistent {
-            Some(runtime) => open_persistent_output(candidate, runtime),
-            None => AudioOutput::open(channels),
+            Some(runtime) => open_persistent_output(candidate, runtime, initial_decibels),
+            None => AudioOutput::open_at_level(channels, initial_decibels),
         }
         .map_err(|error| error.to_string())?;
-        output.master().set_decibels(self.volume_decibels);
         Ok(output)
     }
 
@@ -271,9 +287,6 @@ impl Player {
             && needs_persistent
             && self.output_channels == Some(channels)
             && candidate.reuse_persistent_from(&self.revisions.active().program);
-        let mut persistent = (needs_persistent && !reuse_persistent)
-            .then(|| persistent_runtime(&candidate))
-            .transpose()?;
         let reset = needs_hard_reset(
             self.output.is_some(),
             active_persistent,
@@ -283,6 +296,21 @@ impl Player {
             self.output_channels,
             channels,
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        if can_crossfade_replace(
+            self.output.is_some(),
+            active_persistent,
+            needs_persistent,
+            reuse_persistent,
+            tempo_changed,
+            self.output_channels,
+            channels,
+        ) {
+            return self.crossfade_replace(candidate, channels);
+        }
+        let mut persistent = (needs_persistent && !reuse_persistent)
+            .then(|| persistent_runtime(&candidate))
+            .transpose()?;
         if reset {
             return self.hard_reset(candidate, channels, persistent);
         }
@@ -301,6 +329,9 @@ impl Player {
             .map(|started| started.elapsed().as_secs_f64())
             .unwrap_or(0.0);
         let boundary_seconds = candidate.tempo.cycle_to_seconds(boundary);
+        // Compatible revisions share a tempo map: any tempo change took the
+        // hard-reset path above. One transport origin can therefore place both
+        // the old audible revision and this future activation unambiguously.
         let target_seconds =
             (clock_seconds + LOOKAHEAD_SECONDS).max(boundary_seconds + MIN_REVISION_WINDOW_SECONDS);
 
@@ -325,28 +356,38 @@ impl Player {
         let preview_runs = scheduled_runs(&candidate)?;
         let preview_report = if let Some(runtime) = preview_runtime {
             preview_scheduler
-                .fill_routed_program_to_seconds_tempo_map(
+                .fill_routed_program_to_seconds_tempo_map_from(
                     target_seconds,
                     preview_tracks,
                     preview_runs,
                     &candidate.tempo,
                     &mut preview,
-                    RoutedRuntime::new(runtime.layout(), runtime.controls()),
+                    RoutedRuntime::new_rebased(
+                        runtime.layout(),
+                        runtime.controls(),
+                        self.sequencer_origin_seconds,
+                    ),
                 )
                 .map_err(|error| error.to_string())?
         } else {
             preview_scheduler
-                .fill_to_seconds_tempo_map(
+                .fill_to_seconds_tempo_map_from(
                     target_seconds,
                     preview_tracks,
                     &candidate.tempo,
                     &mut preview,
+                    self.sequencer_origin_seconds,
                 )
                 .map_err(|error| error.to_string())?
         };
 
         if self.output.is_none() {
-            self.output = Some(self.open_output(&candidate, channels, persistent.as_mut())?);
+            self.output = Some(self.open_output(
+                &candidate,
+                channels,
+                persistent.as_mut(),
+                self.volume_decibels,
+            )?);
             self.output_channels = Some(channels);
         }
 
@@ -369,7 +410,7 @@ impl Player {
         // can fill, so rollback remains faithful.
         let previous_scheduler = self.scheduler.clone();
         self.scheduler.clear_track_history();
-        if let Err(error) = self.fill_revision_to(target_seconds, revision.program) {
+        if let Err(error) = self.fill_revision_to(target_seconds, Arc::clone(&revision.program)) {
             self.scheduler = previous_scheduler;
             self.restore_fallback(target_seconds, &error)?;
             return Err(error);
@@ -388,9 +429,122 @@ impl Player {
         let controls = control_views(&self.revisions.active().program, self.persistent.as_ref());
         Ok(Activation {
             generation: self.activation_generation.max(generation.get()),
-            boundary: boundary.to_string(),
+            program: Arc::clone(&revision.program),
+            origin: self
+                .clock_started
+                .expect("activation started the transport"),
+            effective_at: boundary,
             voices: preview_report.voices,
             controls,
+            warning: self.input_warning(),
+        })
+    }
+
+    /// Replace incompatible persistent state without restarting musical time.
+    ///
+    /// The old program is first filled to a future exact frontier. The new
+    /// arena and stream are then lowered against that absolute coordinate and
+    /// remain paused and silent until the frontier arrives. No fallible state
+    /// change occurs after the candidate starts: from that point the bounded
+    /// gain overlap completes and the old stream is dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn crossfade_replace(
+        &mut self,
+        candidate: Program,
+        channels: usize,
+    ) -> Result<Activation, String> {
+        let started = self
+            .clock_started
+            .expect("replacement requires a running transport");
+        let active = Arc::clone(&self.revisions.active().program);
+        let reserve_until = started.elapsed().as_secs_f64() + REPLACEMENT_LEAD_SECONDS;
+        self.fill_revision_to(reserve_until, active)?;
+
+        let boundary = self.scheduler.frontier();
+        let boundary_seconds = candidate.tempo.cycle_to_seconds(boundary);
+        let target_seconds = boundary_seconds + LOOKAHEAD_SECONDS;
+        let mut persistent = persistent_runtime_at(&candidate, boundary_seconds)?;
+
+        // Prove the complete candidate window before acquiring a device
+        // stream or changing any live handle.
+        let mut preview = persistent.sequencer();
+        let mut preview_scheduler = ProgramScheduler::new(boundary);
+        let preview_report = preview_scheduler
+            .fill_routed_program_to_seconds_tempo_map_from(
+                target_seconds,
+                scheduled_tracks(&candidate)?,
+                scheduled_runs(&candidate)?,
+                &candidate.tempo,
+                &mut preview,
+                RoutedRuntime::new_rebased(
+                    persistent.layout(),
+                    persistent.controls(),
+                    boundary_seconds,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut output = self.open_output(
+            &candidate,
+            channels,
+            Some(&mut persistent),
+            MasterGain::MIN_DECIBELS,
+        )?;
+        let mut scheduler = ProgramScheduler::new(boundary);
+        scheduler
+            .fill_routed_program_to_seconds_tempo_map_from(
+                target_seconds,
+                scheduled_tracks(&candidate)?,
+                scheduled_runs(&candidate)?,
+                &candidate.tempo,
+                output.sequencer_mut(),
+                RoutedRuntime::new_rebased(
+                    persistent.layout(),
+                    persistent.controls(),
+                    boundary_seconds,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let remaining = boundary_seconds - started.elapsed().as_secs_f64();
+        if remaining <= 0.0 {
+            return Err(
+                "persistent replacement missed its prepared musical boundary; the previous program remains active"
+                    .into(),
+            );
+        }
+        thread::sleep(Duration::from_secs_f64(remaining));
+        output.play().map_err(|error| error.to_string())?;
+
+        output.master().set_decibels(self.volume_decibels);
+        self.output
+            .as_ref()
+            .expect("replacement requires an active output")
+            .master()
+            .set_decibels(MasterGain::MIN_DECIBELS);
+        thread::sleep(REPLACEMENT_CROSSFADE);
+
+        let previous_output = self.output.replace(output);
+        if let Some(previous_output) = previous_output {
+            let _ = previous_output.pause();
+        }
+        self.activation_generation = self.activation_generation.saturating_add(1);
+        self.revisions = RevisionSlot::new(candidate, boundary);
+        self.scheduler = scheduler;
+        self.output_channels = Some(channels);
+        self.sequencer_origin_seconds = boundary_seconds;
+        self.fallback = None;
+        self.persistent = Some(persistent);
+        let active = Arc::clone(&self.revisions.active().program);
+        self.sync_external_levels(&active);
+
+        Ok(Activation {
+            generation: self.activation_generation,
+            program: Arc::clone(&active),
+            origin: started,
+            effective_at: boundary,
+            voices: preview_report.voices,
+            controls: control_views(&active, self.persistent.as_ref()),
             warning: self.input_warning(),
         })
     }
@@ -439,7 +593,12 @@ impl Player {
         // Construct the complete replacement stream while the old stream is
         // still playing. Only a fully lowered, filled, and opened candidate is
         // allowed to interrupt the active program.
-        let mut output = self.open_output(&candidate, channels, persistent.as_mut())?;
+        let mut output = self.open_output(
+            &candidate,
+            channels,
+            persistent.as_mut(),
+            self.volume_decibels,
+        )?;
         let mut scheduler = ProgramScheduler::default();
         let tracks = scheduled_tracks(&candidate)?;
         let runs = scheduled_runs(&candidate)?;
@@ -481,6 +640,7 @@ impl Player {
         self.output = Some(output);
         self.output_channels = Some(channels);
         self.clock_started = Some(Instant::now());
+        self.sequencer_origin_seconds = 0.0;
         self.fallback = None;
         self.persistent = persistent;
         let active = Arc::clone(&self.revisions.active().program);
@@ -488,7 +648,11 @@ impl Player {
 
         Ok(Activation {
             generation: self.activation_generation,
-            boundary: Frac::ZERO.to_string(),
+            program: Arc::clone(&active),
+            origin: self
+                .clock_started
+                .expect("hard reset started the transport"),
+            effective_at: Frac::ZERO,
             voices: report.voices,
             controls,
             warning: self.input_warning(),
@@ -530,6 +694,7 @@ impl Player {
         self.scheduler = ProgramScheduler::default();
         self.output_channels = None;
         self.clock_started = None;
+        self.sequencer_origin_seconds = 0.0;
         self.fallback = None;
         self.persistent = None;
         self.external_levels.clear();
@@ -586,7 +751,7 @@ impl Player {
         if let Some(runtime) = &self.persistent {
             let runs = scheduled_runs(&program)?;
             self.scheduler
-                .fill_routed_program_to_seconds_tempo_map(
+                .fill_routed_program_to_seconds_tempo_map_from(
                     target_seconds,
                     tracks,
                     runs,
@@ -595,12 +760,16 @@ impl Player {
                         .as_mut()
                         .expect("revision filling requires an audio output")
                         .sequencer_mut(),
-                    RoutedRuntime::new(runtime.layout(), runtime.controls()),
+                    RoutedRuntime::new_rebased(
+                        runtime.layout(),
+                        runtime.controls(),
+                        self.sequencer_origin_seconds,
+                    ),
                 )
                 .map_err(|error| error.to_string())?;
         } else {
             self.scheduler
-                .fill_to_seconds_tempo_map(
+                .fill_to_seconds_tempo_map_from(
                     target_seconds,
                     tracks,
                     &program.tempo,
@@ -608,6 +777,7 @@ impl Player {
                         .as_mut()
                         .expect("revision filling requires an audio output")
                         .sequencer_mut(),
+                    self.sequencer_origin_seconds,
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -658,7 +828,8 @@ impl Player {
         }
 
         let observed_seconds = started.elapsed().as_secs_f64();
-        let at_seconds = observed_seconds + MIN_EXTERNAL_LATENCY_SECONDS;
+        let at_seconds =
+            observed_seconds + MIN_EXTERNAL_LATENCY_SECONDS - self.sequencer_origin_seconds;
         let at_cycle = program
             .tempo
             .seconds_to_cycle(observed_seconds)
@@ -746,21 +917,41 @@ fn needs_hard_reset(
             || (active_persistent && candidate_persistent && !reuse_persistent))
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn can_crossfade_replace(
+    output_open: bool,
+    active_persistent: bool,
+    candidate_persistent: bool,
+    reuse_persistent: bool,
+    tempo_changed: bool,
+    active_channels: Option<usize>,
+    candidate_channels: usize,
+) -> bool {
+    output_open
+        && active_persistent
+        && candidate_persistent
+        && !reuse_persistent
+        && !tempo_changed
+        && active_channels == Some(candidate_channels)
+}
+
 fn open_persistent_output(
     program: &Program,
     runtime: &mut PersistentRuntime,
+    initial_decibels: f32,
 ) -> Result<AudioOutput, apteronotus_live::OutputError> {
     let requested_channels = program
         .audio_inputs
         .specs()
         .first()
         .map_or(0, |spec| spec.channels);
-    AudioOutput::open_processed_with_default_input(
+    AudioOutput::open_processed_with_default_input_at_level(
         runtime.layout().total_channels(),
         runtime.layout().main_channels(),
         runtime.take_processor_with_audio_inputs(),
         runtime.external_channels(),
         requested_channels,
+        initial_decibels,
     )
 }
 
@@ -902,7 +1093,9 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
                 Ok(activation) => PlayerEvent::Active {
                     request,
                     generation: activation.generation,
-                    boundary: activation.boundary,
+                    program: activation.program,
+                    origin: activation.origin,
+                    effective_at: activation.effective_at,
                     voices: activation.voices,
                     controls: activation.controls,
                     warning: activation.warning,
@@ -925,11 +1118,24 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
     }
 }
 
+// `Program` is sent from native evaluation into playback and now back to the
+// UI as the exact revision used for coordinate-derived highlighting. Keep the
+// thread-safety requirement adjacent to that boundary so a future `Rc` fails
+// here, not as an obscure channel error.
+fn assert_program_send_sync()
+where
+    Program: Send + Sync,
+{
+}
+
+const _: fn() = assert_program_send_sync;
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MasterGain, Player, control_views, external_event_bindings, external_event_passes,
-        external_event_seed, needs_hard_reset, persistent_runtime, playable_channels,
+        MasterGain, Player, can_crossfade_replace, control_views, external_event_bindings,
+        external_event_passes, external_event_seed, needs_hard_reset, persistent_runtime,
+        persistent_runtime_at, playable_channels,
     };
     use apteronotus_lua::evaluate;
     use apteronotus_pattern::Frac;
@@ -1075,6 +1281,33 @@ mod tests {
     }
 
     #[test]
+    fn program_binding_passes_nonzero_transport_into_persistent_lowering() {
+        let program = evaluate(
+            r#"
+            tempo(120)
+            local rack = patch {
+              graph = function()
+                local pulse = control_signal(
+                  "0.2 0.8" >> segment(2),
+                  bars(1))
+                return pulse
+              end,
+            }
+            run(rack)
+            "#,
+        )
+        .unwrap();
+        let mut runtime = persistent_runtime_at(&program, 1.5).unwrap();
+        let lanes = runtime.layout().total_channels();
+        let mut unit = runtime.take_processor();
+        unit.set_sample_rate(48_000.0);
+        let input = vec![0.0; lanes];
+        let mut output = vec![0.0; lanes];
+        unit.tick(&input, &mut output);
+        assert!(output.iter().all(|sample| (*sample - 0.8).abs() < 1.0e-6));
+    }
+
+    #[test]
     fn engine_owned_signal_controls_do_not_appear_as_user_faders() {
         let program = evaluate(
             r#"
@@ -1169,6 +1402,55 @@ mod tests {
             false,
             false,
             true,
+            Some(2),
+            2
+        ));
+    }
+
+    #[test]
+    fn only_same_clock_same_layout_persistent_replacement_crossfades() {
+        assert!(can_crossfade_replace(
+            true,
+            true,
+            true,
+            false,
+            false,
+            Some(2),
+            2
+        ));
+        assert!(!can_crossfade_replace(
+            true,
+            true,
+            true,
+            false,
+            true,
+            Some(2),
+            2
+        ));
+        assert!(!can_crossfade_replace(
+            true,
+            true,
+            true,
+            false,
+            false,
+            Some(1),
+            2
+        ));
+        assert!(!can_crossfade_replace(
+            true,
+            true,
+            false,
+            false,
+            false,
+            Some(2),
+            2
+        ));
+        assert!(!can_crossfade_replace(
+            true,
+            true,
+            true,
+            true,
+            false,
             Some(2),
             2
         ));

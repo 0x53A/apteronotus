@@ -1191,7 +1191,7 @@ fn seed_unit(seed: u64) -> f32 {
     ((seed >> 40) as f32) / ((1u32 << 24) as f32)
 }
 
-/// Render a voice offline into interleaved samples.
+/// Render a zero-input voice offline into planar (one vector per channel) samples.
 ///
 /// The reason `crates/synth` can be tested without a sound card, and the same
 /// path an offline render of a whole piece will take. `crates/pattern` earned
@@ -1202,11 +1202,16 @@ pub fn render(unit: &mut dyn AudioUnit, sample_rate: f64, seconds: f64) -> Vec<V
     let channels = unit.outputs();
     let frames = (sample_rate * seconds) as usize;
     let mut out = vec![Vec::with_capacity(frames); channels];
-    let mut frame = vec![0.0f32; channels];
-    for _ in 0..frames {
-        unit.tick(&[], &mut frame);
-        for (c, x) in frame.iter().enumerate() {
-            out[c].push(*x);
+    let input = BufferVec::new(0);
+    let mut output = BufferVec::new(channels);
+    // Traverse the graph once per native DSP block, letting nodes use their
+    // vectorized process paths. The last block must not advance beyond the
+    // requested frame count: callers may continue rendering the same unit.
+    for offset in (0..frames).step_by(fundsp::MAX_BUFFER_SIZE) {
+        let size = std::cmp::min(frames - offset, fundsp::MAX_BUFFER_SIZE);
+        unit.process(size, &input.buffer_ref(), &mut output.buffer_mut());
+        for (channel, destination) in out.iter_mut().enumerate() {
+            destination.extend_from_slice(&output.buffer_ref().channel_f32(channel)[..size]);
         }
     }
     out

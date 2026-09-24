@@ -1,3 +1,6 @@
+// fundsp's type-level channel arithmetic needs this depth on newer rustc.
+#![recursion_limit = "256"]
+
 //! Apteronotus — the synthesis layer.
 //!
 //! A voice is staged **once per edit** as a [`GraphTemplate`] of plain data,

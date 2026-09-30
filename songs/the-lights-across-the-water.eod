@@ -1,0 +1,199 @@
+-- the-lights-across-the-water.eod
+-- The Lights Across the Water
+-- A finite nocturnal dub miniature. 76 BPM, 48 bars, then the water settles.
+-- Everything is synthesized; no samples or audio input.
+-- Complete render: apteronotus-render --song the-lights-across-the-water
+--                 --cycles 48 --tail 10 -o the-lights-across-the-water.wav
+
+tempo(76)
+key("d", "minor")
+
+local beat = 60 / 76
+
+-- The echoes belong to the room, so they continue between chord changes.
+local echo = send {
+  graph = (predelay(secs(beat * 3 / 4)) >> lowpass(2400, .65) >> feedback(.57))
+        | (predelay(secs(beat * 5 / 4)) >> lowpass(1900, .65) >> feedback(.53)),
+  level = .72,
+}
+local room = send {
+  graph = (highpass(260, .7) | highpass(260, .7))
+       >> reverb(28, secs(3.8), .78)
+       >> (lowpass(3200, .7) | lowpass(3200, .7)),
+  level = .30,
+}
+master(((highpass(26, .7) | highpass(26, .7)) * 1.25)
+       >> limiter(ms(4), ms(110)))
+
+-- A round drum with a small, papery edge rather than a bright click.
+local kick = voice { graph = function(n)
+  local body = sine(47 + 68 * decay(ms(32))) * decay(ms(240))
+  local edge = (noise() >> lowpass(1600, .7)) * decay(ms(9)) * .09
+  return (body + edge) * adsr(ms(2), ms(1), 1, ms(40))
+       * n.velocity * .44 >> pan(0)
+end }
+
+local rim = voice { graph = function(n)
+  local wood = (sine(835) + sine(1270) * .45) * decay(ms(55))
+  local skin = (noise() >> bandpass(1800, .9)) * decay(ms(105)) * .4
+  return (wood + skin) * adsr(ms(1), ms(1), 1, ms(16))
+       * n.velocity * .18 >> pan(-.16)
+end }
+
+local hat = voice { graph = function(n)
+  local sand = noise() >> highpass(5600, .7) >> lowpass(10500, .7)
+  return sand * decay(ms(75)) * adsr(ms(1), ms(1), 1, ms(20))
+       * n.velocity * .24 >> pan(n.pan)
+end }
+
+local knock = voice { graph = function(n)
+  local shell = sine(510 + 90 * decay(ms(8))) + sine(1395) * .28
+  return shell * decay(ms(80)) * adsr(ms(1), ms(1), 1, ms(25))
+       * n.velocity * .11 >> pan(.38) >> to(echo, .18)
+end }
+
+-- The fundamental stays steady; a very quiet upper octave makes it readable
+-- on small speakers. Each phrase leaves room for the kick.
+local bass = voice { graph = function(n)
+  local tone = sine(n.hz) + triangle(n.hz) * .28 + sine(n.hz * 2) * .12
+  return (tone >> lowpass(360 + 380 * decay(ms(130)), .7))
+       * adsr(ms(13), ms(160), .7, ms(95)) * n.velocity * .16 >> pan(0)
+end }
+
+-- Rootless, briefly illuminated chords. The bass supplies their names.
+local lamps = voice { graph = function(n)
+  local tone = triangle(n.hz * .999) * .7 + sine(n.hz * 1.001) * .3
+             + sine(n.hz * 2) * .21
+  local filtered = tone >> lowpass(850 + 1700 * decay(ms(95)), .75)
+  return filtered * adsr(ms(7), ms(115), .38, ms(240))
+       * n.velocity * .17 >> pan(n.pan + init_random(1, -.16, .16))
+       >> to(echo, .8) >> to(room, .3)
+end }
+
+-- A four-note memory, not a solo. Its upper partial droops as it fades.
+local beacon = voice { graph = function(n)
+  local tremble = sine(4.3) * .0014 + 1
+  local tone = sine(n.hz * tremble)
+       + sine(n.hz * 2.003) * decay(ms(310)) * .22
+       + sine(n.hz * 3.01) * decay(ms(140)) * .055
+  return tone * adsr(ms(24), ms(420), .38, ms(600))
+       * n.velocity * .13 >> pan(n.pan) >> to(echo, .55) >> to(room, .55)
+end }
+
+-- Distant air is pitched and finite; it never becomes a permanent noise bed.
+local mist = voice { graph = function(n)
+  local air = noise() >> bandpass(n.hz * 2, 1.8) >> lowpass(1600, .7)
+  local tone = triangle(n.hz) * .5 + sine(n.hz * 1.002) * .4 + air * .12
+  return tone * adsr(secs(1.1), secs(.5), .65, secs(2.2))
+       * n.velocity * .043 >> pan(n.pan) >> to(room, .9)
+end }
+
+local parts = {{}, {}, {}, {}, {}, {}, {}, {}}
+local function put(track, bar, phrase, length)
+  table.insert(parts[track], at(bars(bar), phrase, bars(length or 1)))
+end
+
+local roots = {
+  pattern("d2 ~ ~ a2 ~ c3 d2 ~"),
+  pattern("bb1 ~ ~ f2 ~ a2 f2 ~"),
+  pattern("g1 ~ ~ d2 ~ f2 g2 ~"),
+  pattern("a1 ~ ~ e2 ~ g2 bb2 ~"),
+}
+local answers = {
+  pattern("d2 ~ a2 ~ ~ c3 ~ a1"),
+  pattern("bb1 ~ f2 ~ ~ a2 ~ c2"),
+  pattern("g1 ~ d2 ~ ~ f2 ~ a1"),
+  pattern("a1 ~ e2 ~ ~ g2 ~ c#2"),
+}
+local chords = {
+  pattern("[f3,a3,c4,e4]"),
+  pattern("[f3,a3,c4,d4]"),
+  pattern("[f3,a3,bb3,d4]"),
+  pattern("[e3,g3,bb3,d4]"),
+}
+local drum_a = pattern("x ~ ~ ~ ~ x ~ ~") >> hold(ms(95)) >> velocity(.82)
+local drum_b = pattern("x ~ ~ x ~ ~ ~ ~") >> hold(ms(95)) >> velocity(.76)
+local backbeat = pattern("~ x ~ x") >> hold(ms(55)) >> velocity(.67)
+local sand = pattern("~ x ~ x ~ x ~ x") >> late(1 / 48)
+           >> hold(ms(38)) >> velocity(".36 .59 .42 .65")
+           >> pan("-.3 .25 -.2 .36")
+local shells = pattern("~ ~ ~ x ~ ~ x ~") >> late(1 / 64)
+             >> hold(ms(45)) >> velocity(".42 .64")
+
+-- A four-note motif changes its last note with the harmony. Its rests are
+-- part of the tune: the delayed answers must have somewhere to land.
+local memories = {
+  pattern("a4 ~ ~ ~ ~ e5 ~ d5 ~ ~ ~ ~ f5 ~ ~ ~"),
+  pattern("a4 ~ ~ ~ ~ f4 ~ d5 ~ ~ ~ ~ c5 ~ ~ ~"),
+  pattern("d5 ~ ~ ~ ~ a4 ~ f4 ~ ~ ~ ~ a4 ~ ~ ~"),
+  pattern("e5 ~ ~ ~ ~ d5 ~ bb4 ~ ~ ~ ~ a4 ~ ~ ~"),
+}
+local air_chords = {
+  pattern("[d3,a3,e4]"), pattern("[bb3,d4,a4]"),
+  pattern("[g3,d4,a4]"), pattern("[a3,e4,bb4]"),
+}
+
+-- 0–4: lights before their reflections. 4–20: the boat finds its rhythm.
+-- 20–24: the drums disappear. 24–40: the tune returns in different colours.
+-- 40–44: thinning. 44–48: only the lights, with a final D under the ninth.
+for bar = 0, 47 do
+  local h = math.floor(bar / 4) % 4 + 1
+  local groove = (bar >= 4 and bar < 20) or (bar >= 24 and bar < 44)
+  if groove then
+    put(1, bar, bar % 2 == 0 and drum_a or drum_b)
+    if bar < 42 then put(2, bar, backbeat) end
+    if bar >= 8 and bar < 40 then put(3, bar, sand) end
+    if bar >= 12 and bar < 40 and bar % 4 ~= 0 then put(4, bar, shells) end
+    put(5, bar, (bar % 2 == 0 and roots[h] or answers[h])
+         >> hold(beats(.68)) >> velocity(".82 .68 .74 .62"))
+  elseif bar == 2 then
+    put(5, bar, pattern("d2 ~ ~ ~") >> hold(beats(1.5)) >> velocity(.42))
+  elseif bar == 3 then
+    put(1, bar, pattern("x ~ ~ ~") >> hold(ms(95)) >> velocity(.52))
+    put(5, bar, pattern("~ ~ a1 ~") >> hold(beats(.8)) >> velocity(.48))
+  elseif bar >= 20 and bar < 24 then
+    -- One low note per bar, without pretending the breakdown is silence.
+    put(5, bar, pattern("bb1 ~ ~ ~") >> hold(beats(1.5)) >> velocity(.64))
+  elseif bar == 44 or bar == 46 then
+    put(5, bar, pattern("a1 ~ ~ ~") >> hold(beats(1.4)) >> velocity(.56))
+  elseif bar == 47 then
+    put(5, bar, pattern("d2 ~ ~ ~") >> hold(beats(3)) >> velocity(.56))
+  end
+
+  if bar < 4 then
+    if bar == 1 or bar == 3 then
+      put(6, bar + 3 / 8, chords[1] >> hold(beats(.35))
+           >> velocity(.42) >> pan(-.28))
+    end
+  elseif bar < 44 then
+    -- The second lamp is deliberately missing every fourth bar.
+    put(6, bar + 3 / 8, chords[h] >> hold(beats(.32))
+         >> velocity(bar >= 20 and bar < 24 and .38 or .64) >> pan(-.26))
+    if bar % 4 ~= 3 and (bar < 20 or bar >= 24) then
+      put(6, bar + 7 / 8, chords[h] >> hold(beats(.24))
+           >> velocity(.46) >> pan(.3))
+    end
+  elseif bar == 44 then
+    put(6, bar + 3 / 8, chords[4] >> hold(beats(.5)) >> velocity(.42) >> pan(.2))
+  elseif bar == 47 then
+    put(6, bar, chords[1] >> hold(beats(2.8)) >> velocity(.38) >> pan(-.2))
+  end
+
+  if bar >= 24 and bar % 4 == 0 then
+    put(7, bar, memories[h] >> slow(4) >> hold(beats(1.3))
+         >> velocity(bar >= 40 and .48 or .69) >> pan(".12 -.18 .22 -.1"), 4)
+  end
+  if bar == 0 or bar == 8 or bar == 16 or bar == 20 or bar == 32 or bar == 44 then
+    put(8, bar, air_chords[h] >> hold(bars(2)) >> velocity(.48)
+         >> pan(bar % 16 == 0 and -.45 or .45))
+  end
+end
+
+play(kick, timeline(parts[1]))
+play(rim, timeline(parts[2]))
+play(hat, timeline(parts[3]))
+play(knock, timeline(parts[4]))
+play(bass, timeline(parts[5]))
+play(lamps, timeline(parts[6]))
+play(beacon, timeline(parts[7]))
+play(mist, timeline(parts[8]))

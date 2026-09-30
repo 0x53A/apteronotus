@@ -94,6 +94,8 @@ struct ApteronotusApp {
     files: FileState,
     #[cfg(target_arch = "wasm32")]
     browser_files: browser_files::BrowserFiles,
+    #[cfg(target_arch = "wasm32")]
+    host_document: component::HostDocument,
     /// The last edited buffer displaced by browsing the library.
     ///
     /// Documents have no file-level undo yet. Keeping one complete
@@ -194,6 +196,8 @@ impl ApteronotusApp {
             files: FileState::default(),
             #[cfg(target_arch = "wasm32")]
             browser_files: browser_files::BrowserFiles::default(),
+            #[cfg(target_arch = "wasm32")]
+            host_document: Default::default(),
             replaced_source: None,
             command_tx,
             event_rx,
@@ -744,6 +748,18 @@ mod document_tests {
 impl eframe::App for ApteronotusApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive_events();
+        #[cfg(target_arch = "wasm32")]
+        {
+            let document = self.host_document.borrow_mut().take();
+            if let Some((name, source)) = document {
+                self.replace_source(&source);
+                self.browser_files.name = name;
+                self.browser_files.notice = None;
+                // An older asynchronous file import cannot override a host load.
+                self.browser_files.latest_request =
+                    self.browser_files.latest_request.wrapping_add(1);
+            }
+        }
         #[cfg(target_arch = "wasm32")]
         if let Some(import) = self.browser_files.take_import() {
             match import.result {
@@ -1531,17 +1547,25 @@ mod component {
     use egui_web_component::EguiMount;
     use rust_web_component::WebComponent;
     use rust_web_component_macro::WebComponent;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
     use wasm_bindgen::{JsCast, closure::Closure};
     use wasm_bindgen_futures::spawn_local;
 
     use super::{ApteronotusApp, style};
 
+    pub type HostDocument = Rc<RefCell<Option<(String, String)>>>;
+
     #[derive(WebComponent)]
-    #[web_component(name = "apteronotus-app")]
+    #[web_component(name = "apteronotus-app", observed_attributes = ["source"])]
     pub struct ApteronotusComponent {
         element: Option<web_sys::HtmlElement>,
         mount: Option<EguiMount>,
         search_keys: Option<Closure<dyn FnMut(web_sys::KeyboardEvent)>>,
+        document: HostDocument,
+        connection: Rc<Cell<u64>>,
     }
 
     impl ApteronotusComponent {
@@ -1551,7 +1575,41 @@ mod component {
                 element: None,
                 mount: None,
                 search_keys: None,
+                document: Default::default(),
+                connection: Default::default(),
             }
+        }
+
+        fn load_source(&mut self) {
+            let Some(element) = &self.element else { return };
+            let Some(source) = element.get_attribute("source") else {
+                return;
+            };
+            let limit = apteronotus_lua::Limits::default().source_bytes;
+            if source.len() > limit {
+                // Component callbacks hold the library's mutable registry borrow.
+                // Dispatch on the next microtask so a host error handler can
+                // change attributes or remove the element without re-entering it.
+                let element = element.clone();
+                spawn_local(async move {
+                    let options = web_sys::CustomEventInit::new();
+                    options.set_detail(
+                        &format!("source exceeds the {limit}-byte document limit").into(),
+                    );
+                    if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict(
+                        "apteronotus-error",
+                        &options,
+                    ) {
+                        let _ = element.dispatch_event(&event);
+                    }
+                });
+                return;
+            }
+            let name = element
+                .get_attribute("filename")
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "composition.eod".into());
+            *self.document.borrow_mut() = Some((name, source));
         }
     }
 
@@ -1564,6 +1622,11 @@ mod component {
             let Some(element) = self.element.clone() else {
                 return;
             };
+            self.load_source();
+            self.connection.set(self.connection.get().wrapping_add(1));
+            let connection = self.connection.clone();
+            let generation = connection.get();
+            let document = self.document.clone();
             // eframe reserves Open/Save, but leaves browser Find shortcuts
             // alone. Reserve ours only for events inside this component;
             // don't open the browser's search box over the score's Find bar.
@@ -1594,25 +1657,45 @@ mod component {
                 let result = EguiMount::connect(
                     &element,
                     eframe::WebOptions::default(),
-                    Box::new(|creation| {
+                    Box::new(move |creation| {
                         style::install(&creation.egui_ctx);
-                        Ok(Box::new(ApteronotusApp::new()))
+                        let mut app = ApteronotusApp::new();
+                        app.host_document = document;
+                        Ok(Box::new(app))
                     }),
                 )
                 .await;
 
                 match result {
                     Ok(mount) => {
+                        if connection.get() != generation {
+                            mount.disconnect();
+                            return;
+                        }
                         ApteronotusComponent::with_element(&component_element, |component| {
                             component.mount = Some(mount)
                         });
+                        if let Ok(event) = web_sys::Event::new("apteronotus-ready") {
+                            let _ = component_element.dispatch_event(&event);
+                        }
                     }
-                    Err(error) => web_sys::console::error_1(&error),
+                    Err(error) => {
+                        web_sys::console::error_1(&error);
+                        let options = web_sys::CustomEventInit::new();
+                        options.set_detail(&error);
+                        if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict(
+                            "apteronotus-error",
+                            &options,
+                        ) {
+                            let _ = component_element.dispatch_event(&event);
+                        }
+                    }
                 }
             });
         }
 
         fn disconnected(&mut self) {
+            self.connection.set(self.connection.get().wrapping_add(1));
             if let (Some(element), Some(listener)) = (&self.element, self.search_keys.take()) {
                 let _ = element.remove_event_listener_with_callback_and_bool(
                     "keydown",
@@ -1622,6 +1705,12 @@ mod component {
             }
             if let Some(mount) = self.mount.take() {
                 mount.disconnect();
+            }
+        }
+
+        fn attribute_changed(&mut self, name: &str, _old: Option<&str>, new: Option<&str>) {
+            if name == "source" && new.is_some() {
+                self.load_source();
             }
         }
     }

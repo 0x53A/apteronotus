@@ -202,3 +202,47 @@ an experimental 32-partial trumpet reed. Six isolated pipe recordings and an
 organ-only performance provide a second reference set. The isolated samples
 support targeted reed work and registration changes, while retaining the softer
 principal/flute/string options. The trials are experiment-local scores.
+
+## Composition follow-up: Iron Litany
+
+`songs/iron-litany.eod` turns the Spatial trial into a finite, original
+cathedral-techno sketch, with the Trumpet trial embedded as a separate voice.
+It is sample-free and uses no soundtrack melody or reference audio. All rank
+weights and topology are staged by Lua; the synthesis backend is unchanged.
+The score joins the embedded song library as `iron-litany`.
+
+At 136 BPM its forty bars last 70.59 seconds, followed by six seconds of room:
+
+| Time | Form |
+| --- | --- |
+| 0:00 | Invocation: held organ and low pedal |
+| 0:07 | Engine enters with sparse kick and offbeat keys |
+| 0:14 | Procession: rolling bass, backbeat, hats and metallic answers |
+| 0:28 | Empty nave: drums and bass leave; organ and room remain |
+| 0:35 | Gathering: engine returns; rising air and a half-bar cut prepare arrival |
+| 0:42 | Trumpet arrival: brighter registration above the rhythmic organ |
+| 1:04 | Held G-sharp-minor cadence; engine stops |
+| 1:11 | Released pipes give way to the room tail |
+
+The spatial manuals retain the bright trial's rank weights, without its
+16-foot flute foundation. A quieter independent pedal supplies that register.
+Organ, trumpet and drums have live level controls. Numeric finite duck triggers
+follow the actual kick grid, including its intro, breakdown and pre-arrival cut.
+The score explicitly applies master gain and a limiter; isolated rendering
+retains that same production processing and cathedral return.
+
+```sh
+cargo run --release -p apteronotus-render -- --song iron-litany --cycles 40 --tail 6 --spectrum --dynamics -o target/auditions/iron-litany.wav
+cargo run --release -p apteronotus-render -- --song iron-litany --cycles 40 --tail 6 --solo-track 0,1,2 --spectrum --dynamics -o target/auditions/iron-litany-organ.wav
+```
+
+Tracks 0/1/2 are manuals/pedal/trumpet; 3–8 are kick, bass, snare, hats,
+metal and rising air. The organ-only audition keeps kick-aligned ducking even
+though the kick itself is excluded. Auditions are at `target/auditions/`.
+
+The 48 kHz float32 production mix schedules 745 voices; organ isolation
+schedules 323. Both peak at −3.5 dBFS. Whole-render centroids are 386 Hz
+and 683 Hz, and side/mid ratios are −14.4 and −11.3 dB respectively.
+The embedded-source tests, complete app corpus lowering and formatting checks
+pass. These renders establish the arrangement and measured headroom; the
+musical balance remains a listening decision.

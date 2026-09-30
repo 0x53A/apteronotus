@@ -83,6 +83,21 @@ pub const CATHEDRAL_ORGAN: &str = include_str!("../../../songs/cathedral-organ.e
 /// Dry additive/physical comparison and retained wind-pressure articulation.
 pub const ORGAN_LABORATORY: &str = include_str!("../../../songs/organ-laboratory.eod");
 
+/// Cathedral techno with spatial pipe ranks and a trumpet-led arrival.
+pub const IRON_LITANY: &str = include_str!("../../../songs/iron-litany.eod");
+
+/// A finite nocturnal dub piece with rootless chords and a returning melody.
+pub const THE_LIGHTS_ACROSS_THE_WATER: &str =
+    include_str!("../../../songs/the-lights-across-the-water.eod");
+
+/// A gothic 3/4 chamber lament for synthetic bowed strings.
+pub const THE_WIDOWS_CLOCK: &str = include_str!("../../../songs/the-widows-clock.eod");
+
+/// Original church-organ chorale prelude for three manual parts and pedal.
+pub const LICHT_IM_GEWOELBE: &str = include_str!("../../../songs/licht-im-gewoelbe.eod");
+/// `stein-und-atem.eod` — original prelude after a Frankfurt organ recording.
+pub const STEIN_UND_ATEM: &str = include_str!("../../../songs/stein-und-atem.eod");
+
 /// Every song, in the order `songs/CLAUDE.md` introduces them: the four cyclic
 /// pieces first, then the two that needed finite time and live input, then the
 /// external port, and last the pieces written after the engine rather than
@@ -255,10 +270,40 @@ pub static SONGS: &[Song] = &[
         source: CATHEDRAL_ORGAN,
     },
     Song {
+        name: "iron-litany",
+        title: "Iron Litany",
+        stresses: "finite sample-free cathedral techno, spatial organ registration, trumpet arrival, rolling bass and production-path organ isolation",
+        source: IRON_LITANY,
+    },
+    Song {
         name: "iron-in-the-rain",
         title: "Iron in the Rain",
         stresses: "a full sample-free rock arrangement with six retained rhythm strings, bent lead, string bass, synthesized drums and a finite ending",
         source: IRON_IN_THE_RAIN,
+    },
+    Song {
+        name: "the-lights-across-the-water",
+        title: "The Lights Across the Water",
+        stresses: "a finite 48-bar nocturnal dub arrangement, synthesized dry percussion, rootless minor ninths, asymmetric filtered echoes and a returning four-note melody",
+        source: THE_LIGHTS_ACROSS_THE_WATER,
+    },
+    Song {
+        name: "the-widows-clock",
+        title: "The Widow's Clock",
+        stresses: "synthetic bowed strings, a finite gothic 3/4 chamber arrangement, ramped tempo, delayed vibrato and a shared room",
+        source: THE_WIDOWS_CLOCK,
+    },
+    Song {
+        name: "licht-im-gewoelbe",
+        title: "Licht im Gewölbe",
+        stresses: "a finite original church-organ chorale prelude, playable four-part score, phrase registration, independent pedal and a quiet major cadence",
+        source: LICHT_IM_GEWOELBE,
+    },
+    Song {
+        name: "stein-und-atem",
+        title: "Stein und Atem",
+        stresses: "an original finite organ prelude in 3/4, recording-informed spatial registration, answering voices, independent pedal and a shared church room",
+        source: STEIN_UND_ATEM,
     },
 ];
 

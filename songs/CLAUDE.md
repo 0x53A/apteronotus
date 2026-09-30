@@ -27,8 +27,12 @@ needed by one of them is not needed yet.
 | `seven-teeth.eod` | sample-free rock in 7/8, triangle/saw strings through one persistent stereo amp, overlapping-note distortion, a half-time breakdown and solo |
 | `organ-laboratory.eod` | Pipes Under Pressure: dry classic/revised additive and physical flue comparison, retained pipe with pressure changes, short/long valve closures and final wind shutdown |
 | `cathedral-organ.eod` | Iron Choir: four dry pipe ranks, full registration with live stops/expression, independent pedal, rhythmic keying and a shared cathedral tail |
+| `licht-im-gewoelbe.eod` | original church-organ chorale prelude: 32 measures, three manual parts and independent pedal, phrase registrations and a printable four-part score |
+| `stein-und-atem.eod` | original 32-measure organ prelude in 3/4, a Frankfurt-recording-informed spatial registration, answering inner voices, chromatic middle section and independent pedal |
+| `iron-litany.eod` | Iron Litany: forty bars of sample-free cathedral techno, spatial organ ranks, independent pedal, trumpet-led arrival, rolling bass and a finite cadence |
 | `six-strings.eod` | minimal electric-guitar PoC: six retained string loops, partial strums, variable bend, repick while bent, hand/palm damping and a shared amp |
 | `iron-in-the-rain.eod` | full 68-bar rock arrangement: retained six-string rhythm guitar, independently bent lead and string bass, partial strums, palm damping, synthesized drums, half-time breakdown and ringing ending |
+| `the-widows-clock.eod` | original gothic chamber miniature: synthetic violin/viola/cello, delayed vibrato, 48 measures of 3/4, a ramped hunt passage and finite coda |
 
 The first four are cyclic and fix every parameter at onset. `neon.eod` and
 `jamming.eod` exist because that turned out to be a property of the author

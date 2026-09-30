@@ -87,3 +87,10 @@ valid; rendering or Run performs those checks.
 
 `paper-orbits` uses longer captures for a five-against-seven keyboard canon.
 Its forty-eight cycles at 102 BPM use `--song paper-orbits --cycles 48 --tail 7`.
+
+`iron-litany` is a sample-free cathedral techno sketch: forty bars at 136 BPM
+(70.59 seconds), plus six seconds of room decay. Spatial pipe ranks and pedal
+lead to a trumpet arrival at bar 24 (42.35 seconds). Render with
+`--song iron-litany --cycles 40 --tail 6`; add `--solo-track 0,1,2` for the
+manuals, pedal and trumpet together through the same cathedral and master.
+The document embeds its experimental trumpet helper and needs no other score.

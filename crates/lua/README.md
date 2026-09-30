@@ -296,6 +296,37 @@ estimated event count are checked before querying; the existing pattern-node
 budget also limits the result. Unrepresentable shifted onset/release coordinates
 produce diagnostics instead of overflowing rational arithmetic.
 
+### Synthetic bowed strings
+
+`bowed_string(hz, options)` is a mono note-clock instrument shipped as readable
+[Lua source](src/stdlib/strings.lua). It combines a band-limited harmonic source,
+broad fixed-Hz body resonances, filtered bow noise, initial pitch settling and
+delayed vibrato. It is a designed synthetic approximation. Velocity, pan and
+room remain explicit in the score:
+
+```lua
+local violin = voice {graph=function(n)
+  return bowed_string(n.hz, {vibrato=14, bow=.014}) * n.velocity * .6 >> pan(n.pan)
+end}
+play(violin, pattern("d5@2 a4 f5") >> slow(2))
+```
+
+Options: `kind` (`"violin"`, default, `"viola"`, `"cello"`), tagged `attack`
+and `release` durations, `vibrato` (0–40 cents, default 11), `rate` (1–9 Hz,
+default 5.6), `bow` (0–0.1 noise gain, default .018), `brightness` (0–1,
+default .65), and `pressure` (scalar or graph signal, clamped to 0–1,
+default 1). Pressure changes upper-body colour and rosin noise; it does not
+solve bow friction or gate the sound. Defaults for attack/release are
+85/130 ms, 110/170 ms and 150/220 ms respectively. The final keyed envelope
+closes even when released during attack. `hz` is modulatable. Vibrato begins
+after 180 ms and grows over 380 ms; small onset intonation/rate differences
+derive deterministically from event provenance. This helper requires a voice.
+
+**The Widow's Clock** (`the-widows-clock`) is an original gothic chamber
+miniature built around it: 48 measures of 3/4, a violin lament, pizzicato waltz,
+accelerated hunt passage and finite coda. Render the whole piece with
+`--song the-widows-clock --cycles 36 --tail 7`.
+
 ### Synthetic pipe organ
 
 `organ_pipe(hz, stop)` produces a mono keyed pipe; `organ(hz, stops)` sums

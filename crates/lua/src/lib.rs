@@ -136,6 +136,10 @@ impl Evaluator {
         for (name, source) in [
             ("apteronotus prelude", PRELUDE),
             ("apteronotus organ stdlib", include_str!("stdlib/organ.lua")),
+            (
+                "apteronotus bowed strings stdlib",
+                include_str!("stdlib/strings.lua"),
+            ),
         ] {
             let prelude = lua.try_enter(|ctx| {
                 let closure = Closure::load(ctx, Some(name), source.as_bytes())?;

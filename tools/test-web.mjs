@@ -133,6 +133,13 @@ try {
   await call('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
   await call('Page.addScriptToEvaluateOnNewDocument', { source: `
     window.__apteronotusContexts = [];
+    window.__hostErrors = [];
+    document.addEventListener('DOMContentLoaded', () => {
+      const player = document.querySelector('apteronotus-app');
+      player.addEventListener('apteronotus-error', event => window.__hostErrors.push(event.detail));
+      player.setAttribute('filename', 'hosted.eod');
+      player.setAttribute('source', ${JSON.stringify(searchable)});
+    }, { once: true });
     const OriginalContext = window.AudioContext;
     window.AudioContext = class extends OriginalContext {
       constructor(...args) { super(...args); window.__apteronotusContexts.push(this); }
@@ -141,6 +148,26 @@ try {
   await call('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   await until(() => evaluate("document.querySelector('apteronotus-app')?.shadowRoot?.querySelector('canvas')?.width === 1280"), 'canvas', 60000);
   await delay(600);
+  assert.equal(await download('hosted.eod'), searchable, 'pre-mount host source preserves Unicode and CRLF');
+  await evaluate(`document.querySelector('apteronotus-app').setAttribute('source', ${JSON.stringify(valid)}); true`);
+  await delay(300);
+  assert.equal(await download('hosted.eod'), valid, 'host can load a new source after mounting');
+  await evaluate("document.querySelector('apteronotus-app').setAttribute('source', 'x'.repeat(1024 * 1024 + 1)); true");
+  await until(() => evaluate('window.__hostErrors.length === 1'), 'oversized host source emits a diagnostic');
+  await delay(300);
+  assert.equal(await download('hosted.eod'), valid, 'oversized host source leaves the editor intact');
+  await evaluate(`(() => {
+    const player = document.querySelector('apteronotus-app');
+    player.addEventListener('apteronotus-error', () => {
+      player.setAttribute('source', ${JSON.stringify(invalid)});
+    }, { once: true });
+    player.setAttribute('source', 'x'.repeat(1024 * 1024 + 1));
+    return true;
+  })()`);
+  await until(() => evaluate('window.__hostErrors.length === 2'), 'host error handler corrects source');
+  await delay(300);
+  assert.equal(await download('hosted.eod'), invalid, 'error handler can synchronously replace source');
+  assert.equal(await evaluate('window.__apteronotusContexts.length'), 0, 'host loading never starts audio');
   await importFile('search.eod');
   await key('f', 'KeyF', 70);
   await call('Input.insertText', { text: '水🌊' });
@@ -206,9 +233,26 @@ try {
   assert.equal(await evaluate('window.__apteronotusContexts.length'), contexts, 'typing must not recreate audio');
   assert.equal(await evaluate("window.__apteronotusContexts.some(context => context.state === 'running')"), true);
   await screenshot('syntax-over-playing-source');
+  await evaluate(`document.querySelector('apteronotus-app').setAttribute('source', ${JSON.stringify(invalid)}); true`);
+  await delay(400);
+  assert.equal(await evaluate('window.__apteronotusContexts.length'), contexts, 'host replacement never evaluates or recreates audio');
+  assert.equal(await evaluate("window.__apteronotusContexts.some(context => context.state === 'running')"), true, 'host loading keeps the active program playing');
   await key('.', 'Period', 190);
+  await until(() => evaluate("window.__apteronotusContexts.every(context => context.state !== 'running')"), 'Stop closes audio');
+  await evaluate(`document.querySelector('apteronotus-app').setAttribute('source', ${JSON.stringify(valid)}); true`);
+  await delay(300);
+  await key('Enter', 'Enter', 13);
+  await until(() => evaluate("window.__apteronotusContexts.some(context => context.state === 'running')"), 'Run after Stop starts audio');
+  await evaluate(`(() => {
+    const player = document.querySelector('apteronotus-app');
+    player.addEventListener('apteronotus-error', () => player.remove(), { once: true });
+    player.setAttribute('source', 'x'.repeat(1024 * 1024 + 1));
+    return true;
+  })()`);
+  await until(() => evaluate("!document.querySelector('apteronotus-app')"), 'host error handler removes component');
+  await until(() => evaluate("window.__apteronotusContexts.every(context => context.state !== 'running')"), 'removing the component stops playback');
   assert.deepEqual(exceptions, [], 'browser reported an uncaught exception');
-  console.log(`Browser smoke passed: Unicode search/navigation, import/export, exact UTF-8/CRLF, stale/oversized import protection, syntax without evaluation, and explicit Run.\nArtifacts: ${runDirectory}`);
+  console.log(`Browser smoke passed: host source loading, Unicode search/navigation, import/export, exact UTF-8/CRLF, stale/oversized import protection, syntax without evaluation, explicit Run and component teardown.\nArtifacts: ${runDirectory}`);
 } finally {
   ws?.close();
   browser?.kill();

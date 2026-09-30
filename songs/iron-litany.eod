@@ -1,0 +1,188 @@
+-- iron-litany.eod — Iron Litany
+-- Original, sample-free cathedral techno; Darktide-inspired, not a transcription.
+-- 136 BPM, 40 bars / 70.59 seconds of music, then six seconds of cathedral tail.
+-- Form: 0–4 invocation; 4–8 engine; 8–16 procession; 16–20 empty nave;
+-- 20–24 gathering; 24–36 trumpet arrival; 36–40 final held cadence.
+-- Render: cargo run --release -p apteronotus-render -- --song iron-litany --cycles 40 --tail 6
+-- Organ only: add --solo-track 0,1,2. Track order: manuals, pedal, trumpet,
+-- kick, bass, snare, hats, metal, air. Isolation keeps the production effects.
+tempo(136)
+
+local expression = control {name="Organ expression", range={0,1}, default=.85}
+local brass = control {name="Trumpet stop", range={0,1}, default=.8}
+local drums = control {name="Drums", range={0,1}, default=.85}
+local cathedral = send {
+  graph=reverb(38, secs(3.2), .68) >> highpass(180) >> lowpass(7800),
+  level=.55,
+}
+local chamber = send {
+  graph=reverb(18, secs(.8), .65) >> highpass(450) >> lowpass(5200),
+  level=.18,
+}
+
+-- Spatial trial's stop placement, with less low foundation: pedal and bass
+-- own that register. Fixed tuning offsets belong to ranks, not random chorusing.
+local ranks = {
+  {"principal",8,.50,0,-.15}, {"reed",8,.80,-1.8,-.55},
+  {"reed",4,.60,1.8,.55}, {"principal",4,.48,1.1,.25},
+  {"principal",2,.65,-.6,-.35}, {"principal",8/3,.36,.9,.5},
+  {"principal",4/3,.25,-1.5,-.6}, {"principal",1,.30,1.5,.6},
+}
+local manuals = voice {graph=function(n)
+  local sum=dc(0) >> pan(0)
+  for _,r in ipairs(ranks) do
+    local pipe=organ_pipe(n.hz,{kind=r[1],feet=r[2],level=r[3],cents=r[4]})
+    sum=sum+(pipe >> highpass(150) >> pan(r[5]))
+  end
+  -- Velocity here is explicitly score expression, rather than pipe physics.
+  return sum*.095*n.velocity*slew(expression,.025)
+end}
+local pedal = voice {graph=function(n)
+  return organ(n.hz,{
+    {kind="flute",feet=8,level=.8,chiff=0},
+    {kind="principal",feet=4,level=.22,chiff=0},
+  })*.11*n.velocity*slew(expression,.025) >> pan(0)
+end}
+
+-- The trial reed, embedded so this document needs no external Lua helper.
+-- Designed weights, not sampled pipes or a calibrated Trompette model.
+local function trumpet_pipe(hz,feet,level,cents)
+  local weights={1,.72,.25,.55,.53,.39,.42,.40,.48,.18,.24,.30,
+    .23,.12,.15,.12,.10,.085,.075,.055,.05,.04,.03,.025,
+    .021,.018,.015,.012,.010,.008,.006,.004}
+  local total=0
+  for _,w in ipairs(weights) do total=total+w end
+  local banks={{},{},{}}
+  for i,w in ipairs(weights) do
+    local group=i<=2 and 1 or (i<=8 and 2 or 3)
+    for k=1,3 do banks[k][i]=k==group and w/total or 0 end
+  end
+  local f=hz*(8/feet)*2^(cents/1200)
+  local color=clamp((220/clamp(f,20,20000))^.10,.65,1.2)
+  local scale=math.sqrt(feet/8)
+  local low=harmonics(f,banks[1])*adsr(secs(.014*scale),ms(1),1,ms(70))
+  local body=harmonics(f,banks[2])*adsr(secs(.022*scale),ms(1),1,ms(70))
+  local high=harmonics(f,banks[3])*adsr(secs(.009*scale),ms(45),.8,ms(70))/.8
+  return (low+body*color+high*color*color)*level
+end
+local trumpet = voice {graph=function(n)
+  local left=trumpet_pipe(n.hz,8,.8,-1.8) >> pan(-.55)
+  local right=trumpet_pipe(n.hz,4,.5,1.8) >> pan(.55)
+  return (left+right)*.085*n.velocity*slew(brass,.02)*slew(expression,.025)
+end}
+local kick = voice {graph=function(n)
+  local body=sine(46+95*decay(ms(22)))*decay(ms(165))*(1-decay(ms(1.5)))
+  local click=(noise() >> highpass(2800))*decay(ms(2))*.12
+  return (body+click) >> shape("tanh",1.65) >> dcblock()
+    >> mul(.36*n.velocity*slew(drums,.02)) >> pan(0)
+end}
+local bass = voice {graph=function(n)
+  local body=sine(n.hz)*.75+soft_saw(n.hz)*.32+soft_saw(n.hz*1.004)*.12
+  return body >> lowpass(220+800*decay(ms(95)),.65)
+    >> shape("tanh",1.7) >> dcblock()
+    >> mul(adsr(ms(4),ms(80),.5,ms(35))*.21*n.velocity) >> pan(0)
+end}
+local snare = voice {graph=function(n)
+  local skin=sine(175+70*decay(ms(12)))*decay(ms(65))*.32
+  local wire=(noise() >> bandpass(1800,.8))*decay(ms(105))
+  return (skin+wire)*.17*n.velocity*slew(drums,.02)*(1-decay(ms(1))) >> pan(.08)
+end}
+local hat = voice {
+  params={length={.02,.25,.035,"s"}},
+  graph=function(n)
+    return noise() >> highpass(6500) >> lowpass(11500)
+      >> mul(decay(n.length)*(1-decay(ms(1)))*.075*n.velocity*slew(drums,.02))
+      >> pan(n.pan)
+  end,
+}
+local metal = voice {graph=function(n)
+  local modes=sine(731)*decay(ms(60))+sine(1187)*decay(ms(85))*.65
+    +sine(1931)*decay(ms(45))*.3
+  return modes*.09*n.velocity*slew(drums,.02) >> pan(n.pan)
+end}
+local air = voice {graph=function(n)
+  local rise=1-decay(secs(2.1))
+  return noise() >> bandpass(900+3200*rise,.7)
+    >> mul(adsr(secs(3.2),ms(1),1,ms(35))*.075*n.velocity) >> pan(.12)
+end}
+
+local chords={"[g#3,b3,d#4]","[e3,g#3,b3]","[c#3,e3,g#3]","[d#3,g3,a#3]"}
+local roots={"g#1","e1","c#2","d#2"}
+local fifths={"d#2","b1","g#1","a#1"}
+local upper={"d#4 b3 g#3 b3","b3 g#3 e3 g#3","g#3 e3 c#4 e3","a#3 g3 d#4 g3"}
+local answers={"d#4","b3","g#3","a#3"}
+local m,p,t,k,b,s,h,z,a={},{},{},{},{},{},{},{},{}
+local duck_onsets={}
+local function put(list,bar,text,duration,level)
+  table.insert(list,at(bars(bar),pattern(text) >> hold(beats(duration)) >> velocity(level)))
+end
+for bar=0,39 do
+  local index=math.floor(bar/2)%4+1
+  if bar>=36 then index=1 end
+  local chord,root,fifth=chords[index],roots[index],fifths[index]
+  local broken=bar>=16 and bar<20
+  local arrival=bar>=24 and bar<36
+  if bar<4 or broken or bar>=36 then
+    if bar%2==0 then
+      put(m,bar,chord,7.5,bar>=36 and .8 or .48)
+      put(p,bar,root,7.6,.7)
+    end
+  else
+    -- Offbeat keys answer the kick. Every fourth bar opens a longer chord,
+    -- and the high four-note response gives the procession a recognisable cell.
+    local rhythm="~ "..chord.." ~ "..chord.." ~ ~ "..chord.." ~"
+    if bar%4==3 then rhythm=chord.." ~ ~ ~" end
+    put(m,bar,rhythm,bar%4==3 and 1.65 or .48,arrival and .85 or .7)
+    if bar%2==1 and bar>=8 then put(m,bar,upper[index],.38,.45) end
+    if bar%2==0 then put(p,bar,root,7.1,.48) end
+  end
+  if arrival then
+    if bar%2==0 then put(t,bar,chord,3.4,.82)
+    else put(t,bar,"~ ~ "..answers[index].." ~",.7,.9) end
+  elseif bar==36 then
+    put(t,bar,chord,15.1,.72)
+  end
+  local active=bar>=4 and bar<36 and not broken
+  -- The last gathering bar cuts the engine halfway through: space for arrival.
+  if active then
+    local kicks=bar==23 and "x x ~ ~" or "x*4"
+    if bar<8 then kicks="x ~ x ~" end
+    put(k,bar,kicks,.25,arrival and 1 or .88)
+    local pulse=bar==23 and "1 1 ~ ~" or "1*4"
+    if bar<8 then pulse="1 ~ 1 ~" end
+    -- Ducking consumes plain numeric rhythm, without voice hold/velocity data.
+    table.insert(duck_onsets,at(bars(bar),pattern(pulse)))
+    if bar>=8 then
+      local roll="~ "..root.." "..root.." "..fifth.." ~ "..root.." "..fifth.." "..root
+      if bar%4==3 then roll="~ "..root.." "..fifth.." "..root.." ~ "..root.." ~ ~" end
+      if bar==23 then roll="~ "..root.." ~ ~ ~ ~ ~ ~" end
+      put(b,bar,roll,.31,arrival and .92 or .75)
+      if bar~=23 then put(s,bar,"~ x ~ x",.25,.72) end
+    end
+    if bar>=6 then
+      local rhythm=arrival and "~ x ~ x ~ x x x" or "~ x ~ x ~ x ~ x"
+      if bar==23 then rhythm="x*8 ~ ~ ~" end
+      table.insert(h,at(bars(bar),pattern(rhythm) >> hold(beats(.1))
+        >> velocity(".55 .28 .65 .35") >> pan("-.3 .35")
+        >> hat.length(arrival and .065 or .035)))
+    end
+    if bar>=8 and bar%2==1 then
+      table.insert(z,at(bars(bar),pattern("~ ~ x ~ ~ x ~ ~")
+        >> hold(beats(.15)) >> velocity(.65) >> pan("-.45 .45")))
+    end
+  end
+end
+put(a,22,"x",7.6,.8)
+local kick_score=timeline(k)
+local engine_pulse=timeline(duck_onsets)
+play(manuals,timeline(m) >> duck(engine_pulse,.25) >> to(cathedral,.85))
+play(pedal,timeline(p) >> duck(engine_pulse,.45) >> to(cathedral,.22))
+play(trumpet,timeline(t) >> duck(engine_pulse,.2) >> to(cathedral,1))
+play(kick,kick_score)
+play(bass,timeline(b) >> duck(engine_pulse,.65))
+play(snare,timeline(s) >> to(chamber,.55))
+play(hat,timeline(h))
+play(metal,timeline(z) >> to(chamber,.8))
+play(air,timeline(a) >> to(cathedral,.4))
+-- Explicit mix protection, identical for full mix and isolated audition.
+master(highpass(28) >> mul(2.2) >> limiter(ms(3),ms(120)) >> mul(.88))

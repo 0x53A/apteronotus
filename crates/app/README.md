@@ -24,6 +24,32 @@ That command uses `wasm-pack` directly—there is no Trunk project—and serves
 `<apteronotus-app>` custom element whose shadow root owns the egui canvas. The
 static `web/index.html` is only one host for that element.
 
+Embedding hosts can load exact source text without evaluating it:
+
+```js
+const template = document.createElement('template');
+template.innerHTML = '<apteronotus-app></apteronotus-app>';
+const player = template.content.firstElementChild;
+player.setAttribute('filename', 'song.eod');
+player.setAttribute('source', sourceText);
+player.addEventListener('apteronotus-ready', () => console.log('Editor ready'));
+player.addEventListener('apteronotus-error', event => console.error(event.detail));
+container.append(player);
+```
+
+Initialize the generated `pkg/apteronotus_app.js` module first. Give the element
+an explicit width and height. Later `source` attribute changes load another
+document and retain the displaced editor buffer under Restore previous buffer.
+Set `filename` before `source` to select its download name. The one-MiB source
+limit applies to host loads too; oversized loads emit `apteronotus-error` and
+leave the editor intact. Loading never evaluates, resets transport, or opens
+audio. Run remains an explicit user action. Removing the element tears down
+the editor and audio; create a fresh element when reopening it.
+
+Use the fixed template above for dynamic creation: the component library sets
+its instance-ID attribute in the constructor, which browsers allow during
+upgrade but reject during `document.createElement('apteronotus-app')`.
+
 `.github/workflows/pages.yml` builds the release package on every push to
 `main` and deploys the complete `web/` directory through GitHub Pages. The
 workflow can also be run manually.

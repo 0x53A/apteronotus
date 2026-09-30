@@ -1,0 +1,228 @@
+-- licht-im-gewoelbe.eod — Licht im Gewölbe
+-- Original chorale prelude for organ: Light in the Vault.
+-- 32 measures, 4/4, quarter = 72; 106.667 seconds of music + 9 seconds of room.
+-- Three manual parts and independent pedal, written for human hands and feet.
+-- I (1–8): a quiet invocation in D minor; II (9–16): the answer and a breath.
+-- III (17–24): an opening into F major; IV (25–32): return, then D major.
+-- The tune is original, not a quotation of a hymn or the Darktide soundtrack.
+-- One manual suffices: RH soprano/alto, LH tenor; pedal D2–D3 written compass.
+-- Optional: soprano on a separate 8-foot flute, accompaniment on soft principals.
+-- Registration changes at 9, 17, 25 and 29; use pistons or a registrant.
+-- 8-foot written pitch is normal; the pedal's 16-foot rank sounds an octave below.
+-- No velocity accent: phrasing comes from key duration, rests and registration.
+-- Printable companion: songs/scores/licht-im-gewoelbe.ly (same notes/rhythms).
+-- Render: cargo run --release -p apteronotus-render -- --song licht-im-gewoelbe --cycles 32 --tail 9 -o target/auditions/licht-im-gewoelbe.wav
+
+tempo(72)
+local hall = send {
+  graph = reverb(38, secs(4.5), .70) >> highpass(90) >> lowpass(6500),
+  level = .32,
+}
+
+-- Five fixed registrations, changed only between phrases. Each rank has its
+-- own pipe speech. Stereo placement is modest; one shared room joins divisions.
+local registrations = {
+  {flute=.72, principal=.24, octave=0, string=.12},
+  {flute=.52, principal=.44, octave=.12, string=.12},
+  {flute=.42, principal=.58, octave=.26, string=.08},
+  {flute=.48, principal=.50, octave=.18, string=.10},
+  {flute=.78, principal=.20, octave=0, string=.16},
+}
+local manuals = {}
+for i, stops in ipairs(registrations) do
+  manuals[i] = voice {graph=function(n)
+    return organ(n.hz, {
+      {kind="flute", feet=8, level=stops.flute, chiff=.009},
+      {kind="principal", feet=8, level=stops.principal},
+      {kind="principal", feet=4, level=stops.octave, chiff=.006},
+      {kind="string", feet=8, level=stops.string, cents=-1.2, chiff=0},
+    }) * .34 >> pan(n.pan)
+  end}
+end
+local pedal = voice {graph=function(n)
+  return organ(n.hz, {
+    {kind="flute", feet=16, level=.70, chiff=0},
+    {kind="principal", feet=8, level=.26, chiff=.006},
+  }) * .30 >> pan(0)
+end}
+
+-- Each row is one measure of {written pitch, quarters} events.
+-- This is literal score data; '~' is a rest. Each row sums to four quarters.
+local soprano_score = {
+  {{"a4", 2}, {"d5", 1}, {"c5", 1}}, -- 1
+  {{"bb4", 2}, {"a4", 2}}, -- 2
+  {{"g4", 2}, {"f4", 1}, {"e4", 1}}, -- 3
+  {{"f4", 2}, {"a4", 2}}, -- 4
+  {{"bb4", 3}, {"a4", 1}}, -- 5
+  {{"a4", 2}, {"f4", 2}}, -- 6
+  {{"g4", 2}, {"f4", 1}, {"e4", 1}}, -- 7
+  {{"e4", 2}, {"g4", 1}, {"e4", 1}}, -- 8
+  {{"f4", 2}, {"a4", 1}, {"d5", 1}}, -- 9
+  {{"c5", 2}, {"a4", 2}}, -- 10
+  {{"g4", 1}, {"a4", 1}, {"g4", 1}, {"e4", 1}}, -- 11
+  {{"f4", 2}, {"d4", 2}}, -- 12
+  {{"g4", 2}, {"bb4", 1}, {"a4", 1}}, -- 13
+  {{"f4", 2}, {"e4", 1}, {"d4", 1}}, -- 14
+  {{"e4", 2}, {"c#4", 1}, {"e4", 1}}, -- 15
+  {{"d4", 3}, {"~", 1}}, -- 16
+  {{"a4", 2}, {"c5", 1}, {"bb4", 1}}, -- 17
+  {{"g4", 2}, {"e4", 2}}, -- 18
+  {{"f4", 1}, {"a4", 1}, {"d5", 2}}, -- 19
+  {{"c5", 2}, {"a4", 2}}, -- 20
+  {{"bb4", 2}, {"d5", 1}, {"c5", 1}}, -- 21
+  {{"a4", 2}, {"f4", 2}}, -- 22
+  {{"g4", 1}, {"a4", 1}, {"bb4", 1}, {"a4", 1}}, -- 23
+  {{"g4", 2}, {"e4", 2}}, -- 24
+  {{"a4", 2}, {"d5", 1}, {"c5", 1}}, -- 25
+  {{"bb4", 2}, {"a4", 1}, {"g4", 1}}, -- 26
+  {{"g4", 2}, {"bb4", 1}, {"a4", 1}}, -- 27
+  {{"g4", 2}, {"e4", 2}}, -- 28
+  {{"f4", 2}, {"a4", 1}, {"f4", 1}}, -- 29
+  {{"g4", 2}, {"f4", 1}, {"e4", 1}}, -- 30
+  {{"e4", 2}, {"c#4", 2}}, -- 31
+  {{"d4", 4}}, -- 32
+}
+
+local alto_score = {
+  {{"f4", 4}}, -- 1
+  {{"f4", 2}, {"e4", 2}}, -- 2
+  {{"d4", 4}}, -- 3
+  {{"c4", 2}, {"f4", 2}}, -- 4
+  {{"d4", 2}, {"g4", 2}}, -- 5
+  {{"d4", 4}}, -- 6
+  {{"d4", 2}, {"bb3", 2}}, -- 7
+  {{"c#4", 2}, {"c#4", 2}}, -- 8
+  {{"d4", 4}}, -- 9
+  {{"f4", 2}, {"e4", 2}}, -- 10
+  {{"e4", 2}, {"c4", 2}}, -- 11
+  {{"d4", 2}, {"bb3", 2}}, -- 12
+  {{"d4", 2}, {"g4", 2}}, -- 13
+  {{"d4", 2}, {"a3", 2}}, -- 14
+  {{"c#4", 2}, {"a3", 2}}, -- 15
+  {{"a3", 3}, {"~", 1}}, -- 16
+  {{"f4", 2}, {"f4", 2}}, -- 17
+  {{"e4", 2}, {"c4", 2}}, -- 18
+  {{"d4", 2}, {"f4", 2}}, -- 19
+  {{"e4", 2}, {"c4", 2}}, -- 20
+  {{"f4", 2}, {"f4", 2}}, -- 21
+  {{"c4", 2}, {"c4", 2}}, -- 22
+  {{"d4", 2}, {"d4", 2}}, -- 23
+  {{"e4", 2}, {"c4", 2}}, -- 24
+  {{"f4", 4}}, -- 25
+  {{"f4", 2}, {"d4", 2}}, -- 26
+  {{"d4", 2}, {"g4", 2}}, -- 27
+  {{"c#4", 2}, {"c#4", 2}}, -- 28
+  {{"d4", 2}, {"d4", 2}}, -- 29
+  {{"d4", 2}, {"bb3", 2}}, -- 30
+  {{"c#4", 2}, {"a3", 2}}, -- 31
+  {{"a3", 4}}, -- 32
+}
+
+local tenor_score = {
+  {{"a3", 4}}, -- 1
+  {{"a3", 4}}, -- 2
+  {{"bb3", 2}, {"a3", 2}}, -- 3
+  {{"a3", 4}}, -- 4
+  {{"bb3", 4}}, -- 5
+  {{"a3", 2}, {"d3", 2}}, -- 6
+  {{"g3", 4}}, -- 7
+  {{"g3", 2}, {"a3", 2}}, -- 8
+  {{"a3", 2}, {"f3", 2}}, -- 9
+  {{"a3", 4}}, -- 10
+  {{"g3", 4}}, -- 11
+  {{"f3", 4}}, -- 12
+  {{"bb3", 4}}, -- 13
+  {{"f3", 2}, {"f3", 2}}, -- 14
+  {{"g3", 4}}, -- 15
+  {{"f3", 3}, {"~", 1}}, -- 16
+  {{"a3", 4}}, -- 17
+  {{"g3", 4}}, -- 18
+  {{"a3", 4}}, -- 19
+  {{"a3", 2}, {"e3", 2}}, -- 20
+  {{"bb3", 4}}, -- 21
+  {{"a3", 2}, {"f3", 2}}, -- 22
+  {{"bb3", 4}}, -- 23
+  {{"g3", 4}}, -- 24
+  {{"a3", 4}}, -- 25
+  {{"bb3", 2}, {"f3", 2}}, -- 26
+  {{"bb3", 4}}, -- 27
+  {{"a3", 2}, {"g3", 2}}, -- 28
+  {{"a3", 4}}, -- 29
+  {{"bb3", 2}, {"g3", 2}}, -- 30
+  {{"g3", 2}, {"e3", 2}}, -- 31
+  {{"f#3", 4}}, -- 32
+}
+
+local pedal_score = {
+  {{"d3", 4}}, -- 1
+  {{"c3", 4}}, -- 2
+  {{"bb2", 4}}, -- 3
+  {{"a2", 4}}, -- 4
+  {{"g2", 4}}, -- 5
+  {{"f2", 4}}, -- 6
+  {{"e2", 4}}, -- 7
+  {{"a2", 4}}, -- 8
+  {{"d3", 4}}, -- 9
+  {{"f2", 4}}, -- 10
+  {{"c3", 4}}, -- 11
+  {{"bb2", 4}}, -- 12
+  {{"g2", 4}}, -- 13
+  {{"a2", 4}}, -- 14
+  {{"a2", 4}}, -- 15
+  {{"d3", 3}, {"~", 1}}, -- 16
+  {{"f2", 4}}, -- 17
+  {{"e2", 4}}, -- 18
+  {{"d2", 4}}, -- 19
+  {{"c3", 4}}, -- 20
+  {{"bb2", 4}}, -- 21
+  {{"a2", 4}}, -- 22
+  {{"g2", 4}}, -- 23
+  {{"c3", 4}}, -- 24
+  {{"d3", 4}}, -- 25
+  {{"bb2", 4}}, -- 26
+  {{"g2", 4}}, -- 27
+  {{"a2", 4}}, -- 28
+  {{"f2", 4}}, -- 29
+  {{"g2", 4}}, -- 30
+  {{"a2", 4}}, -- 31
+  {{"d2", 4}}, -- 32
+}
+
+local function registration(bar)
+  if bar < 9 then return 1 end
+  if bar < 17 then return 2 end
+  if bar < 25 then return 3 end
+  if bar < 29 then return 4 end
+  return 5
+end
+local function place(rows, groups, is_pedal, position)
+  for bar, row in ipairs(rows) do
+    local offset = 0
+    local group = is_pedal and 1 or registration(bar)
+    for _, event in ipairs(row) do
+      local pitch, quarters = event[1], event[2]
+      if pitch ~= "~" then
+        -- A 46 ms finger lift before the next note keeps repeated keys clear.
+        -- Longer phrase-end breaths are already written as rests, measure 16.
+        table.insert(groups[group], at(beats((bar - 1) * 4 + offset),
+          pattern(pitch) >> hold(beats(quarters - .055)) >> pan(position),
+          beats(.25)))
+      end
+      offset = offset + quarters
+    end
+    if offset ~= 4 then error("score measure must contain four quarters") end
+  end
+end
+local function manual_part(rows, position)
+  local groups = {{}, {}, {}, {}, {}}
+  place(rows, groups, false, position)
+  for i, notes in ipairs(groups) do
+    play(manuals[i], timeline(notes) >> to(hall, .80))
+  end
+end
+manual_part(soprano_score, -.08)
+manual_part(alto_score, -.08)
+manual_part(tenor_score, .08)
+local pedal_notes = {{}}
+place(pedal_score, pedal_notes, true, 0)
+play(pedal, timeline(pedal_notes[1]) >> to(hall, .55))

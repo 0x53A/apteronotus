@@ -1,0 +1,77 @@
+-- frankfurt-probe.eod — Frankfurt registration probe
+-- Approximate pitch sets inferred from spectral peaks, NOT a transcription.
+-- 0–11.3s: pitch-set comparison; 22–26s: E3/E4/E5 dry; 27–31s: same wet.
+-- Wait for the comparison room to drain before the isolated dry notes.
+-- A polyphonic organ's overtones do not determine played keys or drawn stops.
+-- Render file with --seconds 32 --tail 8. First 11.3 seconds are the comparison.
+tempo(120)
+local expression=control {name="Organ expression",range={0,1},default=.85}
+local upper=control {name="Upper ranks",range={0,1},default=.65}
+local hall=send {
+  graph=reverb(38,secs(3.8),.66) >> highpass(75) >> lowpass(7200),
+  level=.85,
+}
+
+-- Fixed rank positions and small tuning offsets: an ensemble of pipes,
+-- rather than a new randomly detuned ensemble on every key press.
+local function frankfurt_manual(hz,brightness)
+  local top=slew(upper,.025)*brightness
+  local ranks={
+    {"principal",8,.34,-1.8,-.7},
+    {"principal",8,.30,1.8,.7},
+    {"flute",8,.23,-1.1,.18},
+    {"string",8,.12,1.4,.45},
+    {"principal",4,.80*top,.7,.55},
+    {"principal",2,.85*top,-.8,-.55},
+    {"principal",8/3,.13*top,1.0,.25},
+    {"principal",4/3,.22*top,-1.2,-.4},
+    {"principal",1,.13*top,1.3,.4},
+    {"reed",8,.24,-.5,-.18},
+  }
+  local sum=dc(0) >> pan(0)
+  for _,r in ipairs(ranks) do
+    local pipe=organ_pipe(hz,{kind=r[1],feet=r[2],level=r[3],cents=r[4],chiff=.005})
+    sum=sum+(pipe >> pan(r[5]))
+  end
+  return sum
+end
+local singing=voice {graph=function(n)
+  return frankfurt_manual(n.hz,1)*.16*slew(expression,.025)
+end}
+local answering=voice {graph=function(n)
+  return frankfurt_manual(n.hz,.65)*.16*slew(expression,.025)
+end}
+local foundation=voice {graph=function(n)
+  return organ(n.hz,{
+    {kind="flute",feet=16,level=.65,chiff=0},
+    {kind="principal",feet=8,level=.32,chiff=.003},
+    {kind="principal",feet=4,level=.06,chiff=0},
+  })*.16*slew(expression,.025) >> pan(-.02)
+end}
+
+local sets={
+  {0,1.3,"[e3,a3,b3,d4]","e3"},
+  {1.3,2.2,"[a3,b3,e4,f#4]","a2"},
+  {2.2,3.6,"[a3,c4,d4,e4]","a2"},
+  {3.6,4.6,"[c4,e4,g4]","c3"},
+  {4.6,5.4,"[b3,e4,g4]","e3"},
+  {5.4,7.2,"[bb3,eb4,g4]","eb3"},
+  {7.2,8.6,"[g3,bb3,c4,eb4]","c3"},
+  {8.6,10.0,"[a3,c4,e4,g4]","a2"},
+  {10.0,11.3,"[b3,d4,e4,g4]","e3"},
+}
+local m,p={},{}
+for _,q in ipairs(sets) do
+  local duration=q[2]-q[1]-.045
+  table.insert(m,at(secs(q[1]),pattern(q[3]) >> hold(secs(duration)),beats(.25)))
+  table.insert(p,at(secs(q[1]),pattern(q[4]) >> hold(secs(duration)),beats(.25)))
+end
+play(singing,timeline(m) >> to(hall,.85))
+play(foundation,timeline(p) >> to(hall,.65))
+local dry,wet={},{}
+for i,pitch in ipairs({"e3","e4","e5"}) do
+  table.insert(dry,at(secs(22+(i-1)*1.4),pattern(pitch) >> hold(secs(1)),beats(.25)))
+  table.insert(wet,at(secs(27+(i-1)*1.4),pattern(pitch) >> hold(secs(1)),beats(.25)))
+end
+play(singing,timeline(dry))
+play(singing,timeline(wet) >> to(hall,.85))

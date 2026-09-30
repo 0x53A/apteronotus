@@ -1,0 +1,217 @@
+-- stein-und-atem.eod — Stein und Atem (Stone and Breath)
+-- Original organ prelude after the Frankfurt church recording, not its tune.
+-- 32 measures of 3/4, quarter=78: 73.846 seconds, then 8 seconds of room.
+-- 1–8 invocation; 9–16 answering voices; 17–24 chromatic side chapel;
+-- 25–32 return, a descending pedal and a quiet E-major resolution.
+-- Sample-free registration informed by IMG_9443.mov. These generic ranks are
+-- an approximation, not measured Klais stops. Room time is a design choice:
+-- the 11-second recording contains no isolated decay for measuring RT60.
+-- Written pedal E2–E3; its 16-foot stop sounds one octave below.
+-- No key-velocity response, tremolo, chorus, distortion or hidden limiter.
+-- Render: cargo run --release -p apteronotus-render -- --song stein-und-atem --cycles 24 --tail 8 -o target/frankfurt-organ/stein-und-atem.wav
+
+tempo(78)
+local expression=control {name="Organ expression",range={0,1},default=.85}
+local upper=control {name="Upper ranks",range={0,1},default=.65}
+local hall=send {
+  graph=reverb(38,secs(3.8),.66) >> highpass(75) >> lowpass(7200),
+  level=.85,
+}
+
+-- Fixed rank positions and small tuning offsets: an ensemble of pipes,
+-- rather than a new randomly detuned ensemble on every key press.
+local function frankfurt_manual(hz,brightness)
+  local top=slew(upper,.025)*brightness
+  local ranks={
+    {"principal",8,.34,-1.8,-.7},
+    {"principal",8,.30,1.8,.7},
+    {"flute",8,.23,-1.1,.18},
+    {"string",8,.12,1.4,.45},
+    {"principal",4,.80*top,.7,.55},
+    {"principal",2,.85*top,-.8,-.55},
+    {"principal",8/3,.13*top,1.0,.25},
+    {"principal",4/3,.22*top,-1.2,-.4},
+    {"principal",1,.13*top,1.3,.4},
+    {"reed",8,.24,-.5,-.18},
+  }
+  local sum=dc(0) >> pan(0)
+  for _,r in ipairs(ranks) do
+    local pipe=organ_pipe(hz,{kind=r[1],feet=r[2],level=r[3],cents=r[4],chiff=.005})
+    sum=sum+(pipe >> pan(r[5]))
+  end
+  return sum
+end
+local singing=voice {graph=function(n)
+  return frankfurt_manual(n.hz,1)*.16*slew(expression,.025)
+end}
+local answering=voice {graph=function(n)
+  return frankfurt_manual(n.hz,.65)*.16*slew(expression,.025)
+end}
+local foundation=voice {graph=function(n)
+  return organ(n.hz,{
+    {kind="flute",feet=16,level=.65,chiff=0},
+    {kind="principal",feet=8,level=.32,chiff=.003},
+    {kind="principal",feet=4,level=.06,chiff=0},
+  })*.16*slew(expression,.025) >> pan(-.02)
+end}
+
+-- Each row is one 3/4 measure of {pitch, quarter-note duration} events.
+-- Gates follow those written durations; half notes sustain through the moving
+-- eighth-note line. All score construction happens once during evaluation.
+local soprano={
+  {{"e4",0.5},{"g4",0.5},{"f#4",0.5},{"b4",0.5},{"a4",0.5},{"g4",0.5}}, -- 1
+  {{"f#4",1},{"e4",0.5},{"d#4",0.5},{"b3",1}}, -- 2
+  {{"e4",1},{"b4",0.5},{"a4",0.5},{"g4",0.5},{"f#4",0.5}}, -- 3
+  {{"g4",1.5},{"f#4",0.5},{"e4",1}}, -- 4
+  {{"a4",0.5},{"c5",0.5},{"b4",0.5},{"a4",0.5},{"g4",0.5},{"f#4",0.5}}, -- 5
+  {{"g4",1},{"f#4",0.5},{"e4",0.5},{"d4",1}}, -- 6
+  {{"f#4",0.5},{"a4",0.5},{"g4",0.5},{"f#4",0.5},{"e4",0.5},{"d#4",0.5}}, -- 7
+  {{"e4",2.5},{"~",0.5}}, -- 8
+  {{"b4",0.5},{"d5",0.5},{"c5",0.5},{"e5",0.5},{"d5",0.5},{"c5",0.5}}, -- 9
+  {{"b4",1},{"a4",0.5},{"g4",0.5},{"f#4",1}}, -- 10
+  {{"g4",0.5},{"b4",0.5},{"a4",0.5},{"d5",0.5},{"c5",0.5},{"b4",0.5}}, -- 11
+  {{"a4",1.5},{"g4",0.5},{"f#4",1}}, -- 12
+  {{"e4",0.5},{"g4",0.5},{"f#4",0.5},{"c5",0.5},{"b4",0.5},{"a4",0.5}}, -- 13
+  {{"g4",1},{"f#4",0.5},{"e4",0.5},{"d4",1}}, -- 14
+  {{"d#4",0.5},{"f#4",0.5},{"a4",0.5},{"g4",0.5},{"f#4",0.5},{"d#4",0.5}}, -- 15
+  {{"e4",2},{"~",1}}, -- 16
+  {{"g4",0.5},{"bb4",0.5},{"a4",0.5},{"eb5",0.5},{"d5",0.5},{"c5",0.5}}, -- 17
+  {{"bb4",1},{"a4",0.5},{"g4",0.5},{"f4",1}}, -- 18
+  {{"ab4",0.5},{"c5",0.5},{"bb4",0.5},{"f5",0.5},{"eb5",0.5},{"d5",0.5}}, -- 19
+  {{"c5",1.5},{"bb4",0.5},{"ab4",1}}, -- 20
+  {{"g4",0.5},{"bb4",0.5},{"ab4",0.5},{"eb5",0.5},{"d5",0.5},{"c5",0.5}}, -- 21
+  {{"b4",1},{"a4",0.5},{"g4",0.5},{"f#4",1}}, -- 22
+  {{"a4",0.5},{"c5",0.5},{"b4",0.5},{"e5",0.5},{"d5",0.5},{"c5",0.5}}, -- 23
+  {{"b4",2},{"~",1}}, -- 24
+  {{"e4",0.5},{"g4",0.5},{"f#4",0.5},{"b4",0.5},{"a4",0.5},{"g4",0.5}}, -- 25
+  {{"f#4",1},{"e4",0.5},{"d4",0.5},{"c4",1}}, -- 26
+  {{"e4",0.5},{"g4",0.5},{"f#4",0.5},{"a4",0.5},{"g4",0.5},{"f#4",0.5}}, -- 27
+  {{"e4",1.5},{"d4",0.5},{"c4",1}}, -- 28
+  {{"a3",0.5},{"c4",0.5},{"b3",0.5},{"e4",0.5},{"d4",0.5},{"c4",0.5}}, -- 29
+  {{"b3",1},{"a3",0.5},{"g3",0.5},{"f#3",1}}, -- 30
+  {{"f#4",1},{"e4",0.5},{"d#4",0.5},{"b3",1}}, -- 31
+  {{"e4",3}}, -- 32
+}
+local alto={
+  {{"b3",3}}, -- 1
+  {{"a3",1.5},{"f#3",1.5}}, -- 2
+  {{"g3",1.5},{"b3",1.5}}, -- 3
+  {{"b3",3}}, -- 4
+  {{"e4",1.5},{"c4",1.5}}, -- 5
+  {{"b3",1.5},{"b3",1.5}}, -- 6
+  {{"a3",1.5},{"f#3",1.5}}, -- 7
+  {{"b3",2.5},{"~",0.5}}, -- 8
+  {{"g4",1.5},{"a4",1.5}}, -- 9
+  {{"g4",1.5},{"d4",1.5}}, -- 10
+  {{"d4",1.5},{"g4",1.5}}, -- 11
+  {{"e4",1.5},{"d4",1.5}}, -- 12
+  {{"c4",1.5},{"e4",1.5}}, -- 13
+  {{"b3",1.5},{"g3",1.5}}, -- 14
+  {{"a3",1.5},{"f#3",1.5}}, -- 15
+  {{"b3",2},{"~",1}}, -- 16
+  {{"eb4",1.5},{"g4",1.5}}, -- 17
+  {{"eb4",1.5},{"d4",1.5}}, -- 18
+  {{"f4",1.5},{"ab4",1.5}}, -- 19
+  {{"ab4",1.5},{"f4",1.5}}, -- 20
+  {{"eb4",1.5},{"g4",1.5}}, -- 21
+  {{"d4",1.5},{"b3",1.5}}, -- 22
+  {{"e4",1.5},{"a4",1.5}}, -- 23
+  {{"d#4",2},{"~",1}}, -- 24
+  {{"b3",1.5},{"e4",1.5}}, -- 25
+  {{"a3",1.5},{"g3",1.5}}, -- 26
+  {{"c4",1.5},{"e4",1.5}}, -- 27
+  {{"b3",1.5},{"g3",1.5}}, -- 28
+  {{"e3",1.5},{"a3",1.5}}, -- 29
+  {{"g3",1.5},{"e3",1.5}}, -- 30
+  {{"a3",1.5},{"f#3",1.5}}, -- 31
+  {{"b3",3}}, -- 32
+}
+local tenor={
+  {{"g3",3}}, -- 1
+  {{"f#3",1.5},{"d#3",1.5}}, -- 2
+  {{"e3",3}}, -- 3
+  {{"e3",1.5},{"g3",1.5}}, -- 4
+  {{"a3",3}}, -- 5
+  {{"g3",1.5},{"e3",1.5}}, -- 6
+  {{"f#3",3}}, -- 7
+  {{"g3",2.5},{"~",0.5}}, -- 8
+  {{"~",1},{"g3",0.5},{"b3",0.5},{"a3",0.5},{"d4",0.5}}, -- 9
+  {{"c4",1},{"b3",0.5},{"a3",0.5},{"g3",1}}, -- 10
+  {{"b3",1},{"d4",0.5},{"c4",0.5},{"b3",0.5},{"a3",0.5}}, -- 11
+  {{"c4",1.5},{"b3",0.5},{"a3",1}}, -- 12
+  {{"a3",1},{"c4",0.5},{"b3",0.5},{"a3",0.5},{"g3",0.5}}, -- 13
+  {{"e3",1},{"g3",0.5},{"f#3",0.5},{"e3",0.5},{"d3",0.5}}, -- 14
+  {{"f#3",1.5},{"a3",1.5}}, -- 15
+  {{"g3",2},{"~",1}}, -- 16
+  {{"bb3",3}}, -- 17
+  {{"g3",1.5},{"bb3",1.5}}, -- 18
+  {{"c4",3}}, -- 19
+  {{"c4",1.5},{"d4",1.5}}, -- 20
+  {{"bb3",3}}, -- 21
+  {{"g3",1.5},{"d3",1.5}}, -- 22
+  {{"a3",1.5},{"c4",1.5}}, -- 23
+  {{"f#3",2},{"~",1}}, -- 24
+  {{"g3",0.5},{"b3",0.5},{"a3",0.5},{"e4",0.5},{"d4",0.5},{"c4",0.5}}, -- 25
+  {{"d4",1},{"c4",0.5},{"b3",0.5},{"a3",1}}, -- 26
+  {{"a3",0.5},{"c4",0.5},{"b3",0.5},{"e4",0.5},{"d4",0.5},{"c4",0.5}}, -- 27
+  {{"g3",1},{"b3",0.5},{"a3",0.5},{"g3",0.5},{"f#3",0.5}}, -- 28
+  {{"c3",1.5},{"e3",1.5}}, -- 29
+  {{"e3",1.5},{"b3",1.5}}, -- 30
+  {{"f#3",1.5},{"a3",1.5}}, -- 31
+  {{"g#3",3}}, -- 32
+}
+local pedal={
+  {{"e3",3}}, -- 1
+  {{"b2",3}}, -- 2
+  {{"c3",3}}, -- 3
+  {{"e3",1.5},{"d3",1.5}}, -- 4
+  {{"a2",3}}, -- 5
+  {{"e3",1.5},{"c3",1.5}}, -- 6
+  {{"b2",3}}, -- 7
+  {{"e3",2.5},{"~",0.5}}, -- 8
+  {{"g2",3}}, -- 9
+  {{"d3",3}}, -- 10
+  {{"g2",1.5},{"b2",1.5}}, -- 11
+  {{"c3",1.5},{"d3",1.5}}, -- 12
+  {{"a2",3}}, -- 13
+  {{"e3",1.5},{"c3",1.5}}, -- 14
+  {{"b2",3}}, -- 15
+  {{"e3",2},{"~",1}}, -- 16
+  {{"eb3",3}}, -- 17
+  {{"bb2",3}}, -- 18
+  {{"ab2",3}}, -- 19
+  {{"f2",3}}, -- 20
+  {{"eb3",3}}, -- 21
+  {{"g2",1.5},{"b2",1.5}}, -- 22
+  {{"a2",3}}, -- 23
+  {{"b2",2},{"~",1}}, -- 24
+  {{"e3",3}}, -- 25
+  {{"d3",3}}, -- 26
+  {{"c3",3}}, -- 27
+  {{"b2",3}}, -- 28
+  {{"a2",3}}, -- 29
+  {{"g2",1.5},{"c3",1.5}}, -- 30
+  {{"b2",3}}, -- 31
+  {{"e2",3}}, -- 32
+}
+local function part(instrument,rows,wet)
+  if #rows~=32 then error("prelude needs 32 measures") end
+  local notes={}
+  for bar,row in ipairs(rows) do
+    local offset=0
+    for _,event in ipairs(row) do
+      local pitch,quarters=event[1],event[2]
+      if pitch~="~" then
+        table.insert(notes,at(beats((bar-1)*3+offset),
+          pattern(pitch) >> hold(beats(quarters*.94)),beats(.25)))
+      end
+      offset=offset+quarters
+    end
+    if offset~=3 then error("measure must contain three quarters") end
+  end
+  play(instrument,timeline(notes) >> to(hall,wet))
+end
+part(singing,soprano,.85)
+part(answering,alto,.85)
+part(answering,tenor,.85)
+part(foundation,pedal,.65)

@@ -93,6 +93,9 @@ pub const THE_LIGHTS_ACROSS_THE_WATER: &str =
 /// A gothic 3/4 chamber lament for synthetic bowed strings.
 pub const THE_WIDOWS_CLOCK: &str = include_str!("../../../songs/the-widows-clock.eod");
 
+/// A tragic 4/4 hunter elegy for synthesized strings, choir and timpani.
+pub const ASHES_AT_DAYBREAK: &str = include_str!("../../../songs/ashes-at-daybreak.eod");
+
 /// Original church-organ chorale prelude for three manual parts and pedal.
 pub const LICHT_IM_GEWOELBE: &str = include_str!("../../../songs/licht-im-gewoelbe.eod");
 /// `stein-und-atem.eod` — original prelude after a Frankfurt organ recording.
@@ -292,6 +295,12 @@ pub static SONGS: &[Song] = &[
         title: "The Widow's Clock",
         stresses: "synthetic bowed strings, a finite gothic 3/4 chamber arrangement, ramped tempo, delayed vibrato and a shared room",
         source: THE_WIDOWS_CLOCK,
+    },
+    Song {
+        name: "ashes-at-daybreak",
+        title: "Ashes at Daybreak",
+        stresses: "a finite original 4/4 orchestral elegy, returning violin theme, short bowed ostinati, synthetic vowel choir, horns, timpani and ramped tempo",
+        source: ASHES_AT_DAYBREAK,
     },
     Song {
         name: "licht-im-gewoelbe",

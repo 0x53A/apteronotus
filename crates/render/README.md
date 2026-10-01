@@ -94,3 +94,9 @@ lead to a trumpet arrival at bar 24 (42.35 seconds). Render with
 `--song iron-litany --cycles 40 --tail 6`; add `--solo-track 0,1,2` for the
 manuals, pedal and trumpet together through the same cathedral and master.
 The document embeds its experimental trumpet helper and needs no other score.
+
+`ashes-at-daybreak` is a finite orchestral hunter elegy in E minor and 4/4:
+solo violin and cello open into driving bowed strings, synthesized choir,
+horns and timpani before a sparse farewell. Its 48-bar tempo map moves from
+88 through 124 BPM and slows to 58 at the ending. Render the complete piece
+with `--song ashes-at-daybreak --cycles 48 --tail 8`.

@@ -34,6 +34,8 @@ needed by one of them is not needed yet.
 | `iron-in-the-rain.eod` | full 68-bar rock arrangement: retained six-string rhythm guitar, independently bent lead and string bass, partial strums, palm damping, synthesized drums, half-time breakdown and ringing ending |
 | `the-widows-clock.eod` | original gothic chamber miniature: synthetic violin/viola/cello, delayed vibrato, 48 measures of 3/4, a ramped hunt passage and finite coda |
 
+| `ashes-at-daybreak.eod` | original tragic hunter elegy: 48 bars in 4/4, returning violin theme, short bowed ostinati, synthesized vowel choir, horns and timpani, ramped pursuit and a sparse farewell |
+
 The first four are cyclic and fix every parameter at onset. `neon.eod` and
 `jamming.eod` exist because that turned out to be a property of the author
 rather than of music — see session 3 in

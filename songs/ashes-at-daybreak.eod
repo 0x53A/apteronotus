@@ -1,0 +1,204 @@
+-- ashes-at-daybreak.eod — Ashes at Daybreak
+-- Original tragic hunter elegy: E minor, broad 4/4, synthesized orchestra.
+-- A farewell that becomes a duel; inspired by the requested emotional world,
+-- with an original melody and arrangement. No samples or quoted score.
+-- 48 bars: 0–8 vigil; 8–20 farewell; 20–24 memory; 24–32 pursuit;
+-- 32–40 the last stand; 40–48 release. Roughly two minutes including the hall.
+-- Render: cargo run --release -p apteronotus-render -- --song ashes-at-daybreak --cycles 48 --tail 8
+
+tempo {
+  {at=bars(0), bpm=88},
+  {at=bars(8), bpm=96, over=bars(2)},
+  {at=bars(24), bpm=124, over=bars(2)},
+  {at=bars(32), bpm=116, over=bars(1)},
+  {at=bars(40), bpm=80, over=bars(2)},
+  {at=bars(46), bpm=58, over=bars(2)},
+}
+local strings_level = control {name="Strings", range={0,1.4}, default=1}
+local choir_level = control {name="Distant choir", range={0,1.4}, default=1}
+local hall = send {
+  graph=reverb(36, secs(4.2), .7) >> highpass(180) >> lowpass(6200),
+  level=.32,
+}
+local violin = voice {graph=function(n)
+  return bowed_string(n.hz, {vibrato=17, rate=5.3, brightness=.58,
+    pressure=.82, bow=.011, attack=ms(95), release=ms(220)})
+    * n.velocity * .72 * slew(strings_level,.03) >> pan(-.22)
+end}
+local reply = voice {graph=function(n)
+  return bowed_string(n.hz, {kind="viola", vibrato=10, brightness=.43,
+    bow=.008, attack=ms(130), release=ms(230)})
+    * n.velocity * .46 * slew(strings_level,.03) >> pan(.28)
+end}
+local cello = voice {graph=function(n)
+  return bowed_string(n.hz, {kind="cello", vibrato=8, brightness=.42,
+    bow=.007, attack=ms(120), release=ms(230)})
+    * n.velocity * .63 * slew(strings_level,.03) >> pan(.08)
+end}
+-- Short bows have their own articulation: the long solo never has to become
+-- an eighth-note machine. Two fixed placements suggest orchestral desks.
+local runners = voice {graph=function(n)
+  local tone=bowed_string(n.hz, {kind="viola", vibrato=2, brightness=.62,
+    pressure=.94, bow=.009, attack=ms(18), release=ms(55)})
+  return ((tone >> pan(-.48)) + (tone*.75 >> pan(.44)))
+    * n.velocity * .35 * slew(strings_level,.03)
+end}
+local function partials(hz, weights)
+  local total=0
+  for _,weight in ipairs(weights) do total=total+math.abs(weight) end
+  for i,weight in ipairs(weights) do weights[i]=weight/(total*1.000001) end
+  return harmonics(hz,weights)
+end
+local choir = voice {graph=function(n)
+  local f=n.hz*2^(sine(4.6)*3/1200)
+  local source=partials(f,{1,.48,.28,.18,.12,.09,.07,.05,.04,.03,.02,.015})
+    + partials(f*1.003,{1,.4,.22,.15,.1,.07,.05,.035})*.35
+  local vowel=(source >> bandpass(650,2))*.7
+    + (source >> bandpass(1150,2.8))*.45
+    + (source >> lowpass(2400))*.24
+  return vowel*adsr(ms(430),ms(100),.88,secs(.75))
+    * n.velocity * .25 * slew(choir_level,.05) >> pan(n.pan)
+end}
+local horn = voice {graph=function(n)
+  local tone=partials(n.hz,{1,.6,.38,.24,.16,.1,.07,.04,.025,.015})
+  return tone >> lowpass(1000+1400*(1-decay(ms(180))),.7)
+    >> mul(adsr(ms(95),ms(160),.8,ms(260))*n.velocity*.2)
+    >> pan(.12)
+end}
+local timpani = voice {graph=function(n)
+  local f=n.hz*(1+.12*decay(ms(22)))
+  local skin=sine(f)*decay(ms(480))
+    + sine(f*1.47)*decay(ms(240))*.42
+    + sine(f*2.08)*decay(ms(140))*.2
+  local mallet=(noise() >> lowpass(1800))*decay(ms(9))*.17
+  return (skin+mallet)*(1-decay(ms(1)))*n.velocity*.28 >> pan(-.12)
+end}
+local cymbal = voice {graph=function(n)
+  return noise() >> highpass(2400) >> lowpass(8200)
+    >> mul((1-decay(ms(8)))*decay(secs(1.6))*n.velocity*.085)
+    >> pan(.3)
+end}
+
+-- The theme's upward fourth meets a falling semitone; the reply descends
+-- instead of doubling it. Weighted slots leave room for the bow to speak.
+local theme={
+  pattern("b4 e5@2 f#5"), pattern("g5@3 f#5"),
+  pattern("e5@2 d#5 b4"), pattern("f#5@2 e5@2"),
+  pattern("g5 c6@2 b5"), pattern("a5@2 g5 f#5"),
+  pattern("e5@2 f#5 d#5"), pattern("e5@3 ~"),
+  pattern("b5@2 a5 g5"), pattern("f#5 g5@2 e5"),
+  pattern("c5@2 e5 f#5"), pattern("d#5@3 b4"),
+  pattern("e5 g5 b5@2"), pattern("a5@2 g5 f#5"),
+  pattern("f#5@2 d#5 b4"), pattern("e5@3 ~"),
+}
+local vigil={
+  pattern("~ b4@3"), pattern("e5@3 f#5"),
+  pattern("g5@2 f#5@2"), pattern("e5@3 ~"),
+  pattern("~ e5 g5@2"), pattern("f#5@3 e5"),
+  pattern("d#5@2 b4@2"), pattern("e5@3 ~"),
+}
+local pursuit={
+  pattern("b5 e6@2 d6"), pattern("c6 b5 a5 g5"),
+  pattern("f#5@2 g5 a5"), pattern("b5@3 ~"),
+  pattern("e6@2 d6 c6"), pattern("b5 a5 g5 f#5"),
+  pattern("a5@2 f#5 d#5"), pattern("e5@3 b5"),
+}
+local roots={pattern("e2"),pattern("e2"),pattern("c3"),pattern("c3"),
+  pattern("a2"),pattern("a2"),pattern("b2"),pattern("b2")}
+local harmony={pattern("[g3,b3,e4]"),pattern("[f#3,b3,e4]"),
+  pattern("[g3,c4,e4]"),pattern("[g3,b3,d4]"),
+  pattern("[a3,c4,e4]"),pattern("[a3,c4,f#4]"),
+  pattern("[a3,b3,d#4]"),pattern("[f#3,b3,d#4]")}
+local answers={pattern("g4@2 f#4@2"),pattern("e4@3 b3"),
+  pattern("e4@2 g4@2"),pattern("d4@3 ~"),
+  pattern("c5@2 b4 a4"),pattern("a4@2 f#4@2"),
+  pattern("f#4@2 e4 d#4"),pattern("b3@3 ~")}
+local ostinato={
+  pattern("e3 b3 e4 b3 g3 b3 f#4 b3"),
+  pattern("e3 b3 f#4 b3 g3 b3 e4 b3"),
+  pattern("c3 g3 e4 g3 c4 g3 e4 g3"),
+  pattern("c3 g3 d4 g3 b3 g3 d4 g3"),
+  pattern("a2 e3 c4 e3 a3 e3 b3 e3"),
+  pattern("a2 e3 f#3 e3 c4 e3 a3 e3"),
+  pattern("b2 f#3 d#4 f#3 a3 f#3 d#4 f#3"),
+  pattern("b2 f#3 a3 f#3 d#4 f#3 b3 f#3"),
+}
+local lead,inner,bass,pulse,voices,brass,drums,crashes={},{},{},{},{},{},{},{}
+local function put(list,bar,notes,level,hold_beats)
+  if hold_beats then notes=notes >> hold(beats(hold_beats)) end
+  table.insert(list,at(bars(bar),notes >> velocity(level)))
+end
+for bar=0,39 do
+  local row=bar%8+1
+  local memory=bar>=20 and bar<24
+  local chase=bar>=24 and bar<32
+  local climax=bar>=32
+  if bar<8 then put(lead,bar,vigil[row],.57)
+  elseif bar<20 then put(lead,bar,theme[(bar-8)%16+1],.8)
+  elseif memory then
+    put(lead,bar,vigil[(bar-20)*2+1],.43)
+  elseif chase then put(lead,bar,pursuit[row],.84)
+  else put(lead,bar,theme[row],1) end
+  -- Long foundation in the elegy, forceful half-bar bows during the duel.
+  if chase or climax then
+    put(bass,bar,roots[row] >> fast(2),.88,1.7)
+  elseif bar%2==0 then put(bass,bar,roots[row],memory and .4 or .65,7.4) end
+  if bar>=4 and not memory then
+    put(inner,bar,answers[row],climax and .75 or .48)
+  end
+  if bar>=8 and not memory then
+    put(pulse,bar,ostinato[row],climax and .88 or (chase and .76 or .43),
+      chase and .34 or .4)
+  end
+  if bar%2==0 and (bar>=8 or bar==0) and not memory then
+    put(voices,bar,harmony[row] >> pan("-.4 .4"),climax and .86 or .45,7.2)
+  end
+  if climax then
+    put(brass,bar,harmony[row],bar%2==0 and .78 or .58,3.3)
+  elseif bar==16 or bar==18 then
+    put(brass,bar,harmony[row],.4,6.8)
+  end
+  if bar>=12 and not memory then
+    local hits=pattern("e2 ~ ~ b2")
+    if chase then hits=pattern("e2 ~ b2 ~ e2 ~ b2 b2") end
+    if climax then hits=pattern("e2 ~ b2 ~ e2 b2 ~ b2") end
+    if bar==19 or bar==31 or bar==39 then
+      hits=pattern("e2 ~ ~ ~ b2 b2 b2 b2")
+    end
+    put(drums,bar,hits,climax and .94 or .68,.3)
+  end
+end
+for _,bar in ipairs({8,16,24,32,36,40}) do
+  put(crashes,bar,pattern("x"),bar==32 and .85 or .48,.25)
+end
+-- Coda: the theme loses its answering voices and finally its leading note.
+put(lead,40,pattern("b5@2 a5 g5"),.66)
+put(lead,41,pattern("f#5@2 e5@2"),.58)
+put(lead,42,pattern("g5@2 f#5 e5"),.54)
+put(lead,43,pattern("d#5@3 b4"),.47)
+put(lead,44,pattern("e5@2 f#5@2"),.43)
+put(lead,45,pattern("g5@2 f#5@2"),.36)
+put(lead,46,pattern("e5"),.29,6.8)
+put(inner,40,pattern("e4"),.42,7.3)
+put(inner,42,pattern("c4"),.33,7.3)
+put(inner,44,pattern("b3"),.28,7.3)
+put(inner,46,pattern("b4"),.18,6.5)
+put(bass,40,pattern("c3"),.55,7.4)
+put(bass,42,pattern("a2"),.44,7.4)
+put(bass,44,pattern("b2"),.36,7.4)
+put(bass,46,pattern("e2"),.3,6.8)
+put(voices,40,pattern("[g3,c4,e4]"),.44,7.1)
+put(voices,42,pattern("[a3,c4,e4]"),.31,7.1)
+put(voices,44,pattern("[f#3,b3,d#4]"),.24,6.8)
+put(brass,40,pattern("[g3,c4,e4]"),.45,6.4)
+put(drums,40,pattern("e2"),.73,.3)
+play(violin,timeline(lead) >> to(hall,.65))
+play(reply,timeline(inner) >> to(hall,.6))
+play(cello,timeline(bass) >> to(hall,.32))
+play(runners,timeline(pulse) >> to(hall,.36))
+play(choir,timeline(voices) >> to(hall,1))
+play(horn,timeline(brass) >> to(hall,.72))
+play(timpani,timeline(drums) >> to(hall,.28))
+play(cymbal,timeline(crashes) >> to(hall,.65))
+master(highpass(32) >> lowpass(9000) >> mul(1.4)
+  >> limiter(ms(5),ms(220)) >> mul(.9))

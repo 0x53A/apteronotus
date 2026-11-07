@@ -376,6 +376,7 @@ pub(crate) struct SlewUnit {
     initial: f32,
     sample_rate: f64,
     value: f32,
+    retain: f32,
 }
 
 impl SlewUnit {
@@ -385,7 +386,21 @@ impl SlewUnit {
             initial: initial as f32,
             sample_rate: 44_100.0,
             value: initial as f32,
+            retain: if response_seconds > 0.0 {
+                (-1.0 / (response_seconds * 44_100.0)).exp() as f32
+            } else {
+                0.0
+            },
         }
+    }
+
+    pub(crate) fn constant_output(&mut self, input: f32) -> Option<f32> {
+        if self.response_seconds <= 0.0 {
+            self.value = input;
+            return Some(input);
+        }
+        let next = self.retain * self.value + (1.0 - self.retain) * input;
+        (next.to_bits() == self.value.to_bits()).then_some(self.value)
     }
 
     #[inline]
@@ -393,7 +408,7 @@ impl SlewUnit {
         if self.response_seconds <= 0.0 {
             self.value = input;
         } else {
-            let retain = (-1.0 / (self.response_seconds * self.sample_rate)).exp() as f32;
+            let retain = self.retain;
             self.value = retain * self.value + (1.0 - retain) * input;
         }
         self.value
@@ -408,6 +423,11 @@ impl AudioUnit for SlewUnit {
     fn set_sample_rate(&mut self, sample_rate: f64) {
         if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
+            self.retain = if self.response_seconds > 0.0 {
+                (-1.0 / (self.response_seconds * sample_rate)).exp() as f32
+            } else {
+                0.0
+            };
             self.reset();
         }
     }
@@ -442,5 +462,34 @@ impl AudioUnit for SlewUnit {
 
     fn footprint(&self) -> usize {
         std::mem::size_of::<Self>()
+    }
+}
+
+#[cfg(test)]
+mod slew_constant_tests {
+    use super::*;
+    #[test]
+    fn stationary_blocks_preserve_exact_rounding_and_resume_on_control_changes() {
+        for rate in [8000.0, 44100.0, 48000.0, 96000.0] {
+            let mut unit = SlewUnit::new(0.025, 0.0);
+            unit.set_sample_rate(rate);
+            for _ in 0..100000 {
+                unit.sample(0.85);
+            }
+            let mut scalar = unit.clone();
+            let fixed = unit.constant_output(0.85).unwrap();
+            for _ in 0..64 {
+                assert_eq!(scalar.sample(0.85).to_bits(), fixed.to_bits());
+            }
+            assert!(unit.constant_output(0.2).is_none());
+            for _ in 0..64 {
+                assert_eq!(unit.sample(0.2).to_bits(), scalar.sample(0.2).to_bits());
+            }
+            unit.set_sample_rate(rate * 0.5);
+            assert!(unit.constant_output(0.85).is_none());
+        }
+        let mut negative_zero = SlewUnit::new(0.025, -0.0);
+        assert!(negative_zero.constant_output(0.0).is_none());
+        assert_eq!(negative_zero.sample(0.0).to_bits(), 0.0f32.to_bits());
     }
 }

@@ -508,6 +508,13 @@ pub enum Op {
         decay: f64,
     },
 
+    /// (hz, speed, force, position) → C1 normalized bridge force.
+    BowedString(crate::bowed::BowedConfig),
+    /// Host-injected persistent source; explicit persistent preparation only.
+    External(crate::external::External),
+    /// Persistent retained instrument: dry body and raw bridge diagnostic.
+    BowedPerformance { key: crate::ControlId, score: crate::bowed_host::BowedScore },
+
     /// (hz, pressure, turbulence) → retained experimental flue waveguide.
     /// Pressure is normalized 0..1; turbulence is clamped to ±1. Declared
     /// min_hz bounds allocation; pitch clamps to min_hz..min(1200, rate/32).
@@ -687,6 +694,13 @@ pub enum Op {
         horizon: BreakpointHorizon,
     },
 
+    /// Prepared finite response, with bounded sample-rate-aware convolution.
+    Convolve(crate::convolution::ImpulseResponse),
+    /// N emitters and five room controls, producing listener stereo.
+    SpatialRoom(crate::spatial::RoomSpec),
+    /// Prepared 48 kHz concert hall: mono input, stereo reflections only.
+    ConcertHall,
+
     // ---------------------------------------------------------------- output
     /// (audio, position) → (left, right). The one node in this set with two
     /// outputs, which is why sources carry a channel.
@@ -706,7 +720,12 @@ impl Op {
             | Op::TransportSequence { .. }
             | Op::Portamento { .. }
             | Op::RunGate { .. } => 0,
-            Op::Sine
+            Op::External(_) => 0,
+            Op::BowedPerformance { .. } => 3,
+            Op::SpatialRoom(spec) => spec.emitters.len()+5,
+            Op::ConcertHall
+            | Op::Convolve(_)
+            | Op::Sine
             | Op::Harmonics { .. }
             | Op::Cosine
             | Op::Saw
@@ -738,6 +757,7 @@ impl Op {
             | Op::Pan
             | Op::Fdn { .. } => 2,
             Op::Width | Op::StringResonator { .. } | Op::FluePipe { .. } => 3,
+            Op::BowedString(_) => 4,
             Op::Reverb { .. } | Op::Limiter { .. } => 2,
             Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak | Op::Moog => 3,
         }
@@ -746,6 +766,9 @@ impl Op {
     pub fn outputs(&self) -> usize {
         match self {
             Op::Pan | Op::Width | Op::Reverb { .. } | Op::Limiter { .. } => 2,
+            Op::External(spec) => spec.source().outputs(),
+            Op::BowedPerformance { .. } => 2,
+            Op::SpatialRoom(_) | Op::ConcertHall => 2,
             _ => 1,
         }
     }
@@ -760,8 +783,11 @@ impl Op {
     /// asymptotic curves and arbitrary control inputs retain the maximum rule.
     pub fn activity_input(&self, port: usize) -> bool {
         match self {
+            Op::SpatialRoom(spec) => port < spec.emitters.len(),
             Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak | Op::Moog => port == 0,
-            Op::Shape { .. }
+            Op::ConcertHall
+            | Op::Convolve(_)
+            | Op::Shape { .. }
             | Op::DcBlock
             | Op::Delay(_)
             | Op::Neg
@@ -782,6 +808,7 @@ impl Op {
             | Op::Pan => port == 0,
             Op::StringResonator { .. } => port == 0,
             Op::FluePipe { .. } => port == 1,
+            Op::BowedString(_) => port == 2,
             Op::Reverb { .. } | Op::Limiter { .. } => port < 2,
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow => port < 2,
             Op::Sine
@@ -802,6 +829,7 @@ impl Op {
             | Op::TransportSequence { .. }
             | Op::Portamento { .. }
             | Op::RunGate { .. } => false,
+            Op::External(_) | Op::BowedPerformance { .. } => false,
         }
     }
 
@@ -810,6 +838,11 @@ impl Op {
         match self {
             Op::StringResonator { decay, min_hz } => decay + 1.0 / min_hz,
             Op::FluePipe { min_hz } => 0.08 + 64.0 / min_hz,
+            Op::BowedString(config) => 1600.0 / config.min_hz,
+            Op::BowedPerformance { score, .. } => 1600.0 / score.config.min_hz,
+            Op::ConcertHall => crate::concert_hall::preset::TAIL_SECONDS,
+            Op::Convolve(response) => response.seconds(),
+            Op::SpatialRoom(spec) => spec.tail_seconds(),
             Op::Delay(range) => range.max_seconds(),
             Op::Reverb { time, .. } => *time,
             Op::Limiter { attack, .. } => *attack,
@@ -1072,11 +1105,18 @@ impl GraphTemplate {
                 .nodes
                 .iter()
                 .map(|node| match &node.op {
+                    Op::ConcertHall => crate::concert_hall::preset::data_entries(),
+                    Op::Convolve(response) => response.samples.len(),
+                    Op::SpatialRoom(spec) => spec.emitters.len()*8+16,
                     Op::Harmonics { amplitudes } => amplitudes.len(),
                     Op::Curve(curve) => curve.terms.len(),
                     Op::BreakpointCurve { times, values, .. } => times.len() + values.len(),
                     Op::TransportSequence { slots, .. } => slots.len(),
                     Op::Fdn { delays, .. } => delays.len(),
+                    // Captured payload only. Prepared/rewind/cache heap admission
+                    // remains separate from this staged-data counter.
+                    Op::External(spec) => spec.source().data_entries(),
+                    Op::BowedPerformance { score, .. } => score.coordinates.len()*3 + score.commands.len() * std::mem::size_of::<crate::bowed_gesture::BowCommand>().div_ceil(8) + score.clock.as_ref().map_or(0,|clock|clock.storage_values()) + 4096 * std::mem::size_of::<crate::bowed_gesture::BowAction>().div_ceil(8),
                     _ => 0,
                 })
                 .sum(),
@@ -1084,7 +1124,13 @@ impl GraphTemplate {
                 .nodes
                 .iter()
                 .map(|node| match node.op {
+                    Op::ConcertHall => crate::concert_hall::preset::storage_seconds(),
+                    Op::Convolve(ref response) => response.seconds() * 8.0,
+                    Op::SpatialRoom(ref spec) => spec.storage_seconds(),
                     Op::StringResonator { min_hz, .. } => 1.0 / min_hz,
+                    // Four half-period rails, each sized for the longest side.
+                    Op::BowedString(config) => 2.0 / config.min_hz,
+                    Op::BowedPerformance { ref score, .. } => 2.0 * score.opens.len() as f64 / score.config.min_hz,
                     // Two delay lines at 4x rate, stored as f64 (other
                     // delay nodes store f32): count their byte-equivalent cost.
                     Op::FluePipe { min_hz } => 2.0 * 4.0 * (1.52 + 0.50) / min_hz,
@@ -1112,6 +1158,9 @@ impl GraphTemplate {
                     _ => 0.0,
                 })
                 .sum(),
+            contact_steps: self.nodes.iter().map(|node|match &node.op { Op::External(spec)=>spec.source().contact_steps(), Op::BowedString(_)=>1, Op::BowedPerformance {score,..}=>score.opens.len(),_=>0 }).sum(),
+            gesture_sample_work: self.nodes.iter().map(|node|match &node.op {Op::BowedPerformance {score,..}=>score.delivery_cost().0,_=>0}).sum(),
+            gesture_block_work: self.nodes.iter().map(|node|match &node.op {Op::BowedPerformance {score,..}=>score.delivery_cost().1,_=>0}).sum(),
             tail_seconds: self.tail(),
         }
     }
@@ -1165,6 +1214,8 @@ impl GraphTemplate {
                 limit: limits.tail_seconds,
             });
         }
+        if cost.contact_steps>limits.contact_steps {return Err(GraphLimitError::ContactWork {found:cost.contact_steps,limit:limits.contact_steps});}
+        if cost.gesture_sample_work>limits.gesture_sample_work || cost.gesture_block_work>limits.gesture_block_work {return Err(GraphLimitError::GestureWork {sample:cost.gesture_sample_work,block:cost.gesture_block_work});}
         Ok(cost)
     }
 
@@ -1216,6 +1267,7 @@ impl GraphTemplate {
                     source.map(|source| lifetime.parallel(source))
                 })?;
             let intrinsic = match &node.op {
+                Op::External(spec) => Lifetime { gate_tail: 0.0, absolute_horizon: spec.source().horizon_seconds() },
                 Op::Adsr(adsr) => Lifetime {
                     gate_tail: adsr.tail(),
                     absolute_horizon: 0.0,
@@ -1373,6 +1425,8 @@ impl GraphTemplate {
                     .map_err(|source| TemplateError::InvalidCurve { node: id, source })?;
             }
             let valid_effect = match node.op {
+                Op::Convolve(ref response) => response.validate(),
+                Op::SpatialRoom(ref spec) => spec.validate().is_ok(),
                 Op::Reverb {
                     room_size,
                     time,
@@ -1511,6 +1565,10 @@ impl GraphTemplate {
                         && amplitudes.iter().map(|x| x.abs()).sum::<f64>() <= 1.0 + 1e-12
                 }
                 Op::FluePipe { min_hz } => min_hz.is_finite() && (20.0..=1000.0).contains(&min_hz),
+                Op::External(ref spec) => spec.valid(),
+                Op::BowedString(config) => config.valid()
+                    && crate::bowed::BowedString::new(config, 44_100.0).is_ok(),
+                Op::BowedPerformance { ref score, .. } => score.prepare(44_100.0).is_ok(),
                 Op::StringResonator { min_hz, decay } => {
                     min_hz.is_finite()
                         && (1.0..=20_000.0).contains(&min_hz)
@@ -1819,6 +1877,9 @@ pub struct GraphCost {
     /// Flat data stored by bounded table-driven nodes such as transport
     /// sequences, curves, harmonic amplitudes, breakpoint envelopes, and FDN delay layouts.
     pub data_entries: usize,
+    pub contact_steps: usize,
+    pub gesture_sample_work: usize,
+    pub gesture_block_work: usize,
     /// Sum of maximum delay-line lengths in host-rate f32 equivalents.
     /// Oversampled/f64 nodes charge the corresponding storage multiplier.
     /// At a known sample rate this estimates dominant state-memory allocation;
@@ -1834,12 +1895,17 @@ pub struct GraphLimits {
     pub input_channels: usize,
     pub output_channels: usize,
     pub data_entries: usize,
+    pub contact_steps: usize,
+    pub gesture_sample_work: usize,
+    pub gesture_block_work: usize,
     pub delay_buffer_seconds: f64,
     pub tail_seconds: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GraphLimitError {
+    ContactWork {found:usize,limit:usize},
+    GestureWork {sample:usize,block:usize},
     Nodes { found: usize, limit: usize },
     Connections { found: usize, limit: usize },
     InputChannels { found: usize, limit: usize },
@@ -1852,6 +1918,8 @@ pub enum GraphLimitError {
 impl core::fmt::Display for GraphLimitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            GraphLimitError::ContactWork {found,limit}=>write!(f,"bowed contact work {found} exceeds publication limit {limit}"),
+            GraphLimitError::GestureWork {sample,block}=>write!(f,"bowed gesture delivery exceeds publication limits ({sample}/sample, {block}/64 frames)"),
             GraphLimitError::Nodes { found, limit } => {
                 write!(f, "graph has {found} nodes, more than the limit of {limit}")
             }

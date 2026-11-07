@@ -93,3 +93,40 @@ do
     return sum
   end
 end
+
+-- Frequency-selective M/S field, composed from existing bounded DSP nodes.
+-- Input is mono. The direct signal remains the mid channel: (L+R)/2 = source.
+-- The room belongs downstream, preferably shared by the complete instrument.
+do
+  local fields = {width=true, cutoff=true, delay_a_ms=true, delay_b_ms=true}
+  local function bounded(value, name, low, high)
+    if type(value) ~= "number" or value ~= value or value < low or value > high then
+      error(name .. " must be a finite number in " .. low .. ".." .. high)
+    end
+    return value
+  end
+  function organ_space(source, spec)
+    spec = spec or {}
+    if type(spec) ~= "table" then error("organ_space expects an options table") end
+    for key in pairs(spec) do
+      if not fields[key] then error("unknown organ space field: " .. tostring(key)) end
+    end
+    local width = spec.width or .75
+    local cutoff = spec.cutoff or 350
+    -- Width and crossover accept graph signals; scalar mistakes remain errors.
+    if type(width) == "number" then bounded(width, "organ width", 0, 2) end
+    if type(cutoff) == "number" then bounded(cutoff, "organ cutoff", 100, 4000) end
+    width = clamp(width, 0, 2)
+    cutoff = clamp(cutoff, 100, 4000)
+    local a = bounded(spec.delay_a_ms or 11, "organ delay_a_ms", 1, 50)
+    local b = bounded(spec.delay_b_ms or 23, "organ delay_b_ms", 1, 50)
+    -- Two cascaded highpasses suppress bass in the side path. Unequal delays
+    -- give a frequency-dependent phase field, not a measured room response.
+    local upper = source >> highpass(cutoff, .707) >> highpass(cutoff, .707)
+    local side = ((upper >> delay(ms(a))) - (upper >> delay(ms(b)))) * width * .5
+    return ((source + side) | (source - side)) >> (mul(1) | mul(1))
+  end
+  function spatial_organ(hz, stops, space)
+    return organ_space(organ(hz, stops), space)
+  end
+end

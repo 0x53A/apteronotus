@@ -5,5 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+apteronotus-transport = { version = "0.1.0", path = "../transport" }
 apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
-fundsp = { version = "0.23.0", default-features = false, features = ["std"] }
+fundsp = { version = "0.23.0", default-features = false, features = ["std", "fft"] }
+fft-convolver = "0.3.0"
+wide = { version = "1.5.0", default-features = false }
+thingbuf = { version = "0.1.6", default-features = false, features = ["alloc"] }

@@ -8,7 +8,7 @@
 
 use apteronotus_synth::{
     AudioInputLayout, BusLayout, ControlLayout, ControlStore, LowerError, PatchTemplate,
-    instantiate_patch_routed_at, instantiate_patch_routed_with_audio_inputs_at,
+    prepare_patch_routed,
 };
 use fundsp::net::Net;
 use fundsp::prelude32::{AudioUnit, ReplayMode, Sequencer, pass, zero};
@@ -24,6 +24,7 @@ pub struct PersistentRuntime {
     processor: Option<Box<dyn AudioUnit>>,
     runs: usize,
     external_channels: usize,
+    sample_rate: f64,
 }
 
 impl PersistentRuntime {
@@ -45,7 +46,7 @@ impl PersistentRuntime {
         patches: impl IntoIterator<Item = &'a PatchTemplate>,
         transport_seconds: f64,
     ) -> Result<PersistentRuntime, PersistentError> {
-        Self::new_inner(layout, controls, None, patches, transport_seconds)
+        Self::new_inner(layout, controls, None, patches, transport_seconds, 44_100.0)
     }
 
     /// Construct a persistent arena whose processor exposes the program's
@@ -74,7 +75,22 @@ impl PersistentRuntime {
             Some(audio_inputs),
             patches,
             transport_seconds,
+            44_100.0,
         )
+    }
+
+    /// Prepare an arena at the actual offline or device clock before activation.
+    /// Call from the native output preparation factory after device selection.
+    /// Stateful nodes still start with empty history at a nonzero transport time.
+    pub fn prepare<'a>(
+        layout: &BusLayout,
+        controls: &ControlLayout,
+        audio_inputs: Option<&AudioInputLayout>,
+        patches: impl IntoIterator<Item = &'a PatchTemplate>,
+        transport_seconds: f64,
+        sample_rate: f64,
+    ) -> Result<PersistentRuntime, PersistentError> {
+        Self::new_inner(layout, controls, audio_inputs, patches, transport_seconds, sample_rate)
     }
 
     fn new_inner<'a>(
@@ -83,7 +99,11 @@ impl PersistentRuntime {
         audio_inputs: Option<&AudioInputLayout>,
         patches: impl IntoIterator<Item = &'a PatchTemplate>,
         transport_seconds: f64,
+        sample_rate: f64,
     ) -> Result<PersistentRuntime, PersistentError> {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return Err(PersistentError::InvalidPreparationRate(sample_rate));
+        }
         let controls = ControlStore::new(controls);
         let lanes = layout.total_channels();
         let external_channels = audio_inputs.map_or(0, AudioInputLayout::total_channels);
@@ -100,16 +120,9 @@ impl PersistentRuntime {
                     found: inputs,
                 });
             }
-            let unit = match audio_inputs {
-                Some(audio_inputs) => instantiate_patch_routed_with_audio_inputs_at(
-                    patch,
-                    layout,
-                    &controls,
-                    audio_inputs,
-                    transport_seconds,
-                ),
-                None => instantiate_patch_routed_at(patch, layout, &controls, transport_seconds),
-            }
+            let unit = prepare_patch_routed(
+                patch, layout, &controls, audio_inputs, transport_seconds, sample_rate,
+            )
             .map_err(|source| PersistentError::Lower { index, source })?;
             if inputs == 0 {
                 sources.push(unit);
@@ -119,13 +132,14 @@ impl PersistentRuntime {
             runs += 1;
         }
 
-        let processor = build_processor(lanes, external_channels, sources, processors);
+        let processor = build_processor(lanes, external_channels, sources, processors, sample_rate);
         Ok(PersistentRuntime {
             layout: layout.clone(),
             controls,
             processor: Some(Box::new(processor)),
             runs,
             external_channels,
+            sample_rate,
         })
     }
 
@@ -168,6 +182,7 @@ impl PersistentRuntime {
 
         let lanes = self.layout.total_channels();
         let mut net = Net::new(lanes, lanes);
+        net.set_sample_rate(self.sample_rate);
         let processor = net.push(processor);
         for lane in 0..lanes {
             let input = net.push(Box::new(pass()));
@@ -197,8 +212,10 @@ fn build_processor(
     external_channels: usize,
     sources: Vec<Box<dyn AudioUnit>>,
     processors: Vec<Box<dyn AudioUnit>>,
+    sample_rate: f64,
 ) -> Net {
     let mut net = Net::new(lanes + external_channels, lanes);
+    net.set_sample_rate(sample_rate);
 
     // Start each lane as an exact pass-through from the voice sequencer.
     let mut current = Vec::with_capacity(lanes);
@@ -245,6 +262,7 @@ fn build_processor(
 
 #[derive(Debug)]
 pub enum PersistentError {
+    InvalidPreparationRate(f64),
     RunInputChannels {
         index: usize,
         expected: usize,
@@ -259,6 +277,7 @@ pub enum PersistentError {
 impl core::fmt::Display for PersistentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            PersistentError::InvalidPreparationRate(rate) => write!(f, "preparation sample rate must be finite and positive, got {rate}"),
             PersistentError::RunInputChannels {
                 index,
                 expected,

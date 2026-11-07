@@ -1,19 +1,23 @@
+use crate::midi_input::{MidiPacket, MidiReceiver};
 use apteronotus_live::{
-    AudioOutput, ExternalOnset, InputBinding, MasterGain, PersistentRuntime, PitchScheduler,
-    ProgramScheduler, RevisionSlot, RoutedRuntime, schedule_external_routed,
+    AudioOutput, ExternalOnset, InputBinding, MasterGain, MidiMessage, MidiVoices,
+    PersistentRuntime, PitchScheduler, ProgramScheduler, RevisionSlot, RoutedRuntime,
+    schedule_external_routed,
 };
 use apteronotus_lua::{Evaluator, Program, Track};
 use apteronotus_pattern::{ControlValue, Frac, Span, Value};
 // The device-free half of a Run — what the program is, and whether it reaches
 // audio at all — is shared with the offline renderer. Two copies of this would
 // mean the file a render is measured from could disagree with the sound.
-#[cfg(not(target_arch = "wasm32"))]
-use apteronotus_render::persistent_runtime_at;
+#[cfg(test)]
+pub(crate) use apteronotus_render::{persistent_runtime, persistent_runtime_at};
+use apteronotus_render::persistent_runtime_prepared;
 pub(crate) use apteronotus_render::{
-    needs_persistent_runtime, persistent_runtime, playable_channels, scheduled_runs,
+    needs_persistent_runtime, playable_channels, scheduled_runs,
     scheduled_tracks,
 };
 use apteronotus_synth::{ParamId, ParamValue};
+use fundsp::prelude32::AudioUnit;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,8 +31,9 @@ use web_time::Instant;
 const LOOKAHEAD_SECONDS: f64 = 0.20;
 const MIN_REVISION_WINDOW_SECONDS: f64 = 0.05;
 const MIN_EXTERNAL_LATENCY_SECONDS: f64 = 0.03;
+const MIDI_LEAD_SECONDS: f64 = 0.010;
 #[cfg(not(target_arch = "wasm32"))]
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(not(target_arch = "wasm32"))]
 const REPLACEMENT_LEAD_SECONDS: f64 = LOOKAHEAD_SECONDS * 2.0;
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,8 +43,10 @@ pub enum Command {
     Run {
         request: u64,
         source: String,
+        externals: apteronotus_lua::ExternalRegistry,
     },
     Stop,
+    MidiPanic,
     SetControl {
         name: String,
         value: f64,
@@ -75,6 +82,8 @@ pub enum PlayerEvent {
         request: u64,
         message: String,
     },
+    ControlsChanged(Vec<ControlView>),
+    OutputWorkload(apteronotus_live::OutputWorkload),
     Stopped,
     RuntimeError(String),
 }
@@ -96,12 +105,12 @@ pub struct PlayerWorker {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PlayerWorker {
-    pub fn spawn() -> (PlayerWorker, Sender<Command>, Receiver<PlayerEvent>) {
+    pub fn spawn(midi_rx: MidiReceiver) -> (PlayerWorker, Sender<Command>, Receiver<PlayerEvent>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("apteronotus-player".into())
-            .spawn(move || run_worker(command_rx, event_tx))
+            .spawn(move || run_worker(command_rx, event_tx, midi_rx))
             .expect("failed to start the player worker");
         (
             PlayerWorker {
@@ -131,11 +140,12 @@ pub struct PlayerWorker {
     command_rx: Receiver<Command>,
     event_tx: Sender<PlayerEvent>,
     player: Player,
+    midi_rx: MidiReceiver,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl PlayerWorker {
-    pub fn spawn() -> (PlayerWorker, Sender<Command>, Receiver<PlayerEvent>) {
+    pub fn spawn(midi_rx: MidiReceiver) -> (PlayerWorker, Sender<Command>, Receiver<PlayerEvent>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         (
@@ -143,6 +153,7 @@ impl PlayerWorker {
                 command_rx,
                 event_tx,
                 player: Player::new(),
+                midi_rx,
             },
             command_tx,
             event_rx,
@@ -152,12 +163,8 @@ impl PlayerWorker {
     pub fn pump(&mut self) {
         while let Ok(command) = self.command_rx.try_recv() {
             let event = match command {
-                Command::Run { request, source } => {
-                    match self
-                        .player
-                        .evaluator
-                        .evaluate(&source)
-                        .map_err(|error| error.to_string())
+                Command::Run { request, source, externals } => {
+                    match crate::externals::evaluate(self.player.evaluator,&source,&externals)
                         .and_then(|candidate| self.player.activate(candidate))
                     {
                         Ok(activation) => PlayerEvent::Active {
@@ -172,6 +179,11 @@ impl PlayerWorker {
                         },
                         Err(message) => PlayerEvent::Error { request, message },
                     }
+                }
+                Command::MidiPanic => {
+                    self.midi_rx.drain();
+                    self.player.midi_panic();
+                    continue;
                 }
                 Command::Stop => match self.player.stop() {
                     Ok(()) => PlayerEvent::Stopped,
@@ -195,6 +207,15 @@ impl PlayerWorker {
             }
         }
 
+        if let Err(message) = self.player.poll_midi(&self.midi_rx) {
+            let _ = self.event_tx.send(PlayerEvent::RuntimeError(message));
+        }
+        if let Some(controls) = self.player.take_midi_controls() {
+            let _ = self.event_tx.send(PlayerEvent::ControlsChanged(controls));
+        }
+        if let Some(workload)=self.player.take_workload_update() {
+            let _=self.event_tx.send(PlayerEvent::OutputWorkload(workload));
+        }
         if let Err(message) = self.player.fill_active_lookahead() {
             let _ = self.event_tx.send(PlayerEvent::RuntimeError(message));
         }
@@ -217,15 +238,35 @@ struct Player {
     persistent: Option<PersistentRuntime>,
     external_levels: Vec<bool>,
     external_ordinal: u64,
+    midi_voices: MidiVoices,
+    bowed_keys: std::collections::HashMap<apteronotus_synth::ControlId,apteronotus_live::BowedKeyboard>,
+    bowed_ports: std::collections::HashMap<apteronotus_synth::ControlId,apteronotus_synth::bowed_host::BowedHandle>,
+    midi_program: Arc<Program>,
+    midi_pending: std::collections::VecDeque<(f64, Arc<Program>)>,
+    midi_ordinal: u64,
+    midi_controls_changed: bool,
     activation_generation: u64,
     /// Where the master fader sits. The *number* is the player's, because the
     /// fader itself belongs to a stream and a hard reset opens a new one; a
     /// level that reset with the transport would be a fader the user has to
     /// find again after every incompatible edit.
     volume_decibels: f32,
+    reported_prepared_fault: Option<apteronotus_synth::ExternalFault>,
+    workload_reported_frames:u64,
 }
 
 impl Player {
+    fn take_workload_update(&mut self)->Option<apteronotus_live::OutputWorkload> {
+        let output=self.output.as_ref()?;
+        let observed=output.workload()?;
+        if self.workload_reported_frames==0
+            || observed.frames>=self.workload_reported_frames.saturating_add(output.sample_rate() as u64)
+            || observed.frames<self.workload_reported_frames {
+            self.workload_reported_frames=observed.frames;
+            Some(observed)
+        } else {None}
+    }
+
     fn new() -> Player {
         Player {
             evaluator: Evaluator::default(),
@@ -239,30 +280,18 @@ impl Player {
             persistent: None,
             external_levels: Vec::new(),
             external_ordinal: 0,
+            midi_voices: MidiVoices::default(),
+            bowed_keys: std::collections::HashMap::new(),
+            bowed_ports: std::collections::HashMap::new(),
+            midi_program: Arc::new(Program::default()),
+            midi_pending: Default::default(),
+            midi_ordinal: 0,
+            midi_controls_changed: false,
             activation_generation: 0,
             volume_decibels: MasterGain::MAX_DECIBELS,
+            reported_prepared_fault: None,
+            workload_reported_frames:0,
         }
-    }
-
-    /// Open a stream at an explicit initial level.
-    ///
-    /// Every open goes through here. A stream is built paused, so applying the
-    /// level before anyone can call `play` is what stops a replacement from
-    /// rendering its first block at unity — and routing both open sites through
-    /// one function is what stops the next one from forgetting to.
-    fn open_output(
-        &self,
-        candidate: &Program,
-        channels: usize,
-        persistent: Option<&mut PersistentRuntime>,
-        initial_decibels: f32,
-    ) -> Result<AudioOutput, String> {
-        let output = match persistent {
-            Some(runtime) => open_persistent_output(candidate, runtime, initial_decibels),
-            None => AudioOutput::open_at_level(channels, initial_decibels),
-        }
-        .map_err(|error| error.to_string())?;
-        Ok(output)
     }
 
     /// Move the master fader. An atomic store into a node the running graph
@@ -275,18 +304,47 @@ impl Player {
         }
     }
 
-    fn activate(&mut self, mut candidate: Program) -> Result<Activation, String> {
+    fn activate(&mut self, candidate: Program) -> Result<Activation, String> {
+        let clock = self.clock_started;
+        let origin = self.sequencer_origin_seconds;
+        if let Some(runtime)=&self.persistent {
+            for binding in &self.revisions.active().program.midi_violins {
+                if let Some(handle)=runtime.controls().bowed_handle(binding.key) {self.bowed_ports.insert(binding.key,handle);}
+            }
+        }
+        let activation = self.activate_candidate(candidate)?;
+        if clock != self.clock_started || origin != self.sequencer_origin_seconds {
+            self.midi_voices = MidiVoices::default();
+            self.bowed_keys.clear();
+            self.bowed_ports.clear();
+            self.midi_program = Arc::new(Program::default());
+            self.midi_pending.clear();
+        }
+        let effective = activation
+            .program
+            .tempo
+            .cycle_to_seconds(activation.effective_at);
+        self.midi_pending
+            .push_back((effective, Arc::clone(&activation.program)));
+        Ok(activation)
+    }
+
+    fn activate_candidate(&mut self, mut candidate: Program) -> Result<Activation, String> {
         let channels = playable_channels(&candidate)?;
         let needs_persistent = needs_persistent_runtime(&candidate);
         let active_persistent = self.persistent.is_some();
         let tempo_changed =
             self.output.is_some() && candidate.tempo != self.revisions.active().program.tempo;
+        let mut room_edits=Vec::new();
         let reuse_persistent = self.output.is_some()
             && !tempo_changed
             && active_persistent
             && needs_persistent
             && self.output_channels == Some(channels)
-            && candidate.reuse_persistent_from(&self.revisions.active().program);
+            && if let Some(changes)=candidate.reuse_with_room_edits(&self.revisions.active().program) {
+                room_edits=self.persistent.as_ref().expect("active arena").controls().prepare_room_edits(&changes).map_err(str::to_owned)?;
+                true
+            } else {false};
         let reset = needs_hard_reset(
             self.output.is_some(),
             active_persistent,
@@ -308,11 +366,18 @@ impl Player {
         ) {
             return self.crossfade_replace(candidate, channels);
         }
-        let mut persistent = (needs_persistent && !reuse_persistent)
-            .then(|| persistent_runtime(&candidate))
-            .transpose()?;
+        // Select the clock and prepare the new arena together. The candidate
+        // stream remains paused; no active state changes if preparation fails.
+        let (mut pending_output, persistent) = if needs_persistent && !reuse_persistent {
+            let (output, runtime) = open_prepared_persistent_output(
+                &candidate, 0.0, self.volume_decibels,
+            )?;
+            (Some(output), Some(runtime))
+        } else {
+            (None, None)
+        };
         if reset {
-            return self.hard_reset(candidate, channels, persistent);
+            return self.hard_reset(candidate, channels, persistent, pending_output);
         }
         if let Some(active_channels) = self.output_channels
             && channels != active_channels
@@ -351,6 +416,9 @@ impl Player {
                 .expect("playable_channels checked every track");
             PitchScheduler::sequencer(first_template)
         };
+        if let Some(output) = pending_output.as_ref().or(self.output.as_ref()) {
+            preview.set_sample_rate(output.sample_rate());
+        }
         let mut preview_scheduler = ProgramScheduler::new(boundary);
         let preview_tracks = scheduled_tracks(&candidate)?;
         let preview_runs = scheduled_runs(&candidate)?;
@@ -382,12 +450,11 @@ impl Player {
         };
 
         if self.output.is_none() {
-            self.output = Some(self.open_output(
-                &candidate,
-                channels,
-                persistent.as_mut(),
-                self.volume_decibels,
-            )?);
+            self.output = Some(match pending_output.take() {
+                Some(output) => output,
+                None => AudioOutput::open_at_level(channels, self.volume_decibels)
+                    .map_err(|error| error.to_string())?,
+            });
             self.output_channels = Some(channels);
         }
 
@@ -398,9 +465,11 @@ impl Player {
             .submit(candidate, boundary, |program| program.validate(limits))
             .map_err(|error| error.to_string())?;
         let revision = self.revisions.advance_to(boundary);
-        self.fallback = (!previous.tracks.is_empty()).then_some(previous);
+        self.fallback =
+            (!previous.tracks.is_empty() || !previous.midi_bindings.is_empty() || !previous.midi_violins.is_empty()).then_some(previous);
         if !reuse_persistent {
             self.persistent = persistent;
+            self.reported_prepared_fault = None;
         }
         self.sync_external_levels(&revision.program);
         // Track positions are not yet reconciled across source evaluations.
@@ -424,6 +493,8 @@ impl Player {
                 .map_err(|error| error.to_string())?;
             self.clock_started = Some(Instant::now());
         }
+
+        for edit in room_edits {edit.commit();}
 
         self.activation_generation = self.activation_generation.saturating_add(1);
         let controls = control_views(&self.revisions.active().program, self.persistent.as_ref());
@@ -463,11 +534,17 @@ impl Player {
         let boundary = self.scheduler.frontier();
         let boundary_seconds = candidate.tempo.cycle_to_seconds(boundary);
         let target_seconds = boundary_seconds + LOOKAHEAD_SECONDS;
-        let mut persistent = persistent_runtime_at(&candidate, boundary_seconds)?;
+        let (mut output, persistent) = open_prepared_persistent_output(
+            &candidate, boundary_seconds, MasterGain::MIN_DECIBELS,
+        )?;
+        if output.sample_rate() != self.output.as_ref().expect("active output").sample_rate() {
+            return Err("replacement device clock changed; previous performance remains active".into());
+        }
 
-        // Prove the complete candidate window before acquiring a device
-        // stream or changing any live handle.
+        // Prove the complete candidate window against the selected clock.
+        // The candidate stream is paused and active handles are untouched.
         let mut preview = persistent.sequencer();
+        preview.set_sample_rate(output.sample_rate());
         let mut preview_scheduler = ProgramScheduler::new(boundary);
         let preview_report = preview_scheduler
             .fill_routed_program_to_seconds_tempo_map_from(
@@ -484,12 +561,6 @@ impl Player {
             )
             .map_err(|error| error.to_string())?;
 
-        let mut output = self.open_output(
-            &candidate,
-            channels,
-            Some(&mut persistent),
-            MasterGain::MIN_DECIBELS,
-        )?;
         let mut scheduler = ProgramScheduler::new(boundary);
         scheduler
             .fill_routed_program_to_seconds_tempo_map_from(
@@ -535,6 +606,7 @@ impl Player {
         self.sequencer_origin_seconds = boundary_seconds;
         self.fallback = None;
         self.persistent = Some(persistent);
+        self.reported_prepared_fault = None;
         let active = Arc::clone(&self.revisions.active().program);
         self.sync_external_levels(&active);
 
@@ -553,7 +625,8 @@ impl Player {
         &mut self,
         candidate: Program,
         channels: usize,
-        mut persistent: Option<PersistentRuntime>,
+        persistent: Option<PersistentRuntime>,
+        pending_output: Option<AudioOutput>,
     ) -> Result<Activation, String> {
         let target_seconds = LOOKAHEAD_SECONDS.max(MIN_REVISION_WINDOW_SECONDS);
         let mut preview = if let Some(runtime) = &persistent {
@@ -566,6 +639,9 @@ impl Player {
                 .ok_or_else(|| "a voice-only program has no playable track".to_string())?;
             PitchScheduler::sequencer(first)
         };
+        if let Some(output) = pending_output.as_ref() {
+            preview.set_sample_rate(output.sample_rate());
+        }
         let mut preview_scheduler = ProgramScheduler::default();
         let preview_tracks = scheduled_tracks(&candidate)?;
         let preview_runs = scheduled_runs(&candidate)?;
@@ -593,12 +669,11 @@ impl Player {
         // Construct the complete replacement stream while the old stream is
         // still playing. Only a fully lowered, filled, and opened candidate is
         // allowed to interrupt the active program.
-        let mut output = self.open_output(
-            &candidate,
-            channels,
-            persistent.as_mut(),
-            self.volume_decibels,
-        )?;
+        let mut output = match pending_output {
+            Some(output) => output,
+            None => AudioOutput::open_at_level(channels, self.volume_decibels)
+                .map_err(|error| error.to_string())?,
+        };
         let mut scheduler = ProgramScheduler::default();
         let tracks = scheduled_tracks(&candidate)?;
         let runs = scheduled_runs(&candidate)?;
@@ -643,6 +718,7 @@ impl Player {
         self.sequencer_origin_seconds = 0.0;
         self.fallback = None;
         self.persistent = persistent;
+        self.reported_prepared_fault = None;
         let active = Arc::clone(&self.revisions.active().program);
         self.sync_external_levels(&active);
 
@@ -685,6 +761,11 @@ impl Player {
     /// the transport, which makes the next Run a first Run again — the one
     /// path `hard_reset` already guarantees.
     fn stop(&mut self) -> Result<(), String> {
+        self.midi_voices = MidiVoices::default();
+            self.bowed_keys.clear();
+            self.bowed_ports.clear();
+        self.midi_program = Arc::new(Program::default());
+        self.midi_pending.clear();
         let Some(output) = self.output.take() else {
             return Ok(());
         };
@@ -697,6 +778,7 @@ impl Player {
         self.sequencer_origin_seconds = 0.0;
         self.fallback = None;
         self.persistent = None;
+        self.reported_prepared_fault = None;
         self.external_levels.clear();
         self.external_ordinal = 0;
         paused
@@ -724,6 +806,10 @@ impl Player {
         let Some(started) = self.clock_started else {
             return Ok(());
         };
+        let fault = self.persistent.as_ref().and_then(|runtime| runtime.controls().external_fault());
+        if new_prepared_fault(&mut self.reported_prepared_fault, fault.clone()) {
+            return Err(fault.expect("new fault is present").to_string());
+        }
         let target_seconds = started.elapsed().as_secs_f64() + LOOKAHEAD_SECONDS;
         if target_seconds
             <= self
@@ -782,6 +868,156 @@ impl Player {
                 .map_err(|error| error.to_string())?;
         }
         self.poll_external_triggers(&program)?;
+        Ok(())
+    }
+
+    fn midi_panic(&mut self) {
+        for port in self.bowed_ports.values() {port.panic_detach();}
+        if let Some(runtime)=&self.persistent {
+            for binding in &self.midi_program.midi_violins {
+                if let Some(handle)=runtime.controls().bowed_handle(binding.key) {handle.panic_detach();}
+            }
+        }
+        self.bowed_keys.clear();
+        if let Some(output) = &mut self.output {
+            let at = output.rendered_seconds() + MIDI_LEAD_SECONDS;
+            self.midi_voices
+                .all_notes_off(None, at, output.sequencer_mut());
+        }
+    }
+
+    fn poll_midi(&mut self, receiver: &MidiReceiver) -> Result<(), String> {
+        let (overflow, packets) = receiver.drain();
+        if overflow {
+            self.midi_panic();
+            return Err(
+                "MIDI input queue overflowed; held keys released. Play the keys again.".into(),
+            );
+        }
+        if let Some(output) = &self.output {
+            let now = output.rendered_seconds();
+            self.midi_voices.prune(now);
+            // Retire elapsed revisions even when no keys arrive. Keeping them
+            // until the next key would retain every edit in an idle session.
+            self.advance_midi_program(self.sequencer_origin_seconds + now);
+        }
+        for packet in packets {
+            if let Err(error) = self.midi_packet(packet) {
+                self.midi_panic();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn take_midi_controls(&mut self) -> Option<Vec<ControlView>> {
+        if !std::mem::take(&mut self.midi_controls_changed) {
+            return None;
+        }
+        // The UI exposes the latest accepted control layout. By name it also
+        // reflects CC writes from the revision still sounding at the frontier.
+        Some(control_views(
+            &self.revisions.active().program,
+            self.persistent.as_ref(),
+        ))
+    }
+
+    fn advance_midi_program(&mut self, seconds: f64) {
+        while self
+            .midi_pending
+            .front()
+            .is_some_and(|(at, _)| *at <= seconds)
+        {
+            let next = self.midi_pending.pop_front().expect("checked pending revision").1;
+            for binding in &self.midi_program.midi_violins {
+                if !next.midi_violins.contains(binding) {
+                    if let Some(runtime)=&self.persistent {
+                        if let Some(handle)=runtime.controls().bowed_handle(binding.key) {handle.panic_detach();}
+                    }
+                    if let Some(port)=self.bowed_ports.remove(&binding.key) {port.panic_detach();}
+                    self.bowed_keys.remove(&binding.key);
+                }
+            }
+            self.midi_program=next;
+        }
+    }
+
+    fn midi_packet(&mut self, packet: MidiPacket) -> Result<(), String> {
+        let Some(started) = self.clock_started else {
+            return Ok(());
+        };
+        if packet.observed < started {
+            return Ok(());
+        }
+        let Some(output) = &self.output else {
+            return Ok(());
+        };
+        // Schedule at the device's render frontier, never elapsed wall time.
+        // An underrun or browser pause must not become permanent extra latency.
+        let at = output.rendered_seconds() + MIDI_LEAD_SECONDS;
+        self.advance_midi_program(self.sequencer_origin_seconds + at);
+        let (Some(output), Some(runtime)) = (&mut self.output, &self.persistent) else {
+            return Ok(());
+        };
+        for binding in &self.midi_program.midi_violins {
+            let handle=runtime.controls().bowed_handle(binding.key).or_else(||self.bowed_ports.get(&binding.key).cloned()).ok_or("missing retained violin runtime")?;
+            // Retained instruments use their own transport clock, including after a compatible edit.
+            let gesture_at=self.sequencer_origin_seconds+at;
+            self.bowed_keys.entry(binding.key).or_default().message(packet.message,&handle,gesture_at,binding.channel,binding.min_key,binding.max_key).map_err(str::to_string)?;
+        }
+        match packet.message {
+            MidiMessage::ControlChange { channel, cc, value } => {
+                self.midi_controls_changed |=
+                    apply_midi_control(&self.midi_program, runtime.controls(), channel, cc, value)?;
+            }
+            MidiMessage::NoteOff { channel, key } => {
+                self.midi_voices
+                    .note_off(channel, key, at, output.sequencer_mut())
+            }
+            MidiMessage::AllNotesOff { channel } => {
+                self.midi_voices
+                    .all_notes_off(channel, at, output.sequencer_mut())
+            }
+            MidiMessage::NoteOn {
+                channel,
+                key,
+                velocity,
+            } => {
+                // Repeated note-on is an explicit retrigger. Release every old
+                // layer for this channel/key before creating the new layers.
+                self.midi_voices
+                    .note_off(channel, key, at, output.sequencer_mut());
+                let ordinal = self.midi_ordinal;
+                self.midi_ordinal = self.midi_ordinal.wrapping_add(1);
+                for (index, binding) in self.midi_program.midi_bindings.iter().enumerate() {
+                    if binding.channel.is_some_and(|c| c != channel) {
+                        continue;
+                    }
+                    let template = self
+                        .midi_program
+                        .voice(binding.voice)
+                        .ok_or_else(|| "MIDI binding refers to a missing voice".to_string())?;
+                    let seed = apteronotus_pattern::rand::mix(0x4d49_4449_4b45_5953 ^ ordinal)
+                        ^ apteronotus_pattern::rand::mix(
+                            (u64::from(channel) << 8) | u64::from(key),
+                        )
+                        ^ apteronotus_pattern::rand::mix(index as u64);
+                    self.midi_voices
+                        .note_on(
+                            channel,
+                            key,
+                            velocity,
+                            at,
+                            seed,
+                            template,
+                            &apteronotus_synth::EventRouting::new(),
+                            output.sequencer_mut(),
+                            RoutedRuntime::new(runtime.layout(), runtime.controls()),
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -901,6 +1137,16 @@ impl Player {
     }
 }
 
+/// Report one observed failure transition, without flooding each lookahead poll.
+fn new_prepared_fault(
+    previous: &mut Option<apteronotus_synth::ExternalFault>,
+    current: Option<apteronotus_synth::ExternalFault>,
+) -> bool {
+    let changed=current.is_some() && *previous!=current;
+    *previous=current;
+    changed
+}
+
 fn needs_hard_reset(
     output_open: bool,
     active_persistent: bool,
@@ -935,24 +1181,67 @@ fn can_crossfade_replace(
         && active_channels == Some(candidate_channels)
 }
 
-fn open_persistent_output(
+/// Open a paused candidate, retaining exactly the control arena that owns its
+/// prepared processor. Neither this helper nor its factory touches Player state.
+fn open_prepared_persistent_output(
     program: &Program,
-    runtime: &mut PersistentRuntime,
+    transport_seconds: f64,
     initial_decibels: f32,
-) -> Result<AudioOutput, apteronotus_live::OutputError> {
-    let requested_channels = program
-        .audio_inputs
-        .specs()
-        .first()
-        .map_or(0, |spec| spec.channels);
-    AudioOutput::open_processed_with_default_input_at_level(
-        runtime.layout().total_channels(),
-        runtime.layout().main_channels(),
-        runtime.take_processor_with_audio_inputs(),
-        runtime.external_channels(),
-        requested_channels,
-        initial_decibels,
-    )
+) -> Result<(AudioOutput, PersistentRuntime), String> {
+    open_prepared_persistent_with(program, transport_seconds, |prepare| {
+        let requested_channels = program.audio_inputs.specs().first().map_or(0, |s| s.channels);
+        AudioOutput::open_prepared_with_default_input_at_level(
+            program.buses.total_channels(), program.buses.main_channels(),
+            program.audio_inputs.total_channels(), requested_channels,
+            initial_decibels, prepare,
+        ).map_err(|error| error.to_string())
+    })
+}
+
+/// The injectable opener lets tests exercise the production preparation and
+/// ownership transfer without opening speakers. A real opener calls the factory
+/// once after selecting its clock and returns a paused stream.
+fn open_prepared_persistent_with<O>(
+    program: &Program,
+    transport_seconds: f64,
+    open: impl FnOnce(&mut dyn FnMut(f64) -> Result<Box<dyn fundsp::prelude32::AudioUnit>, String>) -> Result<O, String>,
+) -> Result<(O, PersistentRuntime), String> {
+    let mut runtime = None;
+    let mut called = false;
+    let output = open(&mut |rate| {
+        if called { return Err("persistent preparation factory called more than once".into()); }
+        called = true;
+        let mut prepared = persistent_runtime_prepared(program, transport_seconds, rate)?;
+        let processor = prepared.take_processor_with_audio_inputs();
+        runtime = Some(prepared);
+        Ok(processor)
+    })?;
+    let runtime = runtime.ok_or_else(|| "output did not prepare its persistent processor".to_string())?;
+    Ok((output, runtime))
+}
+
+fn apply_midi_control(
+    program: &Program,
+    controls: &apteronotus_synth::ControlStore,
+    channel: u8,
+    cc: u8,
+    value: u8,
+) -> Result<bool, String> {
+    let mut changed = false;
+    for binding in &program.midi_controls {
+        if binding.cc != cc || binding.channel.is_some_and(|c| c != channel) {
+            continue;
+        }
+        let spec = program
+            .controls
+            .spec(binding.control)
+            .ok_or_else(|| "MIDI mapping refers to a missing control".to_string())?;
+        controls
+            .set(binding.control, binding.value(spec, value))
+            .map_err(|error| error.to_string())?;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 fn control_views(program: &Program, persistent: Option<&PersistentRuntime>) -> Vec<ControlView> {
@@ -1021,7 +1310,7 @@ fn external_event_passes(track: &Track, event_seed: u64) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
+fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>, midi_rx: MidiReceiver) {
     let mut player = Player::new();
     let (evaluation_tx, evaluation_rx) = mpsc::channel();
     let mut evaluation_thread = None;
@@ -1031,7 +1320,7 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
     let mut awaited = None;
     loop {
         match command_rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Command::Run { request, source }) => {
+            Ok(Command::Run { request, source, externals }) => {
                 if evaluation_thread.is_some() {
                     let event = PlayerEvent::Error {
                         request,
@@ -1048,14 +1337,16 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
                         thread::Builder::new()
                             .name("apteronotus-evaluation".into())
                             .spawn(move || {
-                                let result = evaluator
-                                    .evaluate(&source)
-                                    .map_err(|error| error.to_string());
+                                let result = crate::externals::evaluate(evaluator,&source,&externals);
                                 let _ = result_tx.send((request, result));
                             })
                             .expect("failed to start an evaluation job"),
                     );
                 }
+            }
+            Ok(Command::MidiPanic) => {
+                midi_rx.drain();
+                player.midi_panic();
             }
             Ok(Command::Stop) => {
                 awaited = None;
@@ -1107,6 +1398,15 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>) {
             }
         }
 
+        if let Err(message) = player.poll_midi(&midi_rx) {
+            let _ = event_tx.send(PlayerEvent::RuntimeError(message));
+        }
+        if let Some(controls) = player.take_midi_controls() {
+            let _ = event_tx.send(PlayerEvent::ControlsChanged(controls));
+        }
+        if let Some(workload)=player.take_workload_update() {
+            let _=event_tx.send(PlayerEvent::OutputWorkload(workload));
+        }
         if let Err(message) = player.fill_active_lookahead()
             && event_tx.send(PlayerEvent::RuntimeError(message)).is_err()
         {
@@ -1139,6 +1439,101 @@ mod tests {
     };
     use apteronotus_lua::evaluate;
     use apteronotus_pattern::Frac;
+
+    #[test]
+    fn prepared_runtime_faults_report_once_and_can_report_after_recovery() {
+        let fault=Some(apteronotus_synth::ExternalFault{instance:0,kind:"test".into(),reason:"latched silent".into()});
+        let mut previous=None;
+        assert!(!super::new_prepared_fault(&mut previous,None));
+        assert!(super::new_prepared_fault(&mut previous,fault.clone()));
+        assert!(!super::new_prepared_fault(&mut previous,fault.clone()));
+        assert!(!super::new_prepared_fault(&mut previous,None));
+        assert!(super::new_prepared_fault(&mut previous,fault.clone()));
+    }
+
+    #[test]
+    fn selected_clock_factory_retains_the_playing_processors_control_arena() {
+        let program = evaluate(r#"
+            local level=control{name="level",range={0,1},default=.2}
+            run(patch{graph=function() return sine(1000)*level end})
+        "#).unwrap();
+        for rate in [32_000.0, 48_000.0, 96_000.0] {
+            let (mut unit, runtime) = super::open_prepared_persistent_with(
+                &program, 0.0, |prepare| prepare(rate),
+            ).unwrap();
+            let mut reference = super::persistent_runtime_prepared(&program, 0.0, rate).unwrap();
+            let mut expected = reference.take_processor_with_audio_inputs();
+            let input=vec![0.;unit.inputs()];
+            let mut actual=vec![0.;unit.outputs()];
+            let mut target=vec![0.;expected.outputs()];
+            for _ in 0..4096 {
+                unit.tick(&input,&mut actual);expected.tick(&input,&mut target);
+                assert_eq!(actual,target);
+            }
+            runtime.controls().set(program.controls.id("level").unwrap(),0.).unwrap();
+            for _ in 0..128 {
+                unit.tick(&input,&mut actual);
+                assert!(actual.iter().all(|v| *v==0.));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_clock_factory_preserves_transport_coordinate_and_rejects_bad_rate() {
+        let program=evaluate(r#"
+            tempo(120)
+            run(patch{graph=function()
+                return control_signal("0.2 0.8" >> segment(2),bars(1))
+            end})
+        "#).unwrap();
+        let (mut unit, _) = super::open_prepared_persistent_with(&program,1.5,|prepare|prepare(48_000.)).unwrap();
+        let mut output=vec![0.;unit.outputs()];
+        unit.tick(&vec![0.;unit.inputs()],&mut output);
+        assert!(output.iter().all(|x|(*x-0.8).abs()<1e-6));
+        let result=super::open_prepared_persistent_with(&program,0.,|prepare|prepare(f64::NAN));
+        assert!(result.err().unwrap().contains("sample rate"));
+    }
+
+    #[test]
+    fn output_open_failure_does_not_publish_a_candidate_arena() {
+        let program=evaluate(r#"run(patch{graph=function()return dc(.2)end})"#).unwrap();
+        let result:Result<((),_),String>=super::open_prepared_persistent_with(&program,0.,|prepare| {
+            let _candidate=prepare(48_000.)?;
+            Err("injected stream failure".into())
+        });
+        assert_eq!(result.err().unwrap(),"injected stream failure");
+        let skipped:Result<((),_),String>=super::open_prepared_persistent_with(&program,0.,|_|Ok(()));
+        assert!(skipped.err().unwrap().contains("did not prepare"));
+        let repeated=super::open_prepared_persistent_with(&program,0.,|prepare| {
+            let _first=prepare(48_000.)?;
+            prepare(48_000.)
+        });
+        assert!(repeated.err().unwrap().contains("more than once"));
+    }
+
+    #[test]
+    fn midi_sliders_filter_channels_span_ranges_and_update_the_visible_faders() {
+        let program = evaluate(
+            r#"
+            local c=control{name="expression",range={-2,4},default=1}
+            local d=control{name="brightness",range={0,1},default=.5}
+            midi(c,{cc=82,channel=3})
+            midi(d,{cc=83})
+        "#,
+        )
+        .unwrap();
+        let runtime = persistent_runtime(&program).unwrap();
+        let id = program.controls.id("expression").unwrap();
+        assert!(!super::apply_midi_control(&program, runtime.controls(), 1, 82, 127).unwrap());
+        assert_eq!(runtime.controls().value(id).unwrap(), 1.0);
+        assert!(super::apply_midi_control(&program, runtime.controls(), 2, 82, 0).unwrap());
+        assert_eq!(runtime.controls().value(id).unwrap(), -2.0);
+        super::apply_midi_control(&program, runtime.controls(), 2, 82, 127).unwrap();
+        assert_eq!(control_views(&program, Some(&runtime))[0].value, 4.0);
+        assert!(super::apply_midi_control(&program, runtime.controls(), 15, 83, 0).unwrap());
+        assert_eq!(control_views(&program, Some(&runtime))[1].value, 0.0);
+        assert!(!super::apply_midi_control(&program, runtime.controls(), 2, 84, 0).unwrap());
+    }
 
     /// The fader belongs to the player, not to a stream and not to a program.
     /// Setting it with the device closed has to be legal, because that is the
@@ -1197,19 +1592,19 @@ mod tests {
     }
 
     #[test]
-    fn shipped_synthwave_accepts_its_mono_pad_in_the_stereo_routed_layout() {
-        let program = evaluate(include_str!("../../../songs/synthwave.eod")).unwrap();
+    fn mono_voice_is_accepted_in_stereo_routed_layout() {
+        let program = evaluate(include_str!("../../test-fixtures/routed.eod")).unwrap();
         assert_eq!(playable_channels(&program).unwrap(), 2);
     }
 
     #[test]
-    fn shipped_jamming_live_trigger_keeps_controls_and_degradation() {
-        let program = evaluate(include_str!("../../../songs/jamming.eod")).unwrap();
+    fn live_trigger_keeps_controls_and_degradation() {
+        let program = evaluate(include_str!("../../test-fixtures/external-trigger.eod")).unwrap();
         let track = program
             .tracks
             .iter()
             .find(|track| track.external_trigger.is_some())
-            .expect("jamming must contain its live onset-triggered bell");
+            .expect("fixture must contain its live onset-triggered voice");
 
         assert!(!track.external_controls.is_empty());
         assert!(

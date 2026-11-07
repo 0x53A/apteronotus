@@ -141,7 +141,8 @@ impl TempoMap {
         self.integrate(begin.to_f64(), end.to_f64())
     }
 
-    fn seconds_at_f64(&self, cycle: f64) -> f64 {
+    /// Continuous coordinate conversion for compiled gesture endpoints.
+    pub fn seconds_at_f64(&self, cycle: f64) -> f64 {
         if cycle >= 0.0 {
             self.integrate(0.0, cycle)
         } else {

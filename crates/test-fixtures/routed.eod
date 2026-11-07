@@ -1,0 +1,10 @@
+tempo(120)
+local room = send { graph = delay(ms(40)) >> feedback(0.35), level = 0.3 }
+local mono = voice { graph = function(n)
+  return sine(n.hz) * adsr(ms(5), ms(30), 0.7, ms(100)) * 0.15
+end }
+local stereo = voice { graph = function(n)
+  return sine(n.hz) * adsr(ms(5), ms(30), 0.7, ms(100)) * 0.1 >> pan(0)
+end }
+play(mono, pattern("c4 e4") >> to(room, 0.5))
+play(stereo, pattern("g4 c5") >> to(room, 0.5))

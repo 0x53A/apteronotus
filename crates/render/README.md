@@ -7,53 +7,32 @@ are not already available.
 
 ```sh
 cargo run --release -p apteronotus-render -- --list-songs
-cargo run --release -p apteronotus-render -- --song nightshift-dub --cycles 32 --tail 6
-cargo run --release -p apteronotus-render -- songs/my-edit.eod --seconds 30
+cargo run --release -p apteronotus-render -- my-edit.eod --seconds 30
 ```
 
-`--song` reads the embedded corpus, so an installed renderer works from any
-working directory. It writes `<name>.wav` in that directory. A source filename
-instead defaults to a WAV beside that source. `-o path.wav` overrides either
-default. Existing destinations require `--force`; creation without that flag
-is exclusive even when two renders finish at the same time.
-
-The editor's **Library** menu exposes the same songs alongside the four short
-teaching examples. Opening a document retains the displaced buffer in
-**Restore previous buffer**. Run remains an explicit command.
-Browsing further untouched library documents retains that recovery buffer.
-If you edit a loaded document, its edited text becomes the next buffer saved
-when you choose another document. There is one recovery slot.
-
-## Three variations
-
-| Embedded name | Arrangement | Complete render |
-|---|---|---|
-| `nightshift-dub` | E minor, 108 BPM; offbeat organ, syncopated bass and dark echoes, with two stripped sections | `--cycles 32 --tail 6` |
-| `undertow-skipping-stones` | D dorian, 132 BPM; dry two-step drums, electric keys and exact swung hat offsets | `--cycles 32 --tail 5` |
-| `small-light-afterimage` | 72 BPM; beatless minor-to-dorian harmony, low bells and a quiet finite ending | `--cycles 24 --tail 9` |
-
-These are separate source documents, so each can be edited without a variation
-switch or any dependency on the original song's declarations. All three use
-synthesis only and join the normal corpus evaluation and audio acceptance tests.
+The curated song library is currently empty. `--song` will select a curated
+entry once songs are added. A source filename defaults to a WAV beside that
+source; `-o path.wav` overrides it. Existing destinations require `--force`;
+creation without that flag is exclusive even when two renders finish together.
 
 ## Measuring a change
 
 ```sh
 # Inspect track indices before isolating a part.
-cargo run --release -p apteronotus-render -- --song nightshift-dub --list-tracks
+cargo run --release -p apteronotus-render -- my-edit.eod --list-tracks
 
 # Measure a section with all of its preceding DSP history intact.
-cargo run --release -p apteronotus-render -- --song nightshift-dub \
+cargo run --release -p apteronotus-render -- my-edit.eod \
   --cycles 12..16 --tail 2 --spectrum --dynamics -o breakdown.wav
 
 # Compare routed buses, or a single track through the production effects.
-cargo run --release -p apteronotus-render -- --song nightshift-dub \
+cargo run --release -p apteronotus-render -- my-edit.eod \
   --cycles 8 --stems -o dub-stems.wav
-cargo run --release -p apteronotus-render -- --song nightshift-dub \
+cargo run --release -p apteronotus-render -- my-edit.eod \
   --cycles 8 --solo-track 1 -o dub-bass.wav
 
 # Machine-readable measurement. This renders every selected track separately.
-cargo run --release -p apteronotus-render -- --song nightshift-dub \
+cargo run --release -p apteronotus-render -- my-edit.eod \
   --cycles 32 --tail 6 --json -o dub-analysis.wav > dub-analysis.json
 ```
 
@@ -74,29 +53,9 @@ fingerprint and sample-format options.
 Lua, allocating audio graphs, or writing a WAV. For example:
 
 ```sh
-cargo run -p apteronotus-render -- songs/seven-lanterns.eod --check-syntax
+cargo run -p apteronotus-render -- my-edit.eod --check-syntax
 ```
 
 It reports syntax/compiler failures with their original source line. A successful
 check does not establish that binding names, graph types or mini-notation are
 valid; rendering or Run performs those checks.
-
-`seven-lanterns` adds a 7/8 procession to the corpus: thirty-two measures,
-28 engine cycles, and a ramped 112 → 124 → 96 BPM map. Its complete render is
-`--song seven-lanterns --cycles 28 --tail 7`.
-
-`paper-orbits` uses longer captures for a five-against-seven keyboard canon.
-Its forty-eight cycles at 102 BPM use `--song paper-orbits --cycles 48 --tail 7`.
-
-`iron-litany` is a sample-free cathedral techno sketch: forty bars at 136 BPM
-(70.59 seconds), plus six seconds of room decay. Spatial pipe ranks and pedal
-lead to a trumpet arrival at bar 24 (42.35 seconds). Render with
-`--song iron-litany --cycles 40 --tail 6`; add `--solo-track 0,1,2` for the
-manuals, pedal and trumpet together through the same cathedral and master.
-The document embeds its experimental trumpet helper and needs no other score.
-
-`ashes-at-daybreak` is a finite orchestral hunter elegy in E minor and 4/4:
-solo violin and cello open into driving bowed strings, synthesized choir,
-horns and timpani before a sparse farewell. Its 48-bar tempo map moves from
-88 through 124 BPM and slows to 58 at the ending. Render the complete piece
-with `--song ashes-at-daybreak --cycles 48 --tail 8`.

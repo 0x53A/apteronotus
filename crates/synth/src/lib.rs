@@ -31,10 +31,17 @@
 //! liftable behind an ABI later without disturbing anything above it.
 
 mod adsr;
+mod compiled;
+mod live;
+pub use live::{LiveGate, live_voice_lifetime, validate_live_voice};
 mod analyzer;
 pub mod builder;
 pub mod control;
 mod fdn;
+pub mod convolution;
+pub mod concert_hall;
+pub mod spatial;
+pub mod spatial_host;
 mod flue;
 mod harmonic;
 pub mod input;
@@ -44,6 +51,11 @@ pub mod note;
 pub mod routing;
 pub mod stdlib;
 mod string;
+pub mod bowed;
+pub mod bowed_bridge;
+pub mod bowed_contact;
+pub mod bowed_gesture;
+pub mod bowed_host;
 pub mod template;
 
 pub use builder::{FdnConfig, GraphBuilder, n};
@@ -53,10 +65,10 @@ pub use input::{
 };
 pub use instrument::{InstrumentLifetime, PatchError, PatchTemplate};
 pub use lower::{
-    ControlStore, LowerError, instantiate, instantiate_patch, instantiate_patch_routed,
-    instantiate_patch_routed_at, instantiate_patch_routed_with_audio_inputs,
-    instantiate_patch_routed_with_audio_inputs_at, instantiate_routed,
-    instantiate_routed_with_controls, instantiate_timed_patch_routed,
+    ControlStore, LowerError, instantiate, instantiate_live_routed_with_controls,
+    prepare_patch_routed, instantiate_patch, instantiate_patch_routed, instantiate_patch_routed_at,
+    instantiate_patch_routed_with_audio_inputs, instantiate_patch_routed_with_audio_inputs_at,
+    instantiate_routed, instantiate_routed_with_controls, instantiate_timed_patch_routed,
     instantiate_timed_patch_routed_with_routing, instantiate_with_controls,
 };
 pub use note::{Note, ParamValue, ParamValueError};
@@ -67,3 +79,7 @@ pub use template::{
     InitScalar, InitScalarError, Input, Lifetime, Node, NodeId, ONSET_PULSE_SECONDS, Op, ParamId,
     ParamSpec, ShapeKind, Source, TemplateError, TransportSlot,
 };
+
+/// Host-injected persistent sources (out-of-tree instruments).
+pub mod external;
+pub use external::{External, ExternalFault, ExternalMonitor, ExternalSource, PreparedExternal};

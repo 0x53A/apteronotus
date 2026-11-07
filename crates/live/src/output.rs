@@ -21,6 +21,10 @@ use fundsp::prelude32::{
     AudioUnit, BufferMut, BufferRef, BufferVec, MAX_BUFFER_SIZE, ReplayMode, Sequencer, Shared,
     Signal, SignalFrame, shared, zero,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 /// About 43 ms at 48 kHz.
 ///
@@ -51,6 +55,8 @@ pub struct AudioOutput {
     sequencer: Sequencer,
     stream: Stream,
     sample_rate: f64,
+    rendered_frames: Arc<AtomicU64>,
+    workload: Arc<crate::output_workload::WorkloadCounters>,
     device_channels: usize,
     input_stream: Option<Stream>,
     input_binding: InputBinding,
@@ -331,13 +337,35 @@ impl AudioOutput {
                 main: main_channels,
             });
         }
-        Self::open_inner(
+        Self::open_prepared_with_default_input_at_level(
             stem_channels,
             main_channels,
-            Some(processor),
             external_channels,
             requested_channels,
             master_decibels,
+            |_| Ok(processor),
+        )
+    }
+
+    /// Prepare a persistent processor for the selected device's actual rate.
+    ///
+    /// The factory runs once on the caller's thread, before capture or output
+    /// streams are built. A preparation error opens no streams. The returned
+    /// output is paused; replacing or stopping an existing output remains the
+    /// caller's explicit activation step. Fixed-clock assets must validate their
+    /// clock here, before erasing their type behind `AudioUnit`.
+    pub fn open_prepared_with_default_input_at_level(
+        stem_channels: usize,
+        main_channels: usize,
+        external_channels: usize,
+        requested_channels: usize,
+        master_decibels: f32,
+        prepare: impl FnOnce(f64) -> Result<Box<dyn AudioUnit>, String>,
+    ) -> Result<AudioOutput, OutputError> {
+        Self::open_prepared_inner(
+            stem_channels, main_channels, external_channels, requested_channels,
+            master_decibels,
+            |rate| prepare_processor(rate, stem_channels, external_channels, prepare).map(Some),
         )
     }
 
@@ -349,8 +377,27 @@ impl AudioOutput {
         requested_channels: usize,
         master_decibels: f32,
     ) -> Result<AudioOutput, OutputError> {
+        Self::open_prepared_inner(
+            sequencer_channels, synth_channels, external_channels, requested_channels,
+            master_decibels, |_| Ok(processor),
+        )
+    }
+
+    fn open_prepared_inner(
+        sequencer_channels: usize,
+        synth_channels: usize,
+        external_channels: usize,
+        requested_channels: usize,
+        master_decibels: f32,
+        prepare: impl FnOnce(f64) -> Result<Option<Box<dyn AudioUnit>>, OutputError>,
+    ) -> Result<AudioOutput, OutputError> {
         if sequencer_channels == 0 || synth_channels == 0 {
             return Err(OutputError::NoSynthChannels);
+        }
+        if synth_channels > sequencer_channels {
+            return Err(OutputError::MainChannels {
+                stems: sequencer_channels, main: synth_channels,
+            });
         }
         let host = cpal::default_host();
         let device = host
@@ -364,6 +411,7 @@ impl AudioOutput {
         config.buffer_size = preferred_buffer_size(supported.buffer_size());
         let sample_rate = config.sample_rate as f64;
         let device_channels = config.channels as usize;
+        let processor = prepare(sample_rate)?;
         let (capture, input_stream, input_binding) = prepare_input(
             &host,
             config.sample_rate,
@@ -382,6 +430,7 @@ impl AudioOutput {
         let master = MasterGain::at_decibels(master_decibels);
         let renderer: Box<dyn AudioUnit> = {
             let mut net = Net::new(0, synth_channels);
+            net.set_sample_rate(sample_rate);
             let source = match processor {
                 Some(processor) => {
                     let voices = net.push(Box::new(backend));
@@ -411,19 +460,105 @@ impl AudioOutput {
             }
             Box::new(net)
         };
+        let rendered_frames = Arc::new(AtomicU64::new(0));
+        let workload = Arc::new(crate::output_workload::WorkloadCounters::default());
         let stream = match sample_format {
-            SampleFormat::I8 => build_stream::<i8>(&device, config, renderer, synth_channels),
-            SampleFormat::I16 => build_stream::<i16>(&device, config, renderer, synth_channels),
-            SampleFormat::I24 => build_stream::<I24>(&device, config, renderer, synth_channels),
-            SampleFormat::I32 => build_stream::<i32>(&device, config, renderer, synth_channels),
-            SampleFormat::I64 => build_stream::<i64>(&device, config, renderer, synth_channels),
-            SampleFormat::U8 => build_stream::<u8>(&device, config, renderer, synth_channels),
-            SampleFormat::U16 => build_stream::<u16>(&device, config, renderer, synth_channels),
-            SampleFormat::U24 => build_stream::<U24>(&device, config, renderer, synth_channels),
-            SampleFormat::U32 => build_stream::<u32>(&device, config, renderer, synth_channels),
-            SampleFormat::U64 => build_stream::<u64>(&device, config, renderer, synth_channels),
-            SampleFormat::F32 => build_stream::<f32>(&device, config, renderer, synth_channels),
-            SampleFormat::F64 => build_stream::<f64>(&device, config, renderer, synth_channels),
+            SampleFormat::I8 => build_stream::<i8>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::I16 => build_stream::<i16>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::I24 => build_stream::<I24>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::I32 => build_stream::<i32>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::I64 => build_stream::<i64>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::U8 => build_stream::<u8>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::U16 => build_stream::<u16>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::U24 => build_stream::<U24>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::U32 => build_stream::<u32>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::U64 => build_stream::<u64>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::F32 => build_stream::<f32>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
+            SampleFormat::F64 => build_stream::<f64>(
+                &device,
+                config,
+                renderer,
+                synth_channels,
+                Arc::clone(&rendered_frames),
+                Arc::clone(&workload),
+            ),
             other => return Err(OutputError::UnsupportedSampleFormat(other)),
         }
         .map_err(OutputError::BuildStream)?;
@@ -432,6 +567,8 @@ impl AudioOutput {
             sequencer,
             stream,
             sample_rate,
+            rendered_frames,
+            workload,
             device_channels,
             input_stream,
             input_binding,
@@ -450,12 +587,25 @@ impl AudioOutput {
         &self.master
     }
 
+    /// Native callback work since this stream was opened. None before the first
+    /// completed callback or on the browser target. This is not an underrun count.
+    pub fn workload(&self) -> Option<crate::OutputWorkload> {
+        self.workload.snapshot(self.sample_rate)
+    }
+
     pub fn sequencer_mut(&mut self) -> &mut Sequencer {
         &mut self.sequencer
     }
 
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
+    }
+
+    /// Next unrendered sample coordinate, in this stream's local seconds.
+    /// Wall time may advance while callbacks stall; live keys must follow this
+    /// clock so missed deadlines cannot turn into ever-growing scheduling delay.
+    pub fn rendered_seconds(&self) -> f64 {
+        self.rendered_frames.load(Ordering::Acquire) as f64 / self.sample_rate
     }
 
     pub fn device_channels(&self) -> usize {
@@ -683,11 +833,15 @@ fn build_stream<T>(
     config: StreamConfig,
     mut renderer: Box<dyn AudioUnit>,
     synth_channels: usize,
+    rendered_frames: Arc<AtomicU64>,
+    _workload: Arc<crate::output_workload::WorkloadCounters>,
 ) -> Result<Stream, cpal::Error>
 where
     T: SizedSample + FromSample<f32>,
 {
     let device_channels = config.channels as usize;
+    #[cfg(not(target_arch="wasm32"))]
+    let callback_rate=config.sample_rate as f64;
     // fundsp's block path operates on fixed, non-interleaved SIMD buffers.
     // Both are allocated before the callback starts.
     renderer.set_sample_rate(config.sample_rate as f64);
@@ -697,21 +851,45 @@ where
     device.build_output_stream(
         config,
         move |output: &mut [T], _: &OutputCallbackInfo| {
-            let frames = output.len() / device_channels;
-            let mut rendered = 0;
-            while rendered < frames {
-                let block = (frames - rendered).min(MAX_BUFFER_SIZE);
-                renderer.process(block, &input.buffer_ref(), &mut synth.buffer_mut());
-                for frame in 0..block {
-                    let begin = (rendered + frame) * device_channels;
-                    write_buffer_frame(&mut output[begin..begin + device_channels], &synth, frame);
-                }
-                rendered += block;
-            }
+            let frames=output.len()/device_channels;
+            let render=||render_output_buffer(
+                renderer.as_mut(),
+                &input,
+                &mut synth,
+                output,
+                device_channels,
+                &rendered_frames,
+            );
+            #[cfg(not(target_arch="wasm32"))]
+            _workload.measure(frames,callback_rate,render);
+            #[cfg(target_arch="wasm32")]
+            {let _=frames;let mut render=render;render();}
         },
         |error| eprintln!("audio output error: {error}"),
         None,
     )
+}
+
+fn render_output_buffer<T: Sample + FromSample<f32>>(
+    renderer: &mut dyn AudioUnit,
+    input: &BufferVec,
+    synth: &mut BufferVec,
+    output: &mut [T],
+    device_channels: usize,
+    rendered_frames: &AtomicU64,
+) {
+    let frames = output.len() / device_channels;
+    let mut rendered = 0;
+    while rendered < frames {
+        let block = (frames - rendered).min(MAX_BUFFER_SIZE);
+        renderer.process(block, &input.buffer_ref(), &mut synth.buffer_mut());
+        for frame in 0..block {
+            let begin = (rendered + frame) * device_channels;
+            write_buffer_frame(&mut output[begin..begin + device_channels], synth, frame);
+        }
+        rendered += block;
+    }
+    rendered_frames.fetch_add(frames as u64, Ordering::Release);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -756,9 +934,29 @@ where
     }
 }
 
+/// Device-independent part of preparation, shared with admission tests.
+fn prepare_processor(
+    rate: f64,
+    stems: usize,
+    external: usize,
+    prepare: impl FnOnce(f64) -> Result<Box<dyn AudioUnit>, String>,
+) -> Result<Box<dyn AudioUnit>, OutputError> {
+    let processor = prepare(rate).map_err(OutputError::Preparation)?;
+    let expected = stems.checked_add(external)
+        .ok_or_else(|| OutputError::Preparation("processor channel count overflow".into()))?;
+    if processor.inputs() != expected {
+        return Err(OutputError::ProcessorInputChannels { expected, found: processor.inputs() });
+    }
+    if processor.outputs() != stems {
+        return Err(OutputError::ProcessorOutputChannels { expected: stems, found: processor.outputs() });
+    }
+    Ok(processor)
+}
+
 #[derive(Debug)]
 pub enum OutputError {
     NoSynthChannels,
+    Preparation(String),
     ProcessorInputChannels { expected: usize, found: usize },
     ProcessorOutputChannels { expected: usize, found: usize },
     MainChannels { stems: usize, main: usize },
@@ -776,6 +974,7 @@ impl core::fmt::Display for OutputError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             OutputError::NoSynthChannels => write!(f, "synth graph has no output channels"),
+            OutputError::Preparation(error) => write!(f, "cannot prepare audio output: {error}"),
             OutputError::ProcessorInputChannels { expected, found } => write!(
                 f,
                 "persistent processor has {found} inputs but the sequencer emits {expected} stems"
@@ -813,6 +1012,84 @@ impl core::error::Error for OutputError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_receives_selected_clock_and_propagates_rejection() {
+        let mut calls = 0;
+        let result = prepare_processor(44_100.0, 2, 0, |rate| {
+            calls += 1;
+            assert_eq!(rate, 44_100.0);
+            Err("model requires 48000 Hz".into())
+        });
+        assert_eq!(calls, 1);
+        assert!(matches!(result, Err(OutputError::Preparation(ref message))
+            if message == "model requires 48000 Hz"));
+    }
+
+    #[test]
+    fn preparation_checks_factory_layout_before_stream_construction() {
+        let good = prepare_processor(48_000.0, 2, 1, |rate| {
+            assert_eq!(rate, 48_000.0);
+            Ok(Box::new(Net::new(3, 2)))
+        }).unwrap();
+        assert_eq!((good.inputs(), good.outputs()), (3, 2));
+        assert!(matches!(
+            prepare_processor(48_000.0, 2, 1, |_| Ok(Box::new(Net::new(2, 2)))),
+            Err(OutputError::ProcessorInputChannels { expected: 3, found: 2 })
+        ));
+        assert!(matches!(
+            prepare_processor(48_000.0, 2, 1, |_| Ok(Box::new(Net::new(3, 1)))),
+            Err(OutputError::ProcessorOutputChannels { expected: 2, found: 1 })
+        ));
+    }
+
+    #[test]
+    fn invalid_output_layout_does_not_invoke_preparation_or_access_device() {
+        let result = AudioOutput::open_prepared_with_default_input_at_level(
+            1, 2, 0, 0, -12.0, |_| panic!("invalid layout reached preparation"),
+        );
+        assert!(matches!(result, Err(OutputError::MainChannels { stems: 1, main: 2 })));
+        let result = AudioOutput::open_prepared_with_default_input_at_level(
+            0, 0, 0, 0, -12.0, |_| panic!("empty layout reached preparation"),
+        );
+        assert!(matches!(result, Err(OutputError::NoSynthChannels)));
+    }
+
+    #[test]
+    fn render_clock_counts_actual_frames_across_variable_callback_sizes() {
+        let clock = AtomicU64::new(0);
+        let mut renderer = fundsp::prelude32::dc((0.25, -0.25));
+        renderer.set_sample_rate(48_000.0);
+        let input = BufferVec::new(0);
+        let mut synth = BufferVec::new(2);
+        let mut total = 0;
+        for frames in [1, 17, 64, 512, 2_048, 127] {
+            let mut output = vec![0.0_f32; frames * 2];
+            render_output_buffer(&mut renderer, &input, &mut synth, &mut output, 2, &clock);
+            total += frames as u64;
+            assert_eq!(clock.load(Ordering::Acquire), total);
+            assert!(output.chunks_exact(2).all(|frame| frame == [0.25, -0.25]));
+        }
+    }
+
+    #[cfg(not(target_arch="wasm32"))]
+    #[test]
+    fn observing_callback_work_preserves_audio_and_frame_clock() {
+        let counters=crate::output_workload::WorkloadCounters::default();
+        let mut observed=fundsp::prelude32::dc((0.25,-0.25));
+        let mut reference=observed.clone();
+        let input=BufferVec::new(0);let mut a=BufferVec::new(2);let mut b=BufferVec::new(2);
+        let ca=AtomicU64::new(0);let cb=AtomicU64::new(0);
+        for frames in [1,17,64,512,2048,127] {
+            let mut x=vec![0_f32;frames*2];let mut y=x.clone();
+            counters.measure(frames,48000.,||render_output_buffer(&mut observed,&input,&mut a,&mut x,2,&ca));
+            render_output_buffer(&mut reference,&input,&mut b,&mut y,2,&cb);
+            assert_eq!(x,y);assert_eq!(ca.load(Ordering::Relaxed),cb.load(Ordering::Relaxed));
+        }
+        let v=counters.snapshot(48000.).unwrap();assert_eq!(v.callbacks,6);
+        assert_eq!(v.frames,ca.load(Ordering::Relaxed));
+        assert!(v.mean_ratio.is_finite() && v.peak_ratio.is_finite());
+    }
 
     #[test]
     fn chooses_a_supported_desktop_buffer() {

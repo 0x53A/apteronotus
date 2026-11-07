@@ -23,7 +23,7 @@ usage: apteronotus-render <song.eod> [options]
        apteronotus-render --song <name> [options]
        apteronotus-render --list-songs
 
-      --song <name>       render an embedded corpus song, from any directory
+      --song <name>       render a curated song, from any directory
       --list-songs        list embedded song names and descriptions; write no file
       --check-syntax      compile Lua syntax without evaluation or output files
   -o, --output <file.wav>  where to write        (default: the song's name, beside it)
@@ -1178,27 +1178,10 @@ mod tests {
     }
 
     #[test]
-    fn embedded_songs_resolve_without_a_source_file() {
-        let invocation = parse(&arguments("--song nightshift-dub --cycles 32"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            invocation.input.source().unwrap(),
-            apteronotus_songs::NIGHTSHIFT_DUB
-        );
-        assert_eq!(invocation.output, PathBuf::from("nightshift-dub.wav"));
-        assert_eq!(invocation.input.label(), "embedded:nightshift-dub");
-        let explicit = parse(&arguments("--song nightshift-dub -o dub.wav"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(explicit.output, PathBuf::from("dub.wav"));
+    fn unknown_embedded_songs_and_conflicting_inputs_are_rejected() {
         for text in [
-            "--song unknown",
-            "--song",
-            "s.eod --song drift",
-            "--song drift s.eod",
-            "--song drift --song waves",
-            "--list-songs --song drift",
+            "--song unknown", "--song", "s.eod --song drift",
+            "--song drift s.eod", "--song drift --song waves", "--list-songs --song drift",
         ] {
             assert!(parse(&arguments(text)).is_err(), "{text}");
         }
@@ -1284,7 +1267,7 @@ play(stereo, "e4")
 
     #[test]
     fn stem_manifest_reports_activity_and_omits_fake_levels_for_silence() {
-        let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+        let program = evaluate(include_str!("../../test-fixtures/routed.eod")).unwrap();
         let channels = program.buses.total_channels();
         let mut samples = vec![0.0; channels * 2];
         samples[0] = 0.5;

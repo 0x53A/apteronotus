@@ -170,6 +170,22 @@ impl GraphBuilder {
     }
 
     /// Add a node. Returns channel 0; use [`Source::port`] for the rest.
+    pub fn spatial_room(&mut self, spec: crate::spatial::RoomSpec, inputs: &[Source]) -> [Source;2] {
+        let first=self.node(Op::SpatialRoom(spec),inputs.iter().copied().map(Input::from));
+        let Source::Port { node, .. }=first else {unreachable!()};
+        [first,Source::Port {node,channel:1}]
+    }
+
+    /// Reflections-only stereo from one mono source; prepared at 48 kHz.
+    pub fn concert_hall(&mut self, input: Source) -> [Source;2] {
+        let first=self.node(Op::ConcertHall,[Input::from(input)]);
+        [first,Source::Port{node:match first {Source::Port{node,..}=>node,_=>unreachable!()},channel:1}]
+    }
+
+    pub fn convolve(&mut self, input: Source, response: crate::convolution::ImpulseResponse) -> Source {
+        self.node(Op::Convolve(response), [Input::from(input)])
+    }
+
     pub fn node(&mut self, op: Op, inputs: impl IntoIterator<Item = Input>) -> Source {
         let id = self.template.nodes.len();
         self.template.nodes.push(Node {
@@ -178,6 +194,14 @@ impl GraphBuilder {
             tail: 0.0,
             src: self.src,
         });
+        Source::port(id, 0)
+    }
+
+    /// Append an already staged node, preserving its provenance and response tail.
+    /// Input ports must have been rebound into this builder by the caller.
+    pub fn append_node(&mut self, node: Node) -> Source {
+        let id = self.template.nodes.len();
+        self.template.nodes.push(node);
         Source::port(id, 0)
     }
 
@@ -329,6 +353,33 @@ impl GraphBuilder {
     ) -> Source {
         let inputs = [self.arg(excitation), self.arg(hz), self.arg(mute)];
         self.node(Op::StringResonator { min_hz, decay }, inputs)
+    }
+
+    /// Retained physical bow candidate; returns raw normalized bridge force.
+    pub fn bowed_string_model(
+        &mut self, hz: impl Into<Source>, speed: impl Into<Source>,
+        force: impl Into<Source>, position: impl Into<Source>, config: crate::bowed::BowedConfig,
+    ) -> Source {
+        let inputs = [self.arg(hz), self.arg(speed), self.arg(force), self.arg(position)];
+        self.node(Op::BowedString(config), inputs)
+    }
+
+    /// Declare one host-injected persistent source; returns one port per output.
+    pub fn external(&mut self, spec: crate::external::External) -> Vec<Source> {
+        let channels=spec.source().outputs();
+        let first=self.node(Op::External(spec), []);
+        let Source::Port {node,..}=first else {unreachable!()};
+        (0..channels).map(|channel| Source::port(node,channel as u32)).collect()
+    }
+
+    pub fn bowed_performance(&mut self, key:crate::ControlId, score:crate::bowed_host::BowedScore) -> [Source;2] {
+        self.bowed_performance_with_controls(key,score,[Source::Const(0.4),Source::Const(0.55),Source::Const(0.12)])
+    }
+    pub fn bowed_performance_with_controls(&mut self,key:crate::ControlId,score:crate::bowed_host::BowedScore,controls:[Source;3])->[Source;2] {
+        let inputs=controls.map(|c|self.arg(c));
+        let first=self.node(Op::BowedPerformance {key,score},inputs);
+        let Source::Port {node,..}=first else{unreachable!()};
+        [first,Source::port(node,1)]
     }
 
     pub fn pluck(

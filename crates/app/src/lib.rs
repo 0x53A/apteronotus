@@ -1,12 +1,19 @@
 #[cfg(target_arch = "wasm32")]
 mod browser_files;
+mod computer_midi;
 #[cfg(test)]
 mod corpus;
 #[cfg(not(target_arch = "wasm32"))]
 mod document;
 mod examples;
 mod highlight;
+mod midi_input;
+#[cfg(target_arch = "wasm32")]
+mod midi_web;
 mod player;
+mod externals;
+pub use apteronotus_lua::ExternalRegistry;
+pub use apteronotus_synth::{External, ExternalMonitor, ExternalSource, PreparedExternal};
 mod search;
 mod style;
 mod syntax;
@@ -59,6 +66,20 @@ pub fn run_native() -> eframe::Result {
 /// Open an optional source document without evaluating it or opening audio.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native_file(path: Option<&std::path::Path>) -> eframe::Result {
+    run_native_with(path, ExternalRegistry::default(), None)
+}
+
+/// Launch the native app with host-injected external sources, reachable from
+/// scripts as `run(external("name"))`. This is the entry point out-of-tree
+/// hosts (for example `apteronotus-research`) use to put an instrument under
+/// test into the normal editor and player. `starter` replaces the default
+/// editor text when no document is opened. Nothing is evaluated and no device
+/// opens until the user selects Run.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_native_with(path:Option<&std::path::Path>,externals:ExternalRegistry,starter:Option<String>) -> eframe::Result {
+    if externals.payload_bytes()>externals::MAX_PAYLOAD {
+        return Err(eframe::Error::AppCreation(Box::new(std::io::Error::other("external sources exceed the 256 MiB payload allowance"))));
+    }
     let document = path
         .map(document::SavedDocument::open)
         .transpose()
@@ -76,6 +97,8 @@ pub fn run_native_file(path: Option<&std::path::Path>) -> eframe::Result {
         Box::new(move |creation| {
             style::install(&creation.egui_ctx);
             let mut app = ApteronotusApp::new();
+            if let Some(starter) = starter {app.source=starter;}
+            app.externals=externals;
             if let Some(document) = document {
                 app.source = document.source().into();
                 app.files.saved = Some(document);
@@ -86,6 +109,8 @@ pub fn run_native_file(path: Option<&std::path::Path>) -> eframe::Result {
 }
 
 struct ApteronotusApp {
+    output_workload:Option<apteronotus_live::OutputWorkload>,
+    externals: ExternalRegistry,
     source: String,
     syntax: syntax::SyntaxState,
     search: search::Search,
@@ -96,12 +121,16 @@ struct ApteronotusApp {
     browser_files: browser_files::BrowserFiles,
     #[cfg(target_arch = "wasm32")]
     host_document: component::HostDocument,
+    #[cfg(target_arch = "wasm32")]
+    library_fragment: String,
     /// The last edited buffer displaced by browsing the library.
     ///
     /// Documents have no file-level undo yet. Keeping one complete
     /// buffer makes replacement recoverable without interrupting every choice
     /// with a confirmation dialog.
     replaced_source: Option<String>,
+    midi_input: midi_input::MidiInputHost,
+    computer_midi: computer_midi::ComputerMidi,
     command_tx: Sender<Command>,
     event_rx: Receiver<PlayerEvent>,
     worker: Option<PlayerWorker>,
@@ -184,21 +213,49 @@ impl Status {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn browser_library_fragment() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .unwrap_or_default()
+}
+
 impl ApteronotusApp {
     fn new() -> Self {
-        let (worker, command_tx, event_rx) = PlayerWorker::spawn();
+        let (midi_ingress, midi_rx) = midi_input::queue();
+        let (worker, command_tx, event_rx) = PlayerWorker::spawn(midi_rx);
+        #[cfg(target_arch = "wasm32")]
+        let library_fragment = browser_library_fragment();
+        #[cfg(target_arch = "wasm32")]
+        let source = examples::from_fragment(&library_fragment)
+            .map_or(examples::starter(), |entry| entry.source);
+        #[cfg(not(target_arch = "wasm32"))]
+        let source = examples::starter();
         Self {
-            source: examples::starter().into(),
+            output_workload:None,
+            externals: Default::default(),
+            source: source.into(),
             syntax: syntax::SyntaxState::default(),
             search: search::Search::default(),
             select_source: None,
             #[cfg(not(target_arch = "wasm32"))]
             files: FileState::default(),
             #[cfg(target_arch = "wasm32")]
-            browser_files: browser_files::BrowserFiles::default(),
+            browser_files: {
+                let mut files = browser_files::BrowserFiles::default();
+                files.name = examples::from_fragment(&library_fragment).map_or_else(
+                    || "composition.eod".into(),
+                    |entry| format!("{}.eod", entry.id),
+                );
+                files
+            },
             #[cfg(target_arch = "wasm32")]
             host_document: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            library_fragment,
             replaced_source: None,
+            midi_input: midi_input::MidiInputHost::new(midi_ingress.clone()),
+            computer_midi: computer_midi::ComputerMidi::new(midi_ingress),
             command_tx,
             event_rx,
             worker: Some(worker),
@@ -217,6 +274,7 @@ impl ApteronotusApp {
     }
 
     fn stop(&mut self) {
+        self.computer_midi.release();
         // The GUI does not go quiet on its own: it waits for the player to
         // confirm the device is closed, the same way Run waits for activation.
         self.send(Command::Stop);
@@ -233,6 +291,7 @@ impl ApteronotusApp {
             .send(Command::Run {
                 request,
                 source: self.source.clone(),
+                externals: self.externals.clone(),
             })
             .is_err()
         {
@@ -246,6 +305,16 @@ impl ApteronotusApp {
     }
 
     fn receive_events(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let fragment = browser_library_fragment();
+            if fragment != self.library_fragment {
+                self.library_fragment = fragment;
+                if let Some(entry) = examples::from_fragment(&self.library_fragment) {
+                    self.replace_source(entry.source);
+                }
+            }
+        }
         if let Some(worker) = &mut self.worker {
             worker.pump();
         }
@@ -267,6 +336,7 @@ impl ApteronotusApp {
                         .filter(|(pending, _)| *pending == request)
                         .map(|(_, source)| source);
                     self.latest_request = request;
+                    self.output_workload=None;
                     self.status = Status::Active {
                         generation,
                         voices,
@@ -302,7 +372,12 @@ impl ApteronotusApp {
                     self.latest_request = request;
                     self.status = Status::Error(message);
                 }
+                PlayerEvent::ControlsChanged(controls) => {
+                    self.controls = controls;
+                }
+                PlayerEvent::OutputWorkload(workload) => {self.output_workload=Some(workload);}
                 PlayerEvent::Stopped => {
+                    self.output_workload=None;
                     self.status = Status::Stopped;
                     self.controls.clear();
                     self.sounding = false;
@@ -600,79 +675,24 @@ play(v, "c4 e4")
     }
 
     #[test]
-    fn rock_guitars_have_bounded_cost_and_retire_after_their_release() {
-        let program = evaluate(apteronotus_songs::RUST_AND_VOLTAGE).unwrap();
-        for track in program.tracks.iter().take(2) {
-            let graph = program.voice(track.voice).unwrap();
-            assert!(
-                graph.nodes.len() < 100,
-                "guitar grew to {} nodes",
-                graph.nodes.len()
-            );
-            let lifetime = graph.lifetime();
-            assert_eq!(lifetime.absolute_horizon, 0.0);
-            assert_eq!(lifetime.gate_tail, 0.14);
-        }
-    }
-
-    #[test]
-    fn rock_riff_tables_keep_sounding_tokens_through_the_arrangement() {
-        let source = apteronotus_songs::RUST_AND_VOLTAGE;
+    fn table_patterns_keep_sounding_tokens_when_repeated() {
+        let source = r#"
+local v = voice { graph = function(n)
+  return sine(n.hz) * adsr(ms(5), ms(20), 0.7, ms(140))
+end }
+local riffs = { pattern("e2 e2 ~ [e2 e2]") }
+play(v, riffs[1])
+"#;
         let program = Arc::new(evaluate(source).unwrap());
-        let whole = apteronotus_pattern::Span::new(Frac::ZERO, Frac::int(64));
-        for (index, track) in program.tracks.iter().enumerate() {
-            let events = track.pattern.onsets(whole);
-            assert!(!events.is_empty(), "track {index} is silent");
-            for event in events {
-                let span = event.src.expect("every rock note retains its literal span");
-                let token = &source[span.start as usize..span.end as usize];
-                assert!(
-                    matches!(
-                        token,
-                        "x" | "e1"
-                            | "f1"
-                            | "g1"
-                            | "a1"
-                            | "bb1"
-                            | "c2"
-                            | "d2"
-                            | "e2"
-                            | "f2"
-                            | "g2"
-                            | "a2"
-                            | "bb2"
-                            | "c3"
-                            | "d3"
-                            | "d4"
-                            | "e4"
-                            | "g4"
-                            | "a4"
-                            | "b4"
-                            | "d5"
-                            | "e5"
-                            | "g5"
-                    ),
-                    "track {index} points at {token:?} instead of a note"
-                );
-            }
-        }
-        let sounding = Sounding {
-            source: source.into(),
-            program,
-            origin: Instant::now(),
-            effective_at: Frac::ZERO,
-        };
-        // Check the table's original token, including when its riff returns.
+        let graph = program.voice(program.tracks[0].voice).unwrap();
+        assert_eq!(graph.lifetime().gate_tail, 0.14);
+        let sounding = Sounding { source: source.into(), program, origin: Instant::now(), effective_at: Frac::ZERO };
         let start = source.find("e2 e2 ~ [e2 e2]").unwrap();
         for bar in [0, 4, 24, 48] {
             let now = sounding.program.tempo.cycle_to_seconds(Frac::int(bar))
-                + super::HIGHLIGHT_LATENCY_SECONDS
-                + 0.02;
+                + super::HIGHLIGHT_LATENCY_SECONDS + 0.02;
             let ranges = active_source_ranges(&sounding, source, now);
-            assert!(
-                ranges.contains(&(start..start + 2)),
-                "bar {bar}: {ranges:?}"
-            );
+            assert!(ranges.contains(&(start..start + 2)), "bar {bar}: {ranges:?}");
         }
     }
 
@@ -729,8 +749,9 @@ mod document_tests {
         let mut app = ApteronotusApp::new();
         app.source = original.into();
         app.files.saved = Some(saved);
-        app.replace_source(apteronotus_songs::NIGHTSHIFT_DUB);
-        app.replace_source(apteronotus_songs::SEVEN_LANTERNS);
+        let mut examples = examples::documents();
+        app.replace_source(examples.next().unwrap().source);
+        app.replace_source(examples.next().unwrap().source);
         assert!(app.files.saved.is_none());
         assert_eq!(app.files.replaced.as_ref().unwrap().path, path);
         app.restore_source();
@@ -806,10 +827,12 @@ impl eframe::App for ApteronotusApp {
             self.jump_to_diagnostic();
         }
         self.status_bar(ui);
+        self.computer_midi.panel(ui);
         self.diagnostics(ui);
         self.controls_panel(ui);
         let active_source_ranges = self.active_source_ranges();
         self.editor(ui, &active_source_ranges);
+        self.computer_midi.process(&ctx);
     }
 }
 
@@ -851,6 +874,7 @@ impl ApteronotusApp {
                     ui.spacing_mut().item_spacing.x = style::UNIT * 1.5;
                     style::divider(ui);
                     self.example_picker(ui);
+                    self.midi_menu(ui);
                     #[cfg(target_arch = "wasm32")]
                     self.browser_file_menu(ui);
                     #[cfg(not(target_arch = "wasm32"))]
@@ -882,6 +906,62 @@ impl ApteronotusApp {
             });
     }
 
+    fn midi_menu(&mut self, ui: &mut egui::Ui) {
+        self.midi_input.poll();
+        style::menu_button(ui, "MIDI", 320.0, |ui| {
+            if ui.button("Enable / refresh MIDI inputs").clicked() {
+                self.midi_input.request_access();
+            }
+            if let Some(notice) = self.midi_input.notice() {
+                ui.label(notice);
+            }
+            let selected = self.midi_input.selected();
+            if ui
+                .selectable_label(
+                    selected.is_none() && !self.computer_midi.enabled,
+                    "Disconnected",
+                )
+                .clicked()
+            {
+                let _ = self.midi_input.connect(None);
+                self.computer_midi.enabled = false;
+                self.computer_midi.release();
+            }
+            for port in self.midi_input.ports() {
+                if ui
+                    .selectable_label(selected.as_deref() == Some(port.id.as_str()), &port.name)
+                    .clicked()
+                {
+                    match self.midi_input.connect(Some(&port.id)) {
+                        Ok(()) => {
+                            self.computer_midi.enabled = false;
+                            self.computer_midi.release();
+                        }
+                        Err(error) => self.status = Status::Error(error),
+                    }
+                }
+            }
+            ui.separator();
+            ui.label("Run a document with midi(voice) to play its instrument.");
+            ui.label("Map sliders in source: midi(control, {cc=82, channel=1}).");
+            if ui.button("Release all MIDI keys").clicked() {
+                self.computer_midi.release();
+                self.send(Command::MidiPanic);
+            }
+            ui.separator();
+            if ui
+                .checkbox(&mut self.computer_midi.enabled, "Computer keyboard")
+                .changed()
+            {
+                self.computer_midi.release();
+                if self.computer_midi.enabled {
+                    let _ = self.midi_input.connect(None);
+                }
+            }
+            ui.label("Click Play computer keyboard, then use A–K to play. No MIDI device or browser permission needed.");
+        });
+    }
+
     /// Picking a library document keeps the last edited buffer recoverable
     /// while browsing, and leaves evaluation to the explicit Run command.
     fn example_picker(&mut self, ui: &mut egui::Ui) {
@@ -892,6 +972,20 @@ impl ApteronotusApp {
 
         let picked = style::menu_button(ui, "LIBRARY", 300.0, |ui| {
             let mut picked = None;
+            #[cfg(target_arch = "wasm32")]
+            if let Some(entry) = examples::documents().find(|entry| entry.source == self.source) {
+                if ui.button("Copy link to this entry").clicked() {
+                    if let Some(window) = web_sys::window() {
+                        if let Ok(href) = window.location().href() {
+                            if let Ok(url) = web_sys::Url::new(&href) {
+                                url.set_hash(&format!("library={}", entry.id));
+                                ui.ctx().copy_text(url.href());
+                            }
+                        }
+                    }
+                }
+                ui.separator();
+            }
             if self.replaced_source.is_some() {
                 let restore = ui
                     .add(
@@ -909,10 +1003,14 @@ impl ApteronotusApp {
             egui::ScrollArea::vertical()
                 .max_height(420.0)
                 .show(ui, |ui| {
-                    for (index, example) in examples::documents().enumerate() {
-                        if index == examples::EXAMPLES.len() {
-                            ui.separator();
-                            ui.label(egui::RichText::new("Songs").color(style::MUTED));
+                    let mut group = None;
+                    for example in examples::documents() {
+                        if group != Some(example.group) {
+                            if group.is_some() {
+                                ui.separator();
+                            }
+                            ui.label(egui::RichText::new(example.group.name()).color(style::MUTED));
+                            group = Some(example.group);
                         }
                         let current = self.source == example.source;
                         let color = if current {
@@ -941,6 +1039,13 @@ impl ApteronotusApp {
         match picked {
             Some(Some(Choice::Document(source))) => {
                 self.replace_source(source);
+                #[cfg(target_arch = "wasm32")]
+                if let Some(entry) = examples::documents().find(|entry| entry.source == source) {
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.location().set_hash(&format!("library={}", entry.id));
+                        self.library_fragment = browser_library_fragment();
+                    }
+                }
             }
             Some(Some(Choice::Restore)) => {
                 self.restore_source();
@@ -966,12 +1071,11 @@ impl ApteronotusApp {
                 if preserves {
                     self.browser_files.replaced_name = Some(self.browser_files.name.clone());
                 }
-                self.browser_files.name = apteronotus_songs::SONGS
-                    .iter()
-                    .find(|song| song.source == source)
+                self.browser_files.name = examples::documents()
+                    .find(|entry| entry.source == source)
                     .map_or_else(
                         || "composition.eod".into(),
-                        |song| format!("{}.eod", song.name),
+                        |entry| format!("{}.eod", entry.id),
                     );
             }
         }
@@ -1190,6 +1294,11 @@ impl ApteronotusApp {
             } => messages.push(("input fallback", message.clone(), style::CAUTION)),
             _ => {}
         }
+        if let Some(workload)=self.output_workload.filter(|v|v.over_budget_callbacks>0) {
+            messages.push(("audio rendering",format!(
+                "{} callbacks exceeded their audio-duration budget since this stream started (peak {:.0}%, mean {:.0}%). Callback time is not a device-underrun count.",
+                workload.over_budget_callbacks,100.*workload.peak_ratio,100.*workload.mean_ratio),style::CAUTION));
+        }
         if messages.is_empty() {
             return;
         }
@@ -1290,23 +1399,32 @@ impl ApteronotusApp {
                 ui.add_space(style::UNIT * 2.0);
                 style::section_heading(ui, "CONTROLS");
                 ui.add_space(style::UNIT);
-                for control in &mut self.controls {
-                    ui.horizontal(|ui| {
-                        style::field_label(ui, &control.name);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{:.3}", control.value))
-                                    .text_style(egui::TextStyle::Small)
-                                    .color(style::DISCHARGE),
-                            );
-                        });
+                style::scrollbars(ui);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for control in &mut self.controls {
+                            ui.horizontal(|ui| {
+                                style::field_label(ui, &control.name);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{:.3}", control.value))
+                                                .text_style(egui::TextStyle::Small)
+                                                .color(style::DISCHARGE),
+                                        );
+                                    },
+                                );
+                            });
+                            let slider =
+                                style::fader(ui, &mut control.value, control.min..=control.max);
+                            if slider.changed() {
+                                updates.push((control.name.clone(), control.value));
+                            }
+                            ui.add_space(style::UNIT * 1.5);
+                        }
                     });
-                    let slider = style::fader(ui, &mut control.value, control.min..=control.max);
-                    if slider.changed() {
-                        updates.push((control.name.clone(), control.value));
-                    }
-                    ui.add_space(style::UNIT * 1.5);
-                }
             });
         if volume_moved {
             self.send(Command::SetVolume {

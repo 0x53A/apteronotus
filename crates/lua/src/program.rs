@@ -61,6 +61,39 @@ pub struct ExternalDegrade {
     pub seed: u64,
 }
 
+/// A live keyboard binding. Channel is zero-based in owned data; Lua uses 1–16.
+/// No host handle, callback, device selection or mutable gate survives evaluation.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MidiBinding {
+    pub voice: VoiceId,
+    pub channel: Option<u8>,
+}
+
+/// Monophonic keyboard adapter for one explicitly selected retained string.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MidiViolinBinding {
+    pub key: apteronotus_synth::ControlId,
+    pub patch: PatchId,
+    pub channel: Option<u8>,
+    pub min_key: u8,
+    pub max_key: u8,
+}
+
+/// Suggested hardware mapping, applied by the host until an overlay overrides it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MidiControlBinding {
+    pub control: apteronotus_synth::ControlId,
+    pub cc: u8,
+    pub channel: Option<u8>,
+}
+
+impl MidiControlBinding {
+    /// MIDI 1.0 CC spans the complete declared control range linearly.
+    pub fn value(&self, spec: &apteronotus_synth::ControlSpec, value: u8) -> f64 {
+        spec.min + (spec.max - spec.min) * f64::from(value) / 127.0
+    }
+}
+
 /// One requested persistent-patch activation.
 ///
 /// `span == None` is the original program-lifetime `run(patch)`. A finite span
@@ -108,6 +141,9 @@ pub struct Program {
     pub patch_controls: Vec<Vec<PatchControl>>,
     pub runs: Vec<PatchRun>,
     pub tracks: Vec<Track>,
+    pub midi_bindings: Vec<MidiBinding>,
+    pub midi_violins: Vec<MidiViolinBinding>,
+    pub midi_controls: Vec<MidiControlBinding>,
 }
 
 impl Program {
@@ -153,6 +189,64 @@ impl Program {
                         _ => false,
                     },
                 )
+    }
+
+    /// Retain the arena when only room geometry/acoustics have changed.
+    /// The caller must prepare all returned edits before committing the program,
+    /// then publish them to the retained runtime after scheduling succeeds.
+    pub fn reuse_with_room_edits(
+        &mut self,
+        active: &Program,
+    ) -> Option<
+        Vec<(
+            apteronotus_synth::spatial::RoomSpec,
+            apteronotus_synth::spatial::RoomSpec,
+        )>,
+    > {
+        let mut normalized = self.clone();
+        let mut changes = Vec::new();
+        let mut restore = Vec::new();
+        for (candidate_run, active_run) in self
+            .runs
+            .iter()
+            .filter(|r| r.span.is_none())
+            .zip(active.runs.iter().filter(|r| r.span.is_none()))
+        {
+            let candidate = self.patch(candidate_run.patch)?.graph();
+            let old = active.patch(active_run.patch)?.graph();
+            if candidate.nodes.len() != old.nodes.len() {
+                return None;
+            }
+            let mut graph = candidate.clone();
+            for (index, (node, prior)) in graph.nodes.iter_mut().zip(&old.nodes).enumerate() {
+                if let (Op::SpatialRoom(new), Op::SpatialRoom(old)) = (&node.op, &prior.op) {
+                    if new != old {
+                        if new
+                            .emitters
+                            .iter()
+                            .map(|e| &e.name)
+                            .ne(old.emitters.iter().map(|e| &e.name))
+                        {
+                            return None;
+                        }
+                        changes.push((old.clone(), new.clone()));
+                        restore.push((candidate_run.patch.0, index, new.clone()));
+                        node.op = prior.op.clone();
+                    }
+                }
+            }
+            normalized.patches[candidate_run.patch.0] = PatchTemplate::new(graph).ok()?;
+        }
+        if !normalized.reuse_persistent_from(active) {
+            return None;
+        }
+        for (patch, index, spec) in restore {
+            let mut graph = normalized.patches[patch].graph().clone();
+            graph.nodes[index].op = Op::SpatialRoom(spec);
+            normalized.patches[patch] = PatchTemplate::new(graph).ok()?;
+        }
+        *self = normalized;
+        Some(changes)
     }
 
     /// Retain `active`'s compatible persistent arena handles and templates.
@@ -258,6 +352,23 @@ impl Program {
             };
             run.routing = routing;
         }
+        let mut midi_controls = self.midi_controls.clone();
+        for binding in &mut midi_controls {
+            let Some(id) = self
+                .controls
+                .corresponding_id(binding.control, &active.controls)
+            else {
+                return false;
+            };
+            binding.control = id;
+        }
+        let mut midi_violins = self.midi_violins.clone();
+        for binding in &mut midi_violins {
+            let Some(id)=self.controls.corresponding_id(binding.key,&active.controls) else {return false};
+            binding.key=id;
+        }
+        self.midi_violins=midi_violins;
+        self.midi_controls = midi_controls;
         self.voices = voices;
         self.tracks = tracks;
         self.runs = runs;
@@ -283,6 +394,57 @@ impl Program {
         limits: GraphLimits,
         value_limits: ValueLimits,
     ) -> Result<(), ProgramError> {
+        let (mut contacts,mut sample_work,mut block_work)=(0usize,0usize,0usize);
+        for run in &self.runs {
+            if let Some(patch)=self.patch(run.patch) {
+                let cost=patch.graph().cost();
+                contacts=contacts.saturating_add(cost.contact_steps);
+                sample_work=sample_work.saturating_add(cost.gesture_sample_work);
+                block_work=block_work.saturating_add(cost.gesture_block_work);
+            }
+        }
+        if contacts>limits.contact_steps || sample_work>limits.gesture_sample_work || block_work>limits.gesture_block_work {
+            return Err(ProgramError::InvalidMidiBinding {index:0,message:"aggregate retained contact/gesture work exceeds publication limits".into()});
+        }
+        for (index,binding) in self.midi_violins.iter().enumerate() {
+            let valid = self.patch(binding.patch).is_some_and(|p|p.graph().nodes.iter().any(|n|matches!(&n.op,Op::BowedPerformance {key,score} if *key==binding.key && score.live && score.opens.len()==1 && score.commands.is_empty() && (score.opens[0]-440.0*2.0_f64.powf((f64::from(binding.min_key)-69.0)/12.0)).abs()<1e-8 && 440.0*2.0_f64.powf((f64::from(binding.max_key)-69.0)/12.0)<=score.config.max_hz)))
+                && self.runs.iter().any(|run|run.patch==binding.patch && run.span.is_none())
+                && self.controls.spec(binding.key).is_some() && binding.channel.is_none_or(|c|c<16)
+                && binding.min_key<=binding.max_key && binding.max_key<128
+                && !self.midi_violins[..index].iter().any(|other|other.key==binding.key);
+            if !valid {return Err(ProgramError::InvalidMidiBinding {index,message:"invalid retained violin binding or missing run".into()});}
+        }
+        for (index, binding) in self.midi_controls.iter().enumerate() {
+            if self.controls.spec(binding.control).is_none()
+                || binding.cc > 119
+                || binding.channel.is_some_and(|channel| channel > 15)
+            {
+                return Err(ProgramError::InvalidMidiBinding {
+                    index,
+                    message: "invalid control, CC or channel".into(),
+                });
+            }
+        }
+        for (index, binding) in self.midi_bindings.iter().enumerate() {
+            let Some(graph) = self.voice(binding.voice) else {
+                return Err(ProgramError::InvalidMidiBinding {
+                    index,
+                    message: "missing voice".into(),
+                });
+            };
+            if binding.channel.is_some_and(|channel| channel > 15) {
+                return Err(ProgramError::InvalidMidiBinding {
+                    index,
+                    message: "channel outside 1–16".into(),
+                });
+            }
+            apteronotus_synth::validate_live_voice(graph).map_err(|error| {
+                ProgramError::InvalidMidiBinding {
+                    index,
+                    message: error.to_string(),
+                }
+            })?;
+        }
         for (index, graph) in self.voices.iter().enumerate() {
             graph
                 .validate()
@@ -402,13 +564,21 @@ impl Program {
                     .map_err(|source| ProgramError::TrackValues { index, source })?;
             }
         }
+        let mut bowed_addresses=std::collections::HashSet::new();
         for (index, run) in self.runs.iter().enumerate() {
             let Some(patch) = self.patch(run.patch) else {
                 return Err(ProgramError::MissingRunPatch { index });
             };
+            for node in &patch.graph().nodes {
+                if let Op::BowedPerformance {key,..}=node.op
+                    && !bowed_addresses.insert(key) {return Err(ProgramError::InvalidMidiBinding {index,message:"duplicate retained violin address across running instances".into()});}
+            }
             if let Some(span) = run.span {
                 if span.begin >= span.end {
                     return Err(ProgramError::InvalidRunSpan { index });
+                }
+                if patch.graph().nodes.iter().any(|n|matches!(n.op,Op::BowedPerformance {..}|Op::External(_))) {
+                    return Err(ProgramError::InvalidMidiBinding {index,message:"retained violin and external sources require a program-lifetime run".into()});
                 }
                 if patch.graph().inputs != 0 {
                     return Err(ProgramError::TimedRunInputs { index });
@@ -455,6 +625,7 @@ fn graph_controls_valid(graph: &GraphTemplate, layout: &ControlLayout) -> bool {
     graph.nodes.iter().all(|node| {
         let op_valid = match node.op {
             Op::ControlWrite { target } => layout.spec(target).is_some(),
+            Op::BowedPerformance { key, .. } => layout.spec(key).is_some(),
             _ => true,
         };
         op_valid
@@ -555,6 +726,9 @@ fn ops_compatible(
                 target: right_target,
             },
         ) => left_controls.corresponding_id(*left_target, right_controls) == Some(*right_target),
+        (Op::BowedPerformance { key: left_key, score: left_score },
+         Op::BowedPerformance { key: right_key, score: right_score }) =>
+            left_score == right_score && left_controls.corresponding_id(*left_key, right_controls) == Some(*right_key),
         _ => left == right,
     }
 }
@@ -609,7 +783,7 @@ fn rebind_graph_arenas(
     to_buses: &BusLayout,
 ) -> bool {
     for node in &mut graph.nodes {
-        if let Op::ControlWrite { target } = &mut node.op {
+        if let Op::ControlWrite { target } | Op::BowedPerformance { key: target, .. } = &mut node.op {
             let Some(rebound) = from_controls.corresponding_id(*target, to_controls) else {
                 return false;
             };
@@ -701,12 +875,19 @@ impl Default for Program {
             patch_controls: Vec::new(),
             runs: Vec::new(),
             tracks: Vec::new(),
+            midi_bindings: Vec::new(),
+            midi_violins: Vec::new(),
+            midi_controls: Vec::new(),
         }
     }
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ProgramError {
+    InvalidMidiBinding {
+        index: usize,
+        message: String,
+    },
     VoiceTemplate {
         index: usize,
         source: TemplateError,
@@ -792,6 +973,9 @@ pub enum ProgramError {
 impl core::fmt::Display for ProgramError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            ProgramError::InvalidMidiBinding { index, message } => {
+                write!(f, "MIDI binding {index}: {message}")
+            }
             ProgramError::VoiceTemplate { index, source } => {
                 write!(f, "voice {index} is invalid: {source}")
             }

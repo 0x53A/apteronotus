@@ -26,6 +26,7 @@ fn physical_state_is_budgeted_and_only_pressure_extends_its_lifetime() {
         input_channels: 0,
         output_channels: 1,
         data_entries: 100,
+        contact_steps:16, gesture_sample_work:128, gesture_block_work:1024,
         delay_buffer_seconds: cost.delay_buffer_seconds / 2.0,
         tail_seconds: 30.0,
     };

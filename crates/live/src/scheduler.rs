@@ -1126,6 +1126,7 @@ pub enum ScheduleError {
     TimedRunInputs(usize),
     InvalidExternalTime(f64),
     InvalidExternalGate(f64),
+    MidiVoiceLimit(usize),
 }
 
 impl core::fmt::Display for ScheduleError {
@@ -1189,6 +1190,10 @@ impl core::fmt::Display for ScheduleError {
             ScheduleError::InvalidExternalTime(seconds) => {
                 write!(f, "external trigger has invalid start time {seconds}")
             }
+            ScheduleError::MidiVoiceLimit(limit) => write!(
+                f,
+                "live MIDI voice limit of {limit} reached; release keys before playing more"
+            ),
             ScheduleError::InvalidExternalGate(seconds) => {
                 write!(f, "external trigger has invalid gate duration {seconds}")
             }

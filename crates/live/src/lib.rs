@@ -6,6 +6,7 @@
 //! by rendering a fundsp sequencer into memory.
 
 mod capture;
+pub mod midi;
 pub mod output;
 pub mod persistent;
 pub mod revision;
@@ -15,6 +16,9 @@ pub mod trigger;
 pub use apteronotus_transport::{
     CycleTime, TempoMap, TempoMapError, TempoPoint, Transport, TransportError,
 };
+pub use midi::{MidiMessage, MidiVoices};
+mod bowed_midi;
+pub use bowed_midi::BowedKeyboard;
 pub use output::{AudioOutput, InputBinding, MasterGain, OutputError};
 pub use persistent::{PersistentError, PersistentRuntime};
 pub use revision::{Generation, Revision, RevisionSlot, SubmitError};
@@ -23,3 +27,6 @@ pub use scheduler::{
     ScheduledRun, ScheduledTrack, TrackFillReport, schedule_external_routed,
 };
 pub use trigger::{ExternalTrigger, TriggerRecordError, TriggerRecorder};
+
+mod output_workload;
+pub use output_workload::OutputWorkload;

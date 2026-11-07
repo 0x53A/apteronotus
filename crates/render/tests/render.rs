@@ -13,7 +13,7 @@ use apteronotus_render::{
     RenderOptions, RenderSpan, Rendered, SampleFormat, TrackSelection, render, stem_lane_labels,
     write_wav,
 };
-use apteronotus_songs::SONGS;
+
 
 /// One short click on the first of four steps, so onsets are exactly one cycle
 /// apart and each is over long before the next.
@@ -141,57 +141,17 @@ fn a_nonzero_cycle_window_prerolls_and_then_discards_the_prefix() {
 /// block was computed, so this is exact rather than approximate.
 #[test]
 fn two_renders_of_one_program_are_identical_sample_for_sample() {
-    let program = evaluate(SONGS[0].source).unwrap();
+    let program = evaluate(CLICKS).unwrap();
     let first = render(&program, &options(4.0)).unwrap();
     let second = render(&program, &options(4.0)).unwrap();
     assert_eq!(first.samples, second.samples);
     assert_eq!(first.voices, second.voices);
 }
 
-#[test]
-fn every_specification_song_renders_to_finite_audible_stereo() {
-    let mut failures = Vec::new();
-    for song in SONGS {
-        let program = match evaluate(song.source) {
-            Ok(program) => program,
-            Err(error) => {
-                failures.push(format!("{}: evaluation: {error}", song.name));
-                continue;
-            }
-        };
-        let rendered = match render(&program, &options(4.0)) {
-            Ok(rendered) => rendered,
-            Err(error) => {
-                failures.push(format!("{}: {error}", song.name));
-                continue;
-            }
-        };
-        if rendered.channels != 2 {
-            failures.push(format!("{}: {} channels", song.name, rendered.channels));
-        }
-        if rendered.peak == 0.0 {
-            failures.push(format!("{}: silent", song.name));
-        }
-        if rendered.clipped > 0 {
-            failures.push(format!(
-                "{}: {} samples past full scale or not finite",
-                song.name, rendered.clipped
-            ));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "the corpus no longer renders cleanly:\n  {}",
-        failures.join("\n  ")
-    );
-}
-
-/// The per-bus signal an automated comparison actually wants. `synthwave` is
-/// the corpus's sends-and-sidechain song, so its stem layout is wider than its
-/// main output.
+/// A routed send makes the stem layout wider than the main output.
 #[test]
 fn stems_expose_the_whole_routed_layout() {
-    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let program = evaluate(include_str!("../../test-fixtures/routed.eod")).unwrap();
     let main = render(&program, &options(2.0)).unwrap();
     let stems = render(
         &program,
@@ -212,7 +172,7 @@ fn stems_expose_the_whole_routed_layout() {
 
 #[test]
 fn raw_stems_expose_bus_inputs_before_returns_clear_them() {
-    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let program = evaluate(include_str!("../../test-fixtures/routed.eod")).unwrap();
     let processed = render(
         &program,
         &RenderOptions {
@@ -321,7 +281,7 @@ fn muting_every_track_keeps_the_output_shape_and_schedules_no_voices() {
 
 #[test]
 fn an_isolated_track_keeps_the_persistent_routed_layout() {
-    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let program = evaluate(include_str!("../../test-fixtures/routed.eod")).unwrap();
     let full = render(
         &program,
         &RenderOptions {
@@ -528,7 +488,7 @@ fn level_stability_excludes_the_response_tail() {
 
 #[test]
 fn stem_labels_follow_the_authoritative_flattened_layout() {
-    let program = evaluate(apteronotus_songs::SYNTHWAVE).unwrap();
+    let program = evaluate(include_str!("../../test-fixtures/routed.eod")).unwrap();
     let labels = stem_lane_labels(&program);
 
     assert_eq!(labels.len(), program.buses.total_channels());

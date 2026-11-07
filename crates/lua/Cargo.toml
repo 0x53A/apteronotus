@@ -19,3 +19,5 @@ piccolo = { path = "../../vendor/piccolo" }
 # Piccolo initializes its (unexposed) stdlib RNG while loading `math`.
 getrandom = { version = "0.2", features = ["js"] }
 getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]

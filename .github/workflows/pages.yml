@@ -36,8 +36,8 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Build web app
-        run: ./tools/build-web.sh --locked
+      - name: Build release web app with SIMD
+        run: ./tools/build-web.sh --release --locked
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

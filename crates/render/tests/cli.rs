@@ -44,66 +44,29 @@ fn wav_samples(path: &Path) -> Vec<f32> {
 }
 
 #[test]
-fn corpus_listing_and_track_listing_need_no_checkout_and_write_nothing() {
+fn empty_song_listing_needs_no_checkout_and_writes_nothing() {
     let directory = Directory::new();
     let listed = directory.run(&["--list-songs"]);
     succeeds(&listed);
-    let text = String::from_utf8(listed.stdout).unwrap();
-    for song in apteronotus_songs::SONGS {
-        assert!(
-            text.lines()
-                .any(|line| line.starts_with(&format!("{} — ", song.name)))
-        );
-    }
-    succeeds(&directory.run(&["--song", "nightshift-dub", "--list-tracks"]));
+    assert!(String::from_utf8(listed.stdout).unwrap().trim().is_empty());
     assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 0);
 }
 
 #[test]
-fn embedded_and_file_sources_render_identical_audio_and_refuse_overwrites() {
+fn file_source_renders_and_refuses_overwrites() {
     let directory = Directory::new();
-    std::fs::write(
-        directory.0.join("source.eod"),
-        apteronotus_songs::NIGHTSHIFT_DUB,
-    )
-    .unwrap();
-    succeeds(&directory.run(&[
-        "--song",
-        "nightshift-dub",
-        "--seconds",
-        "0.1",
-        "--tail",
-        "0",
-        "--quiet",
-    ]));
+    std::fs::write(directory.0.join("source.eod"), include_str!("../../test-fixtures/routed.eod")).unwrap();
     succeeds(&directory.run(&["source.eod", "--seconds", "0.1", "--tail", "0", "--quiet"]));
-    let embedded = directory.0.join("nightshift-dub.wav");
-    let samples = wav_samples(&embedded);
+    let output = directory.0.join("source.wav");
+    let samples = wav_samples(&output);
     assert!(samples.iter().any(|sample| sample.abs() > 0.0001));
-    assert_eq!(samples, wav_samples(&directory.0.join("source.wav")));
-    let before = std::fs::read(&embedded).unwrap();
-    let refused = directory.run(&[
-        "--song",
-        "nightshift-dub",
-        "--seconds",
-        "0.2",
-        "--tail",
-        "0",
-    ]);
+    let before = std::fs::read(&output).unwrap();
+    let refused = directory.run(&["source.eod", "--seconds", "0.2", "--tail", "0"]);
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("--force"));
-    assert_eq!(before, std::fs::read(&embedded).unwrap());
-    succeeds(&directory.run(&[
-        "--song",
-        "nightshift-dub",
-        "--seconds",
-        "0.2",
-        "--tail",
-        "0",
-        "--force",
-        "--quiet",
-    ]));
-    assert_eq!(wav_samples(&embedded).len(), samples.len() * 2);
+    assert_eq!(before, std::fs::read(&output).unwrap());
+    succeeds(&directory.run(&["source.eod", "--seconds", "0.2", "--tail", "0", "--force", "--quiet"]));
+    assert_eq!(wav_samples(&output).len(), samples.len() * 2);
 }
 
 #[test]

@@ -33,6 +33,7 @@ const BUILTINS: &[&str] = &[
     "run",
     "master",
     "play",
+    "midi",
     "tempo",
     "key",
     "timeline",

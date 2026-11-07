@@ -1,0 +1,10 @@
+{
+  "source": "https://sofacoustics.org/data/database/mit/mit_kemar_normal_pinna.sofa",
+  "source_sha256": "e7035994f5fd754058424c061380ee92b1d5ed58fccef2887a4266916616acdf",
+  "prepared_sha256": "d1d7566a05b062cbb7e75d857f36764db682d7562cd2e541984bd13683b323f1",
+  "measurements": 710,
+  "samples_per_ear": 640,
+  "sample_rate": 44100,
+  "preparation": "Common bounded diffuse-field minimum-phase EQ; one global frontal-energy normalization. No per-ear normalization.",
+  "credit": "Gardner, W. G., and Martin, K. D. (1995). HRTF measurements of a KEMAR. JASA 97, 3907\u20133908."
+}

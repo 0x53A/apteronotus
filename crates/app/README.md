@@ -10,7 +10,7 @@ latency-adjusted audible cycle rather than displaying the last edit boundary.
 Run the native app from the repository's Nix development shell:
 
 ```text
-cargo run -p apteronotus-app
+./tools/run-native.sh
 ```
 
 Build and serve the wasm app with:
@@ -64,6 +64,60 @@ autonomous `run(patch)` graphs, route voices and patches through buses, and
 declare writable controls; user-declared controls appear as live sliders beside
 the editor. Engine-owned controls used to fan out analysers and trigger edges
 remain hidden.
+
+## Play a MIDI keyboard
+
+Write a voice and bind it with `midi(v)`, press **Run**, then open **MIDI**,
+choose **Enable / refresh inputs**, and select your keyboard. The native app uses the
+system MIDI backend. The browser requests Web MIDI permission only when you
+click Enable; use a browser supporting Web MIDI on HTTPS or localhost. MIDI
+access never requests system-exclusive messages.
+
+Without a MIDI device, enable **MIDI → Computer keyboard** on native or web,
+then click **Play computer keyboard** in the panel. Run an instrument first.
+The keys **A W S E D F T G Y H U J K** play the chromatic notes C4–C5;
+**Z / X** lower/raise the octave. The panel also sets velocity (1–127) and
+MIDI channel (1–16), and lights held keys. Chords work subject to your keyboard's
+hardware rollover limit. Selecting a hardware MIDI input turns this mode off.
+Returning to the editor, leaving the window, pressing Escape, disabling the
+keyboard or changing octave/channel releases held notes. Typing in the editor
+does not play notes. This input needs no browser MIDI support or permission.
+
+Bind your own instrument with `midi(v)` or `midi(v, {channel = 1})` (channels
+1–16; omitted means all channels). This can coexist with sequenced `play` tracks.
+Each key owns a polyphonic voice: note-on binds pitch and `n.velocity`, note-off
+releases its ADSR, and routed effects continue draining. Held notes have no predicted duration, so
+MIDI voices reject `n.duration`, note-phase curves, and duration-relative
+breakpoints; use ordinary ADSR envelopes or note-seconds curves.
+
+Suggested slider mappings live in the document:
+
+```lua
+local expression = control {name="Expression", range={0,1}, default=.85}
+midi(expression, {cc=82})            -- all channels
+-- midi(expression, {cc=82, channel=1}) -- alternatively, one channel
+```
+
+CC values 0–127 linearly span the control's declared range, update its existing
+shared value, and move the on-screen fader. A control has one suggested mapping;
+a CC may drive several controls. CC numbers 0–119 are available; channel-mode
+messages remain reserved. Mappings take effect on Run alongside the instrument;
+compatible edits retain control values and rebind mappings onto the live arena.
+There is no disk overlay yet; edit the document to change mappings.
+
+Sustain pedal and pitch bend remain ignored unless a pedal's CC is explicitly
+mapped as an ordinary control. **Release all keys**, disconnecting, switching inputs, and MIDI
+all-notes-off release held voices. The bounded event queue releases keys on overflow. At the 256-voice budget, a new key can retire the oldest already-released voice with a 5 ms fade; held voices are never stolen. If every voice is held, the host reports the budget error and releases keys. Stop closes audio; a replacement that resets the
+runtime requires pressing held keys again. Compatible edits retain held voices,
+while new notes use the newly audible instrument. Offline renders contain no
+MIDI key events.
+
+Live MIDI uses the output stream’s rendered-sample clock for note-on, release
+and voice retirement. A stalled callback or suspended browser cannot accumulate
+wall-clock delay in newly scheduled keys. Playback adds a 10 ms scheduling
+margin beyond the render frontier. Browser
+keyboard response also includes the existing 2048-frame WebAudio buffers and
+main-thread scheduling; it currently has greater latency than native playback.
 
 ## Activation and failure semantics
 
@@ -170,7 +224,7 @@ the revision actually audible at the device clock; editing hides them until the
 next successful Run. The layouter checks that equality again after same-frame
 text edits, so old offsets cannot split new Unicode characters. Not present yet:
 graph/type diagnostics while typing, recent documents, autosave, transport
-controls, MIDI/device selection and
+controls, native audio input selection and browser
 input-lane attachment, threaded browser evaluation, browser persistent
 replacement, retained-input pre-roll, or tempo/layout reconciliation.
 Those are UI and host integrations over framework types that already exist;
@@ -203,34 +257,54 @@ buffer does not improve that transition.
 
 ## Realtime headroom
 
-The native callback renders through fundsp's allocation-free, SIMD block path
-in chunks of 64 frames. It requests a 512-frame device buffer when the reported
-device range permits that size, clamps the request to narrower known ranges,
-and retains the platform default when the range is unknown. At 48 kHz this is
-about 10.7 ms of device-buffer latency: enough desktop scheduling headroom
-without committing a future MIDI instrument to a large delay.
+The native callback renders in chunks of 64 frames. It requests a 2048-frame
+device buffer when the reported device range permits, clamps to narrower known
+ranges, and retains the platform default when the range is unknown. At 48 kHz,
+one buffer is 42.7 ms. The browser uses CPAL's 2048-frame WebAudio buffers;
+CPAL schedules two `AudioBufferSourceNode`s from main-thread callbacks.
 
-The browser retains CPAL's 2048-frame WebAudio default. CPAL's browser backend
-double-buffers scheduled `AudioBufferSourceNode`s from main-thread callbacks,
-and the enormous buffer range it reports is synthetic. Forcing the native
-512-frame target left too little scheduling headroom whenever egui, Lua
-evaluation, or the browser occupied that same thread.
+Web builds default to release, enable wasm SIMD128, and run wasm-opt with
+`-O3 --enable-simd`. `./tools/build-web.sh --dev` explicitly opts back into a
+debugging build. `./tools/run-native.sh` builds release for this machine's CPU
+in `target/native-tuned`; that binary should not be redistributed to CPUs with
+different instruction sets. Plain `cargo build -p apteronotus-app --release`
+remains the portable native build.
 
-The workspace development profile optimizes `fundsp`, `apteronotus-synth` and
-`apteronotus-live` while leaving the GUI and Lua boundary debuggable. A normal
-`cargo run -p apteronotus-app` therefore no longer asks audio-rate DSP to meet
-device deadlines using unoptimized code.
+Live voices compile scalar note expressions once and execute reachable nodes
+in a compact, preallocated arena. Scratch lanes are reused after their last
+consumer. Phase-coherent harmonic banks share double-precision fundamental
+rotation and evaluate the unchanged harmonic sum as a polynomial for banks up
+to 16 partials; longer banks retain the partial recurrence. Separate bank
+outputs and envelopes are preserved. Stationary controls propagate their exact
+floating-point fixed values until changed. Constant pan and
+filter parameters select the corresponding FunDSP fixed nodes; controls and
+parameter curves remain live. Source safety gates are removed only where every
+audible path already crosses an ADSR that is exactly zero before that fade.
+The registration, sample rate and room processing are preserved.
+
+`cargo run -p apteronotus-live --example midi-bench --release` measures the
+synthetic MIDI voice, including its shared room, without opening a device.
+It reports construction and render timings for 1, 8, 32 and 100 held keys,
+plus six repeated 100-key bursts.
+`APTERONOTUS_MIDI_STRESS=1 node tools/test-web.mjs` additionally measures the
+browser DSP callbacks and repeated 100-key bursts; both compare against the
+2048-frame deadline. These are performance measurements rather than portable
+CPU-independent pass/fail tests.
 
 ## Song library
 
-The **Library** menu contains the four short teaching examples followed by the
-complete embedded song corpus, including the three variations `nightshift-dub`,
-`undertow-skipping-stones` and `small-light-afterimage`, and the newer finite
-pieces `seven-lanterns` and `paper-orbits`. The list scrolls on
-small windows. Opening a document preserves the displaced editor buffer under
-**Restore previous buffer**, and does not evaluate or activate it until Run.
-The same sources can be auditioned without an audio device through the
-[renderer](../render/README.md), using `--list-songs` and `--song <name>`.
+The **Library** menu offers short teaching examples. The
+curated song library is currently empty. Opening a document preserves the
+displaced editor buffer under **Restore previous buffer** and does not evaluate
+it until Run.
+
+Browser links use stable entry IDs in a URL fragment, for example
+`https://0x53a.github.io/apteronotus/#library=three-notes`. The link opens the
+entry without running it or requesting MIDI permission. Select **Copy link to
+this entry** in Library to share the current library document. Picking an entry
+updates the fragment; browser Back/Forward opens linked entries while retaining
+the displaced editor buffer. Unknown entry IDs leave the editor alone. An
+explicit host `source` attribute takes precedence at initial mount.
 
 Browsing further untouched library documents retains that recovery buffer.
 If you edit a loaded document, its edited text becomes the next buffer saved
@@ -273,7 +347,7 @@ means the current source is unsaved or differs from that saved snapshot.
 You can also open a file without evaluating it from the command line:
 
 ```sh
-cargo run -- songs/seven-lanterns.eod
+cargo run -- my-edit.eod
 ```
 
 Writes finish in a temporary file beside the destination before publication.
@@ -304,5 +378,34 @@ Node 22+ and Chromium are the only harness requirements. Set
 The script serves the local web build, uses a fresh headless browser profile,
 and checks UTF-8 search selections, CRLF round trips, stale/oversized import protection, source-line
 navigation, zero audio contexts before Run, and continued audio-context lifetime
-while an invalid replacement is typed. Screenshots and logs go under
-`target/browser-smoke/`. It does not contact a deployed site.
+while an invalid replacement is typed. It also supplies simulated Web MIDI
+inputs and measures the production WebAudio buffers to check permission,
+selection, note-on/off, switching and unplug cleanup.
+The computer keyboard checks cover chords, repeat suppression, editor isolation
+and focus-loss cleanup before requesting any Web MIDI permission. Set
+`APTERONOTUS_MIDI_ONLY=1` to run just the MIDI and component-lifetime checks.
+Screenshots and logs go under `target/browser-smoke/`. It does not contact a
+deployed site.
+
+### External sources (instruments under test)
+
+Out-of-tree hosts can inject their own persistent instruments without changing
+Apteronotus. Implement `apteronotus_synth::ExternalSource` (output count,
+optional authored horizon and payload size, and a control-thread `prepare`
+returning a zero-input fundsp unit plus an optional health monitor), register it
+in an `ExternalRegistry`, and launch the editor with
+`apteronotus_app::run_native_with(path, registry, starter)`. Scripts play it with
+`run(external("name"))`. Startup does not evaluate the source or start audio;
+each Run carries its own registry snapshot to the evaluation worker, and Lua has
+no filesystem lookup. Registered payload is capped at 256 MiB combined. A
+monitored fault is reported once in the diagnostics panel. The physical violin
+in `apteronotus-research` (`violin/crates/violin-host`, binary `violin-app`) is
+the reference user of this interface.
+
+Native output now observes elapsed callback rendering time. If a callback takes
+longer than the duration of audio it was asked to produce, the diagnostics panel
+reports the cumulative count, stream mean and peak ratios. Measurements include
+preemption during rendering, exclude wake-up delay before callback entry, and
+are approximate concurrent observations. They are not device-underrun counts.
+The observer does not change buffering, stop playback or alter audio. Browser
+callback timing is currently unavailable.

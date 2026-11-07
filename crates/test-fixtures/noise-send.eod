@@ -1,0 +1,6 @@
+tempo(120)
+local room = send { graph = delay(ms(40)) >> feedback(0.35), level = 0.3 }
+local hat = voice { graph = function()
+  return noise() * decay(ms(100)) * 0.15 >> pan(0) >> to(room, 0.5)
+end }
+play(hat, "x*4")

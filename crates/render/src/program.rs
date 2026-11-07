@@ -2,7 +2,7 @@
 //!
 //! These functions are the whole answer to "does this program reach
 //! audio, and with what shape". They are device-free and host-neutral on
-//! purpose: the GUI player asks them at a Run, the corpus test asks them
+//! purpose: the GUI player asks them at a Run, integration tests ask them
 //! without opening a device, and the offline renderer asks them before writing
 //! a file. Keeping one copy is not tidiness — a renderer that disagreed with
 //! the player about what is playable would silently invalidate every
@@ -56,8 +56,8 @@ pub fn playable_channels_for_tracks(
     track_indices: &[usize],
 ) -> Result<usize, String> {
     let persistent = needs_persistent_runtime(program);
-    if program.tracks.is_empty() && program.runs.is_empty() {
-        return Err("the program has no playable tracks or persistent runs".into());
+    if program.tracks.is_empty() && program.runs.is_empty() && program.midi_bindings.is_empty() {
+        return Err("the program has no playable tracks, MIDI bindings or persistent runs".into());
     }
 
     let mut channels = persistent.then(|| program.buses.main_channels());
@@ -94,6 +94,24 @@ pub fn playable_channels_for_tracks(
         }
     }
 
+    for binding in &program.midi_bindings {
+        let graph = program
+            .voice(binding.voice)
+            .ok_or_else(|| "MIDI binding refers to a missing voice".to_string())?;
+        match channels {
+            Some(expected)
+                if graph.channels() != expected && !(persistent && graph.channels() == 1) =>
+            {
+                return Err(format!(
+                    "MIDI voice outputs {} channels, expected {expected}",
+                    graph.channels()
+                ));
+            }
+            None => channels = Some(graph.channels()),
+            _ => {}
+        }
+    }
+
     // Muting every track is a useful measurement and should produce a silent
     // file rather than lose the program's output shape. A main-only program
     // has no explicit layout, so retain the first track's established width
@@ -124,7 +142,8 @@ pub fn playable_channels_for_tracks(
 /// sends is scheduled straight into a voice sequencer, which is both simpler
 /// and one net cheaper per block.
 pub fn needs_persistent_runtime(program: &Program) -> bool {
-    !program.runs.is_empty()
+    !program.midi_bindings.is_empty()
+        || !program.runs.is_empty()
         || !program.controls.specs().is_empty()
         || program.buses.total_channels() != program.buses.main_channels()
         || program.voices.iter().any(|voice| !voice.sends.is_empty())
@@ -144,6 +163,17 @@ pub fn persistent_runtime_at(
     program: &Program,
     transport_seconds: f64,
 ) -> Result<PersistentRuntime, String> {
+    persistent_runtime_prepared(program, transport_seconds, 44_100.0)
+}
+
+/// Prepare persistent graphs for a selected offline or device sample rate.
+/// Native callers must select the device clock before invoking this function.
+/// This does not restore physical history for a nonzero transport coordinate.
+pub fn persistent_runtime_prepared(
+    program: &Program,
+    transport_seconds: f64,
+    sample_rate: f64,
+) -> Result<PersistentRuntime, String> {
     let patches = program
         .runs
         .iter()
@@ -155,12 +185,13 @@ pub fn persistent_runtime_at(
                 .ok_or_else(|| format!("run {index} refers to a missing patch"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    PersistentRuntime::with_audio_inputs_at_transport(
+    PersistentRuntime::prepare(
         &program.buses,
         &program.controls,
-        &program.audio_inputs,
+        Some(&program.audio_inputs),
         patches,
         transport_seconds,
+        sample_rate,
     )
     .map_err(|error| error.to_string())
 }

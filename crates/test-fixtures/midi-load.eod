@@ -1,0 +1,6 @@
+local room = send { graph = reverb(20, secs(1), 0.5), level = 0.2 }
+local v = voice { graph = function(n)
+  return organ_pipe(n.hz, {kind="flute", chiff=0}) * adsr(ms(5), ms(10), 1, ms(100)) * 0.1
+    >> pan(0) >> to(room, 0.5)
+end }
+midi(v)

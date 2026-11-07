@@ -1,0 +1,17 @@
+tempo(120)
+local a, b = bus { channels = 1 }, bus { channels = 1 }
+local function pick(destination)
+  return voice { graph = function(n)
+    return noise() * adsr(ms(1), ms(3), 0.1, ms(2)) * n.velocity
+      >> to(destination, 1) >> mul(0) >> pan(0)
+  end }
+end
+local strings = patch { inputs = 4, graph = function(cv)
+  local mute = control_signal(pattern("0@3 1@1") >> slow(2), bars(2))
+  local low = string_resonator(cv.inputs[3], 110, mute, {min_hz=40, decay=secs(8)})
+  local high = string_resonator(cv.inputs[4], 220, mute, {min_hz=40, decay=secs(8)})
+  return (low + high) * 0.3 >> pan(0)
+end }
+run(strings)
+play(pick(a), timeline { at(secs(0), pattern("x") >> hold(ms(10))) })
+play(pick(b), timeline { at(secs(1), pattern("x") >> hold(ms(10))) })

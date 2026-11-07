@@ -164,6 +164,29 @@ pub fn instantiate_patch_routed_with_audio_inputs_at(
     )
 }
 
+/// Prepare a persistent patch for an explicit host clock, off the audio thread.
+/// This supplies the rate to node constructors, before the graph is published.
+/// As with other transport constructors, stateful history starts empty; this
+/// does not seek or pre-roll. Legacy entry points retain their 44.1 kHz default.
+/// Fixed-clock asset admission can use this boundary; no such asset node is
+/// currently connected to the production graph.
+pub fn prepare_patch_routed(
+    patch: &PatchTemplate,
+    layout: &BusLayout,
+    controls: &ControlStore,
+    audio_inputs: Option<&AudioInputLayout>,
+    transport_seconds: f64,
+    sample_rate: f64,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    if !sample_rate.is_finite() || sample_rate <= 0.0 {
+        return Err(LowerError::InvalidPreparationRate(sample_rate));
+    }
+    instantiate_routed_live_impl(
+        patch.graph(), &Note::new(440.0), layout, &EventRouting::new(),
+        Some(controls), audio_inputs, transport_seconds, None, sample_rate,
+    )
+}
+
 /// Instantiate one autonomous patch for a finite transport span.
 ///
 /// The lifecycle gate is inserted immediately after every nonterminating audio
@@ -203,7 +226,7 @@ pub fn instantiate_timed_patch_routed_with_routing(
         return Err(LowerError::InvalidDuration(active_seconds));
     }
     let fade_seconds = fade_seconds.clamp(0.0, active_seconds * 0.5);
-    let graph = lifecycle_gated_graph(patch.graph(), active_seconds, fade_seconds);
+    let graph = lifecycle_gated_graph(patch.graph(), active_seconds, fade_seconds, false);
     let lifetime = graph.lifetime();
     let unit = instantiate_routed_impl(
         &graph,
@@ -221,7 +244,39 @@ fn lifecycle_gated_graph(
     template: &GraphTemplate,
     active_seconds: f64,
     fade_seconds: f64,
+    protect_adsr: bool,
 ) -> GraphTemplate {
+    let mut needs_gate = vec![!protect_adsr; template.nodes.len()];
+    if protect_adsr {
+        // A live ADSR is already exactly zero before the source safety fade
+        // starts. If every audible path from a source crosses such a product,
+        // a second source gate is redundant, including downstream DSP history.
+        let mut hard_zero = vec![false; template.nodes.len()];
+        for (index, node) in template.nodes.iter().enumerate() {
+            hard_zero[index] = matches!(node.op, Op::Adsr(_)) ||
+                (matches!(node.op, Op::Mul) && node.inputs.iter().any(|input|
+                    matches!(input.source, Source::Port { node, .. } if hard_zero[node])));
+        }
+        for source in template.outputs.iter().copied().chain(
+            template
+                .sends
+                .iter()
+                .flat_map(|send| send.outputs.iter().map(|input| input.source)),
+        ) {
+            if let Source::Port { node, .. } = source {
+                needs_gate[node] = true;
+            }
+        }
+        for (index, node) in template.nodes.iter().enumerate().rev() {
+            if needs_gate[index] && !hard_zero[index] {
+                for input in &node.inputs {
+                    if let Source::Port { node, .. } = input.source {
+                        needs_gate[node] = true;
+                    }
+                }
+            }
+        }
+    }
     let gate = Node {
         op: Op::RunGate {
             active_seconds,
@@ -244,7 +299,7 @@ fn lifecycle_gated_graph(
         other => other,
     };
 
-    for node in &template.nodes {
+    for (original_index, node) in template.nodes.iter().enumerate() {
         let mut inputs: Vec<Input> = node
             .inputs
             .iter()
@@ -253,15 +308,27 @@ fn lifecycle_gated_graph(
                 src: input.src,
             })
             .collect();
-        if matches!(node.op, Op::FluePipe { .. }) {
+        let driven_port = match node.op {
+            Op::FluePipe { .. } => Some(1),
+            Op::BowedString(_) => Some(2),
+            _ => None,
+        };
+        if let Some(port) = driven_port {
             let drive_gate = nodes.len();
             nodes.push(Node {
                 op: Op::Mul,
-                inputs: vec![inputs[1], Input::new(gate_source)],
+                inputs: vec![
+                    inputs[port],
+                    Input::new(if needs_gate[original_index] {
+                        gate_source
+                    } else {
+                        Source::Const(1.0)
+                    }),
+                ],
                 tail: 0.0,
                 src: node.src,
             });
-            inputs[1].source = Source::port(drive_gate, 0);
+            inputs[port].source = Source::port(drive_gate, 0);
         }
         let node_id = nodes.len();
         nodes.push(Node {
@@ -278,7 +345,14 @@ fn lifecycle_gated_graph(
                 let mul_id = nodes.len();
                 nodes.push(Node {
                     op: Op::Mul,
-                    inputs: vec![Input::new(*output), Input::new(gate_source)],
+                    inputs: vec![
+                        Input::new(*output),
+                        Input::new(if needs_gate[original_index] {
+                            gate_source
+                        } else {
+                            Source::Const(1.0)
+                        }),
+                    ],
                     tail: 0.0,
                     src: node.src,
                 });
@@ -327,6 +401,69 @@ pub fn instantiate_routed_with_controls(
     instantiate_routed_impl(template, note, layout, event, Some(controls), None, 0.0)
 }
 
+/// Instantiate a polyphonic held voice with an explicit runtime release gate.
+/// Unknown note duration is never used to drive live ADSRs. The scheduler must
+/// keep the unit until [`crate::live_voice_lifetime`] after the eventual release.
+pub fn instantiate_live_routed_with_controls(
+    template: &GraphTemplate,
+    note: &Note,
+    layout: &BusLayout,
+    event: &EventRouting,
+    controls: &ControlStore,
+    gate: &crate::LiveGate,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    crate::validate_live_voice(template)?;
+    for id in crate::template::Implicit::ALL
+        .into_iter()
+        .map(crate::template::ParamId::Implicit)
+        .chain((0..template.params.len()).map(crate::template::ParamId::Declared))
+    {
+        if let ParamValue::Curve(curve) = note.value(id, template)?
+            && curve.clock == crate::template::CurveClock::NotePhase
+        {
+            return Err(LowerError::LiveDurationRequired);
+        }
+    }
+    let delay = crate::live::release_delay(template);
+    // Reuse the finite-run source rewrite, substituting an atomic runtime gate
+    // for its construction-time gate. The finite placeholder never renders.
+    let mut graph = lifecycle_gated_graph(template, 1.0, 0.0, true);
+    // Lifted constants/controls and curves can themselves be audio outputs.
+    // Gate those direct routes too, while leaving ordinary ADSR/DSP paths alone.
+    for source in &mut graph.outputs {
+        if !matches!(source, Source::Port { .. }) {
+            let node = graph.nodes.len();
+            graph.nodes.push(Node {
+                op: Op::Mul,
+                inputs: vec![Input::new(*source), Input::new(Source::port(0, 0))],
+                tail: 0.0,
+                src: None,
+            });
+            *source = Source::port(node, 0);
+        }
+    }
+    let voice = instantiate_routed_live_impl(
+        &graph,
+        note,
+        layout,
+        event,
+        Some(controls),
+        None,
+        0.0,
+        Some((gate, delay)),
+        44_100.0,
+    )?;
+    // A late safety fade also covers biased arithmetic and raw control/curve
+    // routes which can keep producing DC after their oscillators stop. Place
+    // it after the declared response tail, so it cannot truncate an ADSR or
+    // downstream resonator's normal release.
+    let tail = template.lifetime_for(note)?.gate_tail;
+    Ok(Box::new(crate::adsr::LiveOutputGate::new(
+        voice,
+        crate::adsr::LiveEnvelopeUnit::lifecycle(gate.clone(), delay + tail),
+    )))
+}
+
 fn instantiate_routed_impl(
     template: &GraphTemplate,
     note: &Note,
@@ -336,6 +473,33 @@ fn instantiate_routed_impl(
     audio_inputs: Option<&AudioInputLayout>,
     transport_seconds: f64,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
+    reject_prepared_voice(template)?;
+    instantiate_routed_live_impl(
+        template,
+        note,
+        layout,
+        event,
+        controls,
+        audio_inputs,
+        transport_seconds,
+        None,
+        44_100.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instantiate_routed_live_impl(
+    template: &GraphTemplate,
+    note: &Note,
+    layout: &BusLayout,
+    event: &EventRouting,
+    controls: Option<&ControlStore>,
+    audio_inputs: Option<&AudioInputLayout>,
+    transport_seconds: f64,
+    live: Option<(&crate::LiveGate, f64)>,
+    sample_rate: f64,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    if live.is_some() { reject_prepared_voice(template)?; }
     if !transport_seconds.is_finite() {
         return Err(LowerError::InvalidTransportTime(transport_seconds));
     }
@@ -410,7 +574,7 @@ fn instantiate_routed_impl(
         }
     }
 
-    instantiate_to_lanes(
+    instantiate_to_lanes_live(
         template,
         note,
         controls,
@@ -418,6 +582,8 @@ fn instantiate_routed_impl(
         transport_seconds,
         layout.total_channels(),
         routes,
+        live,
+        sample_rate,
     )
 }
 
@@ -430,16 +596,69 @@ fn instantiate_to_lanes(
     output_channels: usize,
     routes: impl IntoIterator<Item = (usize, Source, f64)>,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
+    reject_prepared_voice(template)?;
+    instantiate_to_lanes_live(
+        template,
+        note,
+        controls,
+        audio_inputs,
+        transport_seconds,
+        output_channels,
+        routes,
+        None,
+        44_100.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instantiate_to_lanes_live(
+    template: &GraphTemplate,
+    note: &Note,
+    controls: Option<&ControlStore>,
+    audio_inputs: Option<&AudioInputLayout>,
+    transport_seconds: f64,
+    output_channels: usize,
+    routes: impl IntoIterator<Item = (usize, Source, f64)>,
+    live: Option<(&crate::LiveGate, f64)>,
+    sample_rate: f64,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
     let external_channels = audio_inputs.map_or(0, AudioInputLayout::total_channels);
+    if live.is_some()
+        && template.inputs == 0
+        && external_channels == 0
+        && !template
+            .nodes
+            .iter()
+            .flat_map(|node| &node.inputs)
+            .any(|input| matches!(input.source, Source::ExternalAudio { .. }))
+    {
+        return instantiate_compiled_live(
+            template,
+            note,
+            controls,
+            transport_seconds,
+            output_channels,
+            routes,
+            live,
+        );
+    }
     let mut net = Net::new(template.inputs + external_channels, output_channels);
+
+    net.set_sample_rate(sample_rate);
 
     // Push every node first, so wiring is a second pass and node order in the
     // template need not be a topological order for the walk to work. (It still
     // must be one — `validate` rejects forward references. A Delay node owns
     // history, but it does not make an arbitrary Net cycle well-defined;
     // feedback needs an explicit graph representation before it is legal.)
+    let folded = init_constants(template, note)?;
+    let mut constants = HashMap::new();
     let mut nodes: Vec<FundspNode> = Vec::with_capacity(template.nodes.len());
     for (node_index, node) in template.nodes.iter().enumerate() {
+        if let Some(value) = folded[node_index] {
+            nodes.push(constant_node(f64::from(value), &mut net, &mut constants));
+            continue;
+        }
         nodes.push(net.push(unit_for(
             &node.op,
             node_index,
@@ -447,6 +666,8 @@ fn instantiate_to_lanes(
             template,
             controls,
             transport_seconds,
+            live,
+            sample_rate,
         )?));
     }
 
@@ -460,13 +681,16 @@ fn instantiate_to_lanes(
         audio_inputs,
         nodes: &nodes,
         net: &mut net,
-        constants: HashMap::new(),
+        constants,
         param_nodes: HashMap::new(),
         control_nodes: HashMap::new(),
         input_nodes: HashMap::new(),
     };
 
     for (index, node) in template.nodes.iter().enumerate() {
+        if folded[index].is_some() {
+            continue;
+        }
         for (port, input) in node.inputs.iter().enumerate() {
             let (from, channel) = resolver.resolve(input.source)?;
             resolver.net.connect(from, channel, nodes[index], port);
@@ -495,6 +719,317 @@ fn instantiate_to_lanes(
     Ok(Box::new(net))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn instantiate_compiled_live(
+    template: &GraphTemplate,
+    note: &Note,
+    controls: Option<&ControlStore>,
+    transport_seconds: f64,
+    channels: usize,
+    routes: impl IntoIterator<Item = (usize, Source, f64)>,
+    live: Option<(&crate::LiveGate, f64)>,
+) -> Result<Box<dyn AudioUnit>, LowerError> {
+    use crate::ParamId;
+    use crate::compiled::{CompiledGraph, Value};
+    let folded = init_constants(template, note)?;
+    // Composition may leave staged nodes that are no longer connected to any
+    // output. Execute only the dependency closure of audible routes. A folded
+    // scalar already owns its value, so its former inputs need no audio slots.
+    let routes: Vec<_> = routes.into_iter().collect();
+    let mut reachable = vec![false; template.nodes.len()];
+    let mut pending: Vec<_> = routes.iter().map(|(_, source, _)| *source).collect();
+    while let Some(source) = pending.pop() {
+        if let Source::Port { node, .. } = source
+            && !reachable[node]
+        {
+            reachable[node] = true;
+            if folded[node].is_none() {
+                pending.extend(template.nodes[node].inputs.iter().map(|input| input.source));
+            }
+        }
+    }
+    let mut compiled = CompiledGraph::new(channels);
+    let mut nodes: Vec<Vec<Value>> = Vec::with_capacity(template.nodes.len());
+    let mut parameters = HashMap::new();
+    let mut globals = HashMap::new();
+    let mut bank_outputs = HashMap::new();
+    let mut common: Vec<(Op, Vec<Value>, Vec<Value>)> = Vec::new();
+    #[allow(clippy::too_many_arguments)]
+    fn source(
+        source: Source,
+        graph: &mut CompiledGraph,
+        nodes: &[Vec<Value>],
+        parameters: &mut HashMap<ParamId, Value>,
+        globals: &mut HashMap<ControlId, Value>,
+        template: &GraphTemplate,
+        note: &Note,
+        controls: Option<&ControlStore>,
+    ) -> Result<Value, LowerError> {
+        Ok(match source {
+            Source::Const(value) => Value::Constant(value as f32),
+            Source::Port { node, channel } => nodes[node][channel as usize],
+            Source::Param(id) => {
+                if let Some(value) = parameters.get(&id) {
+                    return Ok(*value);
+                }
+                let value = match note.value(id, template)? {
+                    ParamValue::Number(value) => Value::Constant(value as f32),
+                    ParamValue::Curve(curve) => {
+                        let gate = note.duration;
+                        graph.primitive(
+                            Box::new(envelope(move |time: f32| {
+                                curve
+                                    .at(f64::from(time), gate)
+                                    .expect("parameter curve validated before lowering")
+                                    as f32
+                            })),
+                            Vec::new(),
+                        )[0]
+                    }
+                };
+                parameters.insert(id, value);
+                value
+            }
+            Source::Control(id) => {
+                if let Some(value) = globals.get(&id) {
+                    return Ok(*value);
+                }
+                let controls = controls.ok_or(LowerError::ControlStoreRequired)?;
+                let value = graph.shared(controls.shared(id)?.clone());
+                globals.insert(id, value);
+                value
+            }
+            Source::ExternalAudio { .. } => return Err(LowerError::UnknownAudioInput),
+            Source::Input(_) => unreachable!("live graph inputs validated before lowering"),
+        })
+    }
+    for (index, node) in template.nodes.iter().enumerate() {
+        if !reachable[index] {
+            nodes.push(Vec::new());
+            continue;
+        }
+        if let Some(value) = folded[index] {
+            nodes.push(vec![Value::Constant(value)]);
+            continue;
+        }
+        let mut inputs = node
+            .inputs
+            .iter()
+            .map(|input| {
+                source(
+                    input.source,
+                    &mut compiled,
+                    &nodes,
+                    &mut parameters,
+                    &mut globals,
+                    template,
+                    note,
+                    controls,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let identity = match (&node.op, inputs.as_slice()) {
+            (Op::Mul | Op::Div, [value, Value::Constant(1.0)]) => Some(*value),
+            (Op::Mul, [Value::Constant(1.0), value]) => Some(*value),
+            _ => None,
+        };
+        if let Some(value) = identity {
+            nodes.push(vec![value]);
+            continue;
+        }
+        if let Some(value) = bank_outputs.get(&index) {
+            nodes.push(vec![*value]);
+            continue;
+        }
+        if let (Op::Harmonics { .. }, [Value::Constant(frequency)]) = (&node.op, inputs.as_slice())
+        {
+            let mut bank_indices = Vec::new();
+            let mut amplitudes = Vec::new();
+            for (candidate, bank) in template.nodes.iter().enumerate().skip(index) {
+                if !reachable[candidate] {
+                    continue;
+                }
+                let Op::Harmonics {
+                    amplitudes: weights,
+                } = &bank.op
+                else {
+                    continue;
+                };
+                let scalar = match bank.inputs[0].source {
+                    Source::Const(value) => Some(value as f32),
+                    Source::Port { node, channel: 0 } => folded[node],
+                    Source::Param(id) => match note.value(id, template)? {
+                        ParamValue::Number(value) => Some(value as f32),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if scalar.map(f32::to_bits) == Some(frequency.to_bits()) {
+                    bank_indices.push(candidate);
+                    amplitudes.push(weights.clone());
+                }
+            }
+            if bank_indices.len() > 1 {
+                let outputs = compiled.primitive(
+                    Box::new(crate::harmonic::HarmonicBanks::fixed(
+                        &amplitudes,
+                        *frequency,
+                    )),
+                    Vec::new(),
+                );
+                for (candidate, output) in bank_indices.iter().zip(&outputs) {
+                    bank_outputs.insert(*candidate, *output);
+                }
+                nodes.push(vec![bank_outputs[&index]]);
+                continue;
+            }
+        }
+        // These operations have identical clocks and deterministic initial
+        // state within a voice. Noise, seeded oscillators and all other state
+        // remain independent. Live ADSRs do not use jittered envelope seeds.
+        let reusable = matches!(
+            node.op,
+            Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Pow
+                | Op::Neg
+                | Op::Clamp { .. }
+                | Op::Slew { .. }
+                | Op::Adsr(_)
+                | Op::Harmonics { .. }
+        );
+        if reusable
+            && let Some((_, _, outputs)) = common
+                .iter()
+                .find(|(op, sources, _)| op == &node.op && sources == &inputs)
+        {
+            nodes.push(outputs.clone());
+            continue;
+        }
+        let common_inputs = reusable.then(|| inputs.clone());
+        let outputs = if let (Some((gate, _)), Op::Adsr(adsr)) = (live, &node.op) {
+            compiled.envelope(crate::adsr::LiveEnvelopeUnit::adsr(*adsr, gate.clone()))
+        } else if let (Some((gate, delay)), Op::RunGate { .. }) = (live, &node.op) {
+            compiled.envelope(crate::adsr::LiveEnvelopeUnit::lifecycle(
+                gate.clone(),
+                delay,
+            ))
+        } else if let Op::Slew { response_time, initial } = &node.op {
+            let seconds = resolve_init_scalar(*response_time, note, template)?;
+            if !seconds.is_finite() || seconds < 0.0 { return Err(LowerError::InvalidSlewTime(seconds)); }
+            compiled.slew(crate::analyzer::SlewUnit::new(seconds, *initial), inputs[0])
+        } else if matches!(
+            node.op,
+            Op::Lowpass | Op::Highpass | Op::Bandpass | Op::Peak
+        ) && matches!(
+            inputs.as_slice(),
+            [_, Value::Constant(_), Value::Constant(_)]
+        ) {
+            let [audio, Value::Constant(hz), Value::Constant(q)] = inputs.as_slice() else {
+                unreachable!()
+            };
+            let unit: Box<dyn AudioUnit> = match node.op {
+                Op::Lowpass => Box::new(lowpass_hz(*hz, *q)),
+                Op::Highpass => Box::new(highpass_hz(*hz, *q)),
+                Op::Bandpass => Box::new(bandpass_hz(*hz, *q)),
+                Op::Peak => Box::new(peak_hz(*hz, *q)),
+                _ => unreachable!(),
+            };
+            compiled.primitive(unit, vec![*audio])
+        } else if matches!(node.op, Op::Pan) && matches!(inputs.get(1), Some(Value::Constant(_))) {
+            let Value::Constant(position) = inputs.pop().expect("panner input validated") else {
+                unreachable!()
+            };
+            compiled.primitive(Box::new(pan(position)), inputs)
+        } else if matches!(
+            node.op,
+            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Pow | Op::Neg | Op::Clamp { .. }
+        ) {
+            compiled.math(&node.op, inputs)
+        } else {
+            let mut unit = unit_for(
+                &node.op,
+                index,
+                note,
+                template,
+                controls,
+                transport_seconds,
+                live,
+                44_100.0,
+            )?;
+            // Explicit per-node seeds remain independent of runtime addresses.
+            unit.set_hash(node_seed(note.seed, index, 0));
+            compiled.primitive(unit, inputs)
+        };
+        if let Some(inputs) = common_inputs {
+            common.push((node.op.clone(), inputs, outputs.clone()));
+        }
+        nodes.push(outputs);
+    }
+    for (lane, route, gain) in routes {
+        let value = source(
+            route,
+            &mut compiled,
+            &nodes,
+            &mut parameters,
+            &mut globals,
+            template,
+            note,
+            controls,
+        )?;
+        compiled.route(lane, value, gain as f32);
+    }
+    compiled.finish();
+    Ok(Box::new(compiled))
+}
+
+// Fold only stateless scalar arithmetic over construction literals and bound
+// scalar note values. Controls, inputs, curves and stateful DSP always render.
+// Round every operation to f32 exactly as the audio graph does; preserve node
+// indices so oscillator/noise seeds do not change with this optimization.
+fn init_constants(template: &GraphTemplate, note: &Note) -> Result<Vec<Option<f32>>, LowerError> {
+    let mut values = Vec::with_capacity(template.nodes.len());
+    for node in &template.nodes {
+        let scalar = |source: Source| -> Result<Option<f32>, LowerError> {
+            Ok(match source {
+                Source::Const(value) => Some(value as f32),
+                Source::Param(id) => match note.value(id, template)? {
+                    ParamValue::Number(value) => Some(value as f32),
+                    ParamValue::Curve(_) => None,
+                },
+                Source::Port { node, channel: 0 } => values[node],
+                _ => None,
+            })
+        };
+        let a = node
+            .inputs
+            .first()
+            .map(|input| scalar(input.source))
+            .transpose()?
+            .flatten();
+        let b = node
+            .inputs
+            .get(1)
+            .map(|input| scalar(input.source))
+            .transpose()?
+            .flatten();
+        let value = match (&node.op, a, b) {
+            (Op::Add, Some(a), Some(b)) => Some(a + b),
+            (Op::Sub, Some(a), Some(b)) => Some(a - b),
+            (Op::Mul, Some(a), Some(b)) => Some(a * b),
+            (Op::Div, Some(a), Some(b)) => Some(a / b),
+            (Op::Pow, Some(a), Some(b)) => Some(a.powf(b)),
+            (Op::Neg, Some(a), _) => Some(-a),
+            (Op::Clamp { min, max }, Some(a), _) => Some(a.clamp(*min as f32, *max as f32)),
+            _ => None,
+        };
+        values.push(value);
+    }
+    Ok(values)
+}
+
 fn mix_sources(
     mut sources: Vec<(FundspNode, usize)>,
     net: &mut Net,
@@ -514,6 +1049,8 @@ fn mix_sources(
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum LowerError {
+    PreparedPatchRequired,
+    External(String),
     Template(TemplateError),
     Routing(RoutingError),
     Control(ControlError),
@@ -525,8 +1062,14 @@ pub enum LowerError {
     InvalidPluckParameter,
     InvalidSlewTime(f64),
     InvalidTransportTime(f64),
+    InvalidPreparationRate(f64),
+    NodePreparation { node: usize, reason: &'static str },
     InvalidBreakpointCurve,
     UnknownAudioInput,
+    /// A live note cannot know its duration until the player releases it.
+    LiveDurationRequired,
+    LiveInputsUnsupported,
+    InvalidLiveRelease(f64),
 }
 
 impl From<TemplateError> for LowerError {
@@ -556,6 +1099,8 @@ impl From<ParamValueError> for LowerError {
 impl core::fmt::Display for LowerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            LowerError::PreparedPatchRequired => write!(f, "external source requires explicit persistent patch preparation"),
+            LowerError::External(error) => write!(f, "cannot prepare external source: {error}"),
             LowerError::Template(error) => error.fmt(f),
             LowerError::Routing(error) => error.fmt(f),
             LowerError::Control(error) => error.fmt(f),
@@ -587,6 +1132,8 @@ impl core::fmt::Display for LowerError {
                     "slew response time must be finite and non-negative, got {seconds}"
                 )
             }
+            LowerError::NodePreparation { node, reason } => write!(f, "cannot prepare graph node {node}: {reason}"),
+            LowerError::InvalidPreparationRate(rate) => write!(f, "preparation sample rate must be finite and positive, got {rate}"),
             LowerError::InvalidTransportTime(seconds) => write!(
                 f,
                 "persistent transport start must be finite, got {seconds}"
@@ -597,6 +1144,17 @@ impl core::fmt::Display for LowerError {
                     "breakpoint curve times are not finite and strictly increasing"
                 )
             }
+            LowerError::LiveInputsUnsupported => {
+                write!(f, "live keyboard voices must have zero graph inputs")
+            }
+            LowerError::LiveDurationRequired => write!(
+                f,
+                "live voices cannot use n.duration or note-phase curves; use an ADSR or note-seconds curve"
+            ),
+            LowerError::InvalidLiveRelease(seconds) => write!(
+                f,
+                "live note release must be finite and nonnegative, got {seconds}"
+            ),
             LowerError::UnknownAudioInput => {
                 write!(f, "graph refers to an audio input outside its host layout")
             }
@@ -710,20 +1268,59 @@ impl Resolver<'_> {
 
 /// Backend values corresponding one-for-one with a data-only [`ControlLayout`].
 pub struct ControlStore {
+    externals: std::sync::Mutex<Vec<(String, std::sync::Arc<dyn crate::external::ExternalMonitor>)>>,
+    rooms: std::sync::Mutex<Vec<crate::spatial_host::RoomHandle>>,
     layout: ControlLayout,
     values: Vec<Shared>,
+    bowed: std::sync::Mutex<HashMap<ControlId,crate::bowed_host::BowedHandle>>,
 }
 
 impl ControlStore {
     pub fn new(layout: &ControlLayout) -> ControlStore {
         ControlStore {
+            externals: std::sync::Mutex::new(Vec::new()),
+            rooms: std::sync::Mutex::new(Vec::new()),
             layout: layout.clone(),
+            bowed: std::sync::Mutex::new(HashMap::new()),
             values: layout
                 .specs()
                 .iter()
                 .map(|spec| shared(spec.default as f32))
                 .collect(),
         }
+    }
+
+    /// Sample the first failed external unit on the host/control thread.
+    /// This lock is never taken by DSP; healthy/completed instances return None.
+    pub fn external_fault(&self) -> Option<crate::external::ExternalFault> {
+        self.externals.lock().expect("control-thread external registry").iter()
+            .enumerate().find_map(|(instance,(kind,monitor))| monitor.fault()
+                .map(|reason| crate::external::ExternalFault{instance,kind:kind.clone(),reason}))
+    }
+
+    /// Number of monitored external units registered by preparation.
+    pub fn external_monitor_count(&self) -> usize {
+        self.externals.lock().expect("control-thread external registry").len()
+    }
+
+    /// Reserve all changed room instances before publishing any of them.
+    pub fn prepare_room_edits(
+        &self,
+        changes: &[(crate::spatial::RoomSpec, crate::spatial::RoomSpec)],
+    ) -> Result<Vec<crate::spatial_host::RoomEdit>, &'static str> {
+        let rooms = self.rooms.lock().expect("control-thread room registry");
+        let mut used = vec![false; rooms.len()];
+        let mut edits = Vec::new();
+        for (old, new) in changes {
+            let index = rooms
+                .iter()
+                .enumerate()
+                .position(|(i, h)| !used[i] && h.spec() == *old)
+                .ok_or("active room instance missing")?;
+            used[index] = true;
+            edits.push(rooms[index].prepare(new.clone())?);
+        }
+        Ok(edits)
     }
 
     pub fn set(&self, id: ControlId, value: f64) -> Result<(), ControlError> {
@@ -748,6 +1345,17 @@ impl ControlStore {
             .ok_or(ControlError::UnknownControl(id))
     }
 
+    /// Arena-scoped gesture port installed when its retained instrument lowers.
+    pub fn bowed_handle(&self,id:ControlId)->Option<crate::bowed_host::BowedHandle> {
+        self.bowed.lock().ok()?.get(&id).cloned()
+    }
+    fn register_bowed(&self,id:ControlId,live:bool)->Result<crate::bowed_host::BowedHandle,ControlError> {
+        self.layout.spec(id).ok_or(ControlError::UnknownControl(id))?;
+        let handle=crate::bowed_host::BowedHandle::new(live);
+        self.bowed.lock().expect("control-thread bowed registry").insert(id,handle.clone());
+        Ok(handle)
+    }
+
     fn shared(&self, id: ControlId) -> Result<&Shared, ControlError> {
         self.layout
             .spec(id)
@@ -764,6 +1372,12 @@ fn constant_node(x: f64, net: &mut Net, constants: &mut HashMap<u64, FundspNode>
         .or_insert_with(|| net.push(Box::new(dc(x as f32))))
 }
 
+fn reject_prepared_voice(template: &GraphTemplate) -> Result<(),LowerError> {
+    if template.nodes.iter().any(|node|matches!(node.op,Op::External(_))) {
+        Err(LowerError::PreparedPatchRequired)
+    } else { Ok(()) }
+}
+
 fn unit_for(
     op: &Op,
     node_index: usize,
@@ -771,7 +1385,26 @@ fn unit_for(
     template: &GraphTemplate,
     controls: Option<&ControlStore>,
     transport_seconds: f64,
+    live: Option<(&crate::LiveGate, f64)>,
+    sample_rate: f64,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
+    if let Some((gate, delay)) = live {
+        match op {
+            Op::Adsr(adsr) => {
+                return Ok(Box::new(crate::adsr::LiveEnvelopeUnit::adsr(
+                    *adsr,
+                    gate.clone(),
+                )));
+            }
+            Op::RunGate { .. } => {
+                return Ok(Box::new(crate::adsr::LiveEnvelopeUnit::lifecycle(
+                    gate.clone(),
+                    delay,
+                )));
+            }
+            _ => {}
+        }
+    }
     let unit: Box<dyn AudioUnit> = match op {
         Op::Sine => Box::new(sine()),
         Op::FluePipe { min_hz } => Box::new(crate::flue::FlueUnit::new(*min_hz)),
@@ -850,8 +1483,38 @@ fn unit_for(
             })),
         },
         Op::DcBlock => Box::new(dcblock()),
+        Op::ConcertHall => Box::new(crate::concert_hall::HallUnit::new(sample_rate)
+            .map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?),
+        Op::SpatialRoom(spec) => {
+            let unit=crate::spatial_host::ReplaceableRoom::new(spec.clone(),sample_rate).map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?;
+            if let Some(controls)=controls {controls.rooms.lock().expect("control-thread room registry").push(unit.handle());}
+            Box::new(unit)
+        },
+        Op::Convolve(response) => Box::new(crate::convolution::ConvolutionUnit::new(response.clone(),sample_rate).map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?),
         Op::StringResonator { min_hz, decay } => {
             Box::new(crate::string::StringUnit::new(*min_hz, *decay))
+        }
+        Op::BowedString(config) => Box::new(
+            crate::bowed::BowedString::new(*config, sample_rate)
+                .map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?,
+        ),
+        Op::External(spec) => {
+            let controls=controls.ok_or(LowerError::ControlStoreRequired)?;
+            let source=spec.source();
+            let prepared=source.prepare(sample_rate,transport_seconds).map_err(LowerError::External)?;
+            if prepared.unit.inputs()!=0 || prepared.unit.outputs()!=source.outputs() {
+                return Err(LowerError::External(format!("{} prepared a unit with the wrong channel layout",source.kind())));
+            }
+            if let Some(monitor)=prepared.monitor {
+                controls.externals.lock().expect("control-thread external registry").push((source.kind().to_string(),monitor));
+            }
+            prepared.unit
+        }
+        Op::BowedPerformance {key,score} => {
+            let controls=controls.ok_or(LowerError::ControlStoreRequired)?;
+            let handle=controls.register_bowed(*key,score.live)?;
+            Box::new(crate::bowed_host::BowedInstrumentUnit::new(score.clone(),handle,transport_seconds)
+                .expect("validated bowed performance"))
         }
         Op::Delay(range) => Box::new(tap(range.min_seconds() as f32, range.max_seconds() as f32)),
         Op::Reverb {
@@ -1237,4 +1900,102 @@ pub fn zero_crossing_hz(samples: &[f32], sample_rate: f64) -> f64 {
         .filter(|w| (w[0] <= 0.0) != (w[1] <= 0.0))
         .count();
     crossings as f64 * sample_rate / (2.0 * samples.len() as f64)
+}
+
+#[cfg(test)]
+mod live_compiler_tests {
+    use super::*;
+    use crate::{Adsr, ControlSpec, GraphBuilder, LiveGate};
+
+    #[test]
+    fn compiled_live_graph_matches_net_with_controls_filter_history_and_release() {
+        let mut layout = ControlLayout::new();
+        let gain = layout.add(ControlSpec::new("gain", 0.0, 1.0, 0.7)).unwrap();
+        let controls = ControlStore::new(&layout);
+        let mut builder = GraphBuilder::new();
+        let first = builder.harmonics(220.0, vec![0.5, 0.3]);
+        let second = builder.harmonics(220.0, vec![0.0, 0.0, 0.1, 0.05]);
+        let noise = builder.noise();
+        let air = builder.bandpass(noise, 1100.0, 0.7);
+        let air = builder.mul(air, 0.01);
+        let combined = builder.add(first, second);
+        let combined = builder.add(combined, air);
+        let adsr = builder.adsr(Adsr::new(0.01, 0.02, 0.72, 0.04));
+        let voiced = builder.mul(combined, adsr);
+        let level = builder.slew(builder.control(gain), 0.025).unwrap();
+        let voiced = builder.mul(voiced, level);
+        let (left, right) = builder.pan(voiced, -0.4);
+        let template = builder.out(&[left, right]).unwrap();
+        let gate = LiveGate::new();
+        let delay = crate::live::release_delay(&template);
+        let optimized = lifecycle_gated_graph(&template, 1.0, 0.0, true);
+        let mut reference = lifecycle_gated_graph(&template, 1.0, 0.0, false);
+        // An unused host input selects the legacy Net lowering as the reference.
+        reference.inputs = 1;
+        let note = Note::new(220.0);
+        let mut optimized = instantiate_to_lanes_live(
+            &optimized,
+            &note,
+            Some(&controls),
+            None,
+            0.0,
+            2,
+            optimized
+                .outputs
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(lane, source)| (lane, source, 1.0)),
+            Some((&gate, delay)),
+            44_100.0,
+        )
+        .unwrap();
+        let mut reference = instantiate_to_lanes_live(
+            &reference,
+            &note,
+            Some(&controls),
+            None,
+            0.0,
+            2,
+            reference
+                .outputs
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(lane, source)| (lane, source, 1.0)),
+            Some((&gate, delay)),
+            44_100.0,
+        )
+        .unwrap();
+        for unit in [&mut optimized, &mut reference] {
+            unit.set_sample_rate(8000.0);
+            unit.allocate();
+        }
+        let empty = BufferVec::new(0);
+        let mut host = BufferVec::new(1);
+        host.buffer_mut().channel_f32_mut(0).fill(0.0);
+        let mut actual = BufferVec::new(2);
+        let mut expected = BufferVec::new(2);
+        for block in 0..120 {
+            if block == 20 {
+                controls.set(gain, 0.2).unwrap();
+            }
+            if block == 40 {
+                gate.release_after(0.15).unwrap();
+            }
+            let size = [1, 7, 17, 64][block % 4];
+            optimized.process(size, &empty.buffer_ref(), &mut actual.buffer_mut());
+            reference.process(size, &host.buffer_ref(), &mut expected.buffer_mut());
+            for channel in 0..2 {
+                for frame in 0..size {
+                    assert!(
+                        (actual.buffer_ref().at_f32(channel, frame)
+                            - expected.buffer_ref().at_f32(channel, frame))
+                        .abs()
+                            < 1e-6
+                    );
+                }
+            }
+        }
+    }
 }

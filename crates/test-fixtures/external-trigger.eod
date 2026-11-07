@@ -1,0 +1,16 @@
+tempo(120)
+local input = audio_input { name = "input", channels = 1, fallback = "silence" }
+local hz = input >> pitch_tracker { min = 65, max = 1100, hold = ms(140) }
+local hit = input >> onset_detector { floor = 0.04, hold = ms(90) }
+local room = send { graph = fdn { size = 8, t60 = secs(2), damping = 0.42 }, level = 0.3 }
+local drone = patch { graph = function() return sine(220) * 0.08 >> pan(0) end }
+local bell = voice {
+  params = { bright = { 0, 1, 0.5 } },
+  graph = function(n)
+    return sine(n.hz) * adsr(ms(5), ms(20), 0.5, ms(100)) * n.velocity * 0.2
+      >> pan(0) >> to(room, 0.5)
+  end,
+}
+run(drone)
+play(bell, hit >> bell.hz(at_onset(hz >> slew(ms(20))))
+  >> bell.bright(perlin(0.05)) >> degrade(0.35))

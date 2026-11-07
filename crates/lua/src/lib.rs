@@ -6,6 +6,8 @@
 //! before the program can reach a scheduler or audio thread.
 
 mod bindings;
+mod externals;
+pub use externals::ExternalRegistry;
 mod error;
 mod program;
 mod source;
@@ -13,8 +15,8 @@ mod syntax;
 
 pub use error::EvalError;
 pub use program::{
-    ExternalControlBinding, ExternalDegrade, PatchControl, PatchControlKind, PatchId, PatchRun,
-    Program, ProgramError, Track, VoiceId,
+    ExternalControlBinding, ExternalDegrade, MidiBinding, MidiControlBinding, MidiViolinBinding, PatchControl,
+    PatchControlKind, PatchId, PatchRun, Program, ProgramError, Track, VoiceId,
 };
 pub use syntax::{SyntaxDiagnostic, check_syntax, check_syntax_with_limit};
 
@@ -83,6 +85,7 @@ impl Default for Limits {
                 input_channels: 256,
                 output_channels: 256,
                 data_entries: 65_536,
+                contact_steps: 16, gesture_sample_work:128, gesture_block_work:1024,
                 delay_buffer_seconds: 600.0,
                 tail_seconds: 600.0,
             },
@@ -123,6 +126,14 @@ impl Evaluator {
     }
 
     pub fn evaluate(&self, source: &str) -> Result<Program, EvalError> {
+        self.evaluate_with_externals(source, &ExternalRegistry::default())
+    }
+
+    /// Evaluate against a snapshot of host-registered external sources, which
+    /// scripts reach with `run(external("name"))`. The returned Program owns the
+    /// resolved declarations; no lookup callback survives. Registry payload and
+    /// graph publication budgets remain independently enforced.
+    pub fn evaluate_with_externals(&self, source: &str, externals: &ExternalRegistry) -> Result<Program, EvalError> {
         if source.len() > self.limits.source_bytes {
             return Err(EvalError::SourceLimit {
                 used: source.len(),
@@ -130,12 +141,15 @@ impl Evaluator {
             });
         }
 
-        let state = Rc::new(RefCell::new(BuildState::new(self.limits)));
+        let mut build = BuildState::new(self.limits);
+        build.externals = externals.clone();
+        let state = Rc::new(RefCell::new(build));
         let mut lua = Lua::core();
         lua.try_enter(|ctx| install(ctx, state.clone()))?;
         for (name, source) in [
             ("apteronotus prelude", PRELUDE),
             ("apteronotus organ stdlib", include_str!("stdlib/organ.lua")),
+            ("apteronotus flute stdlib", include_str!("stdlib/flute.lua")),
             (
                 "apteronotus bowed strings stdlib",
                 include_str!("stdlib/strings.lua"),

@@ -11,6 +11,12 @@ path = "src/main.rs"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-simd"]
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ["-O3", "--enable-simd"]
+
 [dependencies]
 apteronotus-live = { version = "0.1.0", path = "../live" }
 apteronotus-lua = { version = "0.1.0", path = "../lua" }
@@ -18,9 +24,11 @@ apteronotus-pattern = { version = "0.1.0", path = "../pattern" }
 apteronotus-render = { version = "0.1.0", path = "../render" }
 apteronotus-songs = { version = "0.1.0", path = "../songs" }
 apteronotus-synth = { version = "0.1.0", path = "../synth" }
+fundsp = { version = "0.23.0", default-features = false, features = ["std"] }
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+midir = "0.11.0"
 eframe = { version = "0.35.0", default-features = false, features = [
     "default_fonts",
     "glow",
@@ -44,9 +52,11 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "console",
     "HtmlElement",
-    "Window", "Document", "Element", "Event", "EventTarget", "Node",
+    "Window", "Location", "Document", "Element", "Event", "EventTarget", "Node",
     "HtmlInputElement", "HtmlAnchorElement", "File", "FileList",
     "Blob", "BlobPropertyBag", "Url",
     "KeyboardEvent",
     "CustomEvent", "CustomEventInit",
+    "Navigator", "MidiAccess", "MidiInputMap", "MidiInput", "MidiPort",
+    "MidiPortDeviceState", "MidiOptions", "MidiMessageEvent",
 ] }

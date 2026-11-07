@@ -1,0 +1,6 @@
+tempo(120)
+local room = send { graph = delay(ms(40)) >> feedback(0.35), level = 0.3 }
+local bell = voice { graph = function(n)
+  return impulse() >> ring(n.hz, 0.4) >> mul(4) >> pan(0) >> to(room, 0.5)
+end }
+play(bell, "c4 e4")

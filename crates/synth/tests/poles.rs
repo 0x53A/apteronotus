@@ -1,4 +1,4 @@
-//! Progressive transcription of `songs/poles.eod`.
+//! Progressive tests for pole-based percussion synthesis.
 
 use apteronotus_synth::lower::{render, rms, zero_crossing_hz};
 use apteronotus_synth::stdlib::{RingError, ring};

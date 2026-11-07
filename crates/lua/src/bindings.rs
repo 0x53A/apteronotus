@@ -1,6 +1,6 @@
 use crate::{
-    ExternalControlBinding, ExternalDegrade, Limits, PatchControl, PatchControlKind, Program,
-    Track, VoiceId,
+    ExternalControlBinding, ExternalDegrade, Limits, MidiBinding, MidiControlBinding, PatchControl,
+    PatchControlKind, Program, Track, VoiceId,
 };
 use apteronotus_music::{Chord, Key, Pitch, VoicingShape};
 use apteronotus_pattern::{
@@ -20,6 +20,10 @@ use piccolo::{
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 const INTERNAL_CONTROL_PREFIX: &str = "__apteronotus.";
+#[path = "violin.rs"]
+mod violin;
+#[path = "streams.rs"]
+mod streams;
 
 pub(crate) const PRELUDE: &str = r#"
 -- Piccolo intentionally ships a very small table library. These are ordinary
@@ -139,6 +143,7 @@ end
 "#;
 
 pub(crate) struct BuildState {
+    pub externals: crate::ExternalRegistry,
     pub program: Program,
     pub active: Option<ActiveGraph>,
     generation: u64,
@@ -147,8 +152,10 @@ pub(crate) struct BuildState {
     bus_count: usize,
     tempo_declared: bool,
     timeline_count: u64,
+    violin_ordinal: u64,
     pending_sends: Vec<PendingSend>,
     pending_master: Option<Processor>,
+    streams: streams::Streams,
     shared_graph: GraphBuilder,
     shared_writes: Vec<Source>,
     shared_signal_count: usize,
@@ -197,6 +204,8 @@ struct LuaProcessor {
 
 #[derive(Clone, Debug)]
 enum Processor {
+    ConcertHall,
+    Convolve(apteronotus_synth::convolution::ImpulseResponse),
     Sine,
     Cosine,
     Saw,
@@ -589,6 +598,7 @@ impl BuildState {
     pub fn new(limits: Limits) -> Self {
         Self {
             program: Program::default(),
+            externals: crate::ExternalRegistry::default(),
             active: None,
             generation: 0,
             graph_nodes: 0,
@@ -596,8 +606,10 @@ impl BuildState {
             bus_count: 0,
             tempo_declared: false,
             timeline_count: 0,
+            violin_ordinal: 0,
             pending_sends: Vec::new(),
             pending_master: None,
+            streams: streams::Streams::default(),
             shared_graph: GraphBuilder::new(),
             shared_writes: Vec::new(),
             shared_signal_count: 0,
@@ -677,6 +689,7 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "pattern", state.clone(), pattern)?;
     set_callback(ctx, "__pattern_at", state.clone(), pattern_at)?;
     set_callback(ctx, "play", state.clone(), play)?;
+    set_callback(ctx, "midi", state.clone(), midi)?;
     set_callback(ctx, "__play_at", state.clone(), play_at)?;
     set_callback(ctx, "fast", state.clone(), fast_pattern)?;
     set_callback(ctx, "slow", state.clone(), slow_pattern)?;
@@ -746,6 +759,7 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "onset_detector", state.clone(), onset_detector)?;
     set_callback(ctx, "width", state.clone(), width)?;
     set_callback(ctx, "reverb", state.clone(), reverb)?;
+    set_callback(ctx, "concert_hall", state.clone(), concert_hall)?;
     set_callback(ctx, "limiter", state.clone(), limiter)?;
     set_callback(ctx, "chorus", state.clone(), chorus)?;
     set_callback(ctx, "ensemble", state.clone(), ensemble)?;
@@ -753,6 +767,7 @@ pub(crate) fn install<'gc>(
     set_callback(ctx, "slew", state.clone(), slew)?;
     set_callback(ctx, "gate_env", state.clone(), gate_env)?;
     set_callback(ctx, "string_resonator", state.clone(), string_resonator)?;
+    set_callback(ctx, "bowed_string_model", state.clone(), bowed_string_model)?;
     set_callback(ctx, "add", state.clone(), add)?;
     set_callback(ctx, "sub", state.clone(), sub)?;
     set_callback(ctx, "mul", state.clone(), mul)?;
@@ -932,6 +947,9 @@ pub(crate) fn install<'gc>(
     ctx.set_global("__apteronotus_voice_meta", voice_meta);
 
     let patch_meta = Table::new(&ctx);
+    violin::install(ctx,state.clone())?;
+    set_callback(ctx, "external", state.clone(), external)?;
+    streams::install(ctx,state.clone())?;
     set_operator(ctx, patch_meta, MetaMethod::Index, state, patch_index)?;
     ctx.set_global("__apteronotus_patch_meta", patch_meta);
 
@@ -952,8 +970,9 @@ pub(crate) fn finalize<'gc>(
     state: &Rc<RefCell<BuildState>>,
 ) -> Result<(), Error<'gc>> {
     let mut state = state.borrow_mut();
+    streams::route_producers(ctx, &mut state)?;
     finalize_shared_signals(ctx, &mut state)?;
-    if state.pending_sends.is_empty() && state.pending_master.is_none() {
+    if state.pending_sends.is_empty() && state.pending_master.is_none() && !streams::has_output(&state) {
         return Ok(());
     }
     if state.active.is_some() {
@@ -983,6 +1002,8 @@ pub(crate) fn finalize<'gc>(
         patch_controls: Vec::new(),
     });
     let mut outputs = (0..total_channels).map(Source::Input).collect::<Vec<_>>();
+    let streams = streams::compile(ctx, &mut state)?;
+    if let Some(stream) = streams.output { outputs[..main_channels].copy_from_slice(&stream); }
 
     for send in sends {
         let range = state
@@ -990,7 +1011,7 @@ pub(crate) fn finalize<'gc>(
             .buses
             .bus_range(send.bus)
             .ok_or_else(|| binding_error(ctx, "send bus does not belong to this edit"))?;
-        let inputs = range.map(Source::Input).collect::<Vec<_>>();
+        let inputs = streams.buses.get(&send.bus).cloned().unwrap_or_else(||range.map(Source::Input).collect());
         let wet = apply_processor(ctx, &mut state, &send.processor, &inputs)?;
         if wet.len() != main_channels {
             return Err(binding_error(
@@ -1008,6 +1029,7 @@ pub(crate) fn finalize<'gc>(
             outputs[channel] = state.active_mut(ctx)?.graph.add(outputs[channel], scaled);
         }
     }
+
 
     if let Some(master) = master {
         let mastered = apply_processor(ctx, &mut state, &master, &outputs[..main_channels])?;
@@ -1415,6 +1437,26 @@ fn begin_patch<'gc>(
     Ok(CallbackReturn::Return)
 }
 
+fn external<'gc>(
+    ctx: Context<'gc>, state: &Rc<RefCell<BuildState>>, mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.len()!=1 {return Err(binding_error(ctx,"external expects one registered source name"));}
+    let Value::String(name)=stack.get(0) else {return Err(binding_error(ctx,"external expects a registered source name"));};
+    let name=name.to_str().map_err(|_|binding_error(ctx,"source name must be UTF-8"))?;
+    let mut state=state.borrow_mut();
+    if state.active.is_some() {return Err(binding_error(ctx,"external must be declared outside a graph"));}
+    let spec=state.externals.get(name).cloned().ok_or_else(||binding_error(ctx,format!("external source {name:?} is not registered by the host")))?;
+    if state.program.patches.len()>=state.limits.patches {return Err(binding_error(ctx,"patch limit exceeded"));}
+    state.graph_nodes=state.graph_nodes.saturating_add(1);
+    if state.graph_nodes>state.limits.graph_nodes {return Err(binding_error(ctx,"graph node limit exceeded"));}
+    let mut builder=GraphBuilder::new();let outputs=builder.external(spec);
+    let graph=builder.out(&outputs).map_err(|e|binding_error(ctx,e.to_string()))?;
+    graph.validate_limits(state.limits.graph_publication).map_err(|e|binding_error(ctx,e.to_string()))?;
+    let patch=PatchTemplate::new(graph).map_err(|e|binding_error(ctx,e.to_string()))?;
+    let id=state.program.patches.len();state.program.patches.push(patch);state.program.patch_controls.push(Vec::new());
+    stack.replace(ctx,lua_patch(ctx,id)?);Ok(CallbackReturn::Return)
+}
+
 fn finish_patch<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
@@ -1726,7 +1768,7 @@ fn bus<'gc>(
         .add_bus(channels)
         .map_err(|error| binding_error(ctx, error.to_string()))?;
     state.bus_count += 1;
-    stack.replace(ctx, UserData::new_static(&ctx, LuaBus { id, channels }));
+    stack.replace(ctx, streams::bus_value(ctx, LuaBus { id, channels }));
     Ok(CallbackReturn::Return)
 }
 
@@ -1877,11 +1919,13 @@ fn run<'gc>(
     let Value::UserData(data) = stack.get(0) else {
         return Err(binding_error(ctx, "run expects a patch handle"));
     };
-    let patch = data
-        .downcast_static::<LuaPatch>()
-        .map_err(|_| binding_error(ctx, "run expects a patch handle"))?
-        .0;
-    let span = if stack.len() >= 2 {
+    let retained_violin=violin::patch(stack.get(0));
+    let patch = if let Some(patch)=retained_violin {patch} else {
+        data.downcast_static::<LuaPatch>().map_err(|_| binding_error(ctx,"run expects a patch or violin"))?.0
+    };
+    let out=if matches!(stack.get(1),Value::Table(_)) {streams::destination(ctx,stack.get(1))?} else {None};
+    if streams::run_pipeline(ctx,state,patch,stack.get(1))? {stack.clear();return Ok(CallbackReturn::Return);}
+    let span = if stack.len() >= 2 && out.is_none() {
         let Value::UserData(data) = stack.get(1) else {
             return Err(binding_error(ctx, "run span must come from span(...)"));
         };
@@ -1900,6 +1944,9 @@ fn run<'gc>(
         ));
     }
     let mut state = state.borrow_mut();
+    if retained_violin.is_some() && (span.is_some() || state.program.runs.iter().any(|r|r.patch.index()==patch)) {
+        return Err(binding_error(ctx,"run a violin once for the program lifetime; schedule lift_bow to end excitation"));
+    }
     if patch >= state.program.patches.len() {
         return Err(binding_error(
             ctx,
@@ -1917,6 +1964,7 @@ fn run<'gc>(
         span,
         routing: EventRouting::new(),
     });
+    if let Some(bus)=out {let index=state.program.runs.len()-1;streams::route_run(&mut state,index,bus);}
     stack.clear();
     Ok(CallbackReturn::Return)
 }
@@ -2227,6 +2275,7 @@ fn at<'gc>(
         ));
     }
     let start = read_placement_time(ctx, state, stack.get(0))?;
+    if violin::at(ctx,state,&mut stack,start)? {return Ok(CallbackReturn::Return);}
     let capture_cycles = if stack.len() == 3 {
         read_capture_duration(ctx, state, start, stack.get(2))?
     } else {
@@ -2295,6 +2344,7 @@ fn timeline<'gc>(
             "timeline expects a table of at() placements",
         ));
     };
+    if violin::timeline(ctx,table,&mut stack)? {return Ok(CallbackReturn::Return);}
 
     let mut events = Vec::new();
     let mut controls = Vec::new();
@@ -2584,6 +2634,132 @@ fn parse_pattern<'gc>(
     Ok(CallbackReturn::Return)
 }
 
+fn midi<'gc>(
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.is_empty() || stack.len() > 2 {
+        return Err(binding_error(
+            ctx,
+            "midi expects a voice or control and an options table",
+        ));
+    }
+    if violin::midi(ctx,state,&mut stack)? {return Ok(CallbackReturn::Return);}
+    let Value::UserData(data) = stack.get(0) else {
+        return Err(binding_error(ctx, "midi expects a voice handle"));
+    };
+    let control = data.downcast_static::<LuaControl>().ok().map(|c| c.0);
+    let voice = if control.is_none() {
+        Some(
+            data.downcast_static::<LuaVoice>()
+                .map_err(|_| binding_error(ctx, "midi expects a voice or program control"))?
+                .0,
+        )
+    } else {
+        None
+    };
+    let channel = match stack.get(1) {
+        Value::Nil => None,
+        Value::Table(options) => {
+            for (key, _) in options.iter() {
+                if !matches!(key, Value::String(name) if name.as_bytes() == b"channel" || (control.is_some() && name.as_bytes() == b"cc") || (voice.is_some() && name.as_bytes()==b"out"))
+                {
+                    return Err(binding_error(
+                        ctx,
+                        "midi options support channel, out for voices, and cc for controls",
+                    ));
+                }
+            }
+            match options.get_value(ctx, "channel") {
+                Value::Nil => None,
+                value => {
+                    let channel = read_number(ctx, value, "MIDI channel")?;
+                    if channel.fract() != 0.0 || !(1.0..=16.0).contains(&channel) {
+                        return Err(binding_error(
+                            ctx,
+                            "MIDI channel must be an integer in 1..16",
+                        ));
+                    }
+                    Some(channel as u8 - 1)
+                }
+            }
+        }
+        _ => return Err(binding_error(ctx, "midi options must be a table")),
+    };
+    let mut state = state.borrow_mut();
+    if state.active.is_some() {
+        return Err(binding_error(
+            ctx,
+            "MIDI mappings must be declared outside a graph",
+        ));
+    }
+    if let Some(control) = control {
+        let Value::Table(options) = stack.get(1) else {
+            return Err(binding_error(
+                ctx,
+                "midi(control, {cc=0..119, channel=1..16}) expects a CC mapping",
+            ));
+        };
+        let cc = read_number(ctx, options.get_value(ctx, "cc"), "MIDI CC")?;
+        if cc.fract() != 0.0 || !(0.0..=119.0).contains(&cc) {
+            return Err(binding_error(
+                ctx,
+                "MIDI CC must be an integer in 0..119 (channel-mode messages are reserved)",
+            ));
+        }
+        if state.program.controls.spec(control).is_none() {
+            return Err(binding_error(ctx, "control does not belong to this edit"));
+        }
+        if state
+            .program
+            .midi_controls
+            .iter()
+            .any(|binding| binding.control == control)
+        {
+            return Err(binding_error(
+                ctx,
+                "control already has a suggested MIDI mapping",
+            ));
+        }
+        if state.program.midi_controls.len() >= state.limits.controls {
+            return Err(binding_error(ctx, "MIDI control mapping limit exceeded"));
+        }
+        state.program.midi_controls.push(MidiControlBinding {
+            control,
+            cc: cc as u8,
+            channel,
+        });
+        stack.replace(ctx, ());
+        return Ok(CallbackReturn::Return);
+    }
+    let voice = voice.expect("voice or control checked above");
+    let template = state
+        .program
+        .voices
+        .get(voice)
+        .ok_or_else(|| binding_error(ctx, "voice handle does not belong to this edit"))?;
+    apteronotus_synth::validate_live_voice(template)
+        .map_err(|error| binding_error(ctx, error.to_string()))?;
+    if state.program.midi_bindings.len() + state.program.midi_violins.len() + state.program.tracks.len() >= state.limits.tracks {
+        return Err(binding_error(ctx, "MIDI binding limit exceeded"));
+    }
+    state.program.midi_bindings.push(MidiBinding {
+        voice: VoiceId(voice),
+        channel,
+    });
+    if let Value::Table(options)=stack.get(1) {
+        let out=options.get_value(ctx,"out");
+        if !matches!(out,Value::Nil) {
+            let Value::UserData(data)=out else {return Err(binding_error(ctx,"MIDI out must be a bus"));};
+            let bus=*data.downcast_static::<LuaBus>().map_err(|_|binding_error(ctx,"MIDI out must be a bus"))?;
+            let index=state.program.midi_bindings.len()-1;streams::route_midi(&mut state,index,bus);
+        }
+    }
+    stack.replace(ctx, ());
+    Ok(CallbackReturn::Return)
+}
+
 fn play<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
@@ -2610,6 +2786,7 @@ fn play_bound<'gc>(
     binding: u64,
     base: Option<usize>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if violin::play(ctx,state,stack,argument_offset)? {return Ok(CallbackReturn::Return);}
     enum PlayTarget {
         Voice(usize),
         Patch(usize),
@@ -2630,6 +2807,8 @@ fn play_bound<'gc>(
             "play target must be a voice or patch handle",
         ));
     };
+    let out=streams::destination(ctx,stack.get(argument_offset+2))?;
+    let routes_patch=matches!(target,PlayTarget::Patch(_));
     let (pattern, routing, controls, external_trigger) = match stack.get(argument_offset + 1) {
         Value::String(source) => {
             let source = source
@@ -2664,7 +2843,7 @@ fn play_bound<'gc>(
     };
 
     let mut state = state.borrow_mut();
-    if state.program.tracks.len() >= state.limits.tracks {
+    if state.program.tracks.len() + state.program.midi_bindings.len() + state.program.midi_violins.len() >= state.limits.tracks {
         return Err(binding_error(
             ctx,
             format!("track limit of {} exceeded", state.limits.tracks),
@@ -2809,6 +2988,10 @@ fn play_bound<'gc>(
                 external_trigger: external_trigger.map(|external| external.control),
             });
         }
+    }
+    if let Some(bus)=out {
+        if routes_patch {let index=state.program.runs.len()-1;streams::route_run(&mut state,index,bus);}
+        else {let index=state.program.tracks.len()-1;streams::route_track(&mut state,index,bus);}
     }
     stack.clear();
     Ok(CallbackReturn::Return)
@@ -5339,6 +5522,40 @@ fn harmonics<'gc>(
     Ok(CallbackReturn::Return)
 }
 
+fn bowed_string_model<'gc>(
+    ctx: Context<'gc>, state: &Rc<RefCell<BuildState>>, mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.len() != 5 { return Err(binding_error(ctx,
+        "bowed_string_model expects hz, speed, force, position, { min_hz, max_hz }")); }
+    let generation = current_generation(ctx, state)?;
+    let hz = read_mono(ctx, stack.get(0), generation)?;
+    let speed = read_mono(ctx, stack.get(1), generation)?;
+    let force = read_mono(ctx, stack.get(2), generation)?;
+    let position = read_mono(ctx, stack.get(3), generation)?;
+    let Value::Table(spec) = stack.get(4) else { return Err(binding_error(ctx, "bowed string bounds must be a table")); };
+    let config = apteronotus_synth::bowed::BowedConfig {
+        kind: apteronotus_synth::bowed::BowedKind::Violin,
+        min_hz: read_number(ctx, spec.get_value(ctx, "min_hz"), "bowed minimum Hz")?,
+        max_hz: read_number(ctx, spec.get_value(ctx, "max_hz"), "bowed maximum Hz")?,
+        model: match spec.get_value(ctx, "model") {
+            Value::Nil => apteronotus_synth::bowed::BowedModel::C1,
+            Value::String(s) if s.as_bytes()==b"c1" => apteronotus_synth::bowed::BowedModel::C1,
+            Value::String(s) if s.as_bytes()==b"c2" => apteronotus_synth::bowed::BowedModel::C2,
+            Value::String(s) if s.as_bytes()==b"c3" => apteronotus_synth::bowed::BowedModel::C3,
+            Value::String(s) if s.as_bytes()==b"c4" => apteronotus_synth::bowed::BowedModel::C4,
+            _ => return Err(binding_error(ctx,"bow model must be c1, c2, c3 or c4")),
+        },
+    };
+    if !config.valid() || apteronotus_synth::bowed::BowedString::new(config, 44_100.0).is_err() {
+        return Err(binding_error(ctx, "invalid bowed pitch bounds or initial joint domain"));
+    }
+    let mut state = state.borrow_mut();
+    state.spend_node(ctx)?;
+    let output = state.active_mut(ctx)?.graph.bowed_string_model(hz, speed, force, position, config);
+    stack.replace(ctx, lua_source(ctx, generation, [output])?);
+    Ok(CallbackReturn::Return)
+}
+
 fn string_resonator<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
@@ -6003,6 +6220,14 @@ fn width<'gc>(
     Ok(CallbackReturn::Return)
 }
 
+fn concert_hall<'gc>(
+    ctx: Context<'gc>, state: &Rc<RefCell<BuildState>>, mut stack: piccolo::Stack<'gc, '_>,
+) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if stack.len()!=0 {return Err(binding_error(ctx,"concert_hall expects no arguments; prepared at 48000 Hz"));}
+    stack.replace(ctx,lua_processor(ctx,processor_generation(state),Processor::ConcertHall)?);
+    Ok(CallbackReturn::Return)
+}
+
 fn reverb<'gc>(
     ctx: Context<'gc>,
     state: &Rc<RefCell<BuildState>>,
@@ -6311,6 +6536,7 @@ fn mix<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if streams::mix(ctx,state,&mut stack)? {return Ok(CallbackReturn::Return);}
     let generation = current_generation(ctx, state)?;
     if let Value::Table(table) = stack.get(0)
         && table.length() > 0
@@ -6800,6 +7026,7 @@ fn pipe<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
+    if streams::pipe(ctx,state,&mut stack)? {return Ok(CallbackReturn::Return);}
     if is_processor(stack.get(0)) && is_processor(stack.get(1)) {
         let generation = processor_generation(state);
         let left = read_processor(ctx, stack.get(0), generation)?;
@@ -7248,6 +7475,8 @@ fn processor_inputs(processor: &Processor) -> usize {
         | Processor::Pluck { .. }
         | Processor::Shape { .. }
         | Processor::DcBlock
+        | Processor::ConcertHall
+        | Processor::Convolve(_)
         | Processor::Delay { .. }
         | Processor::AllpassDelay { .. }
         | Processor::Fdn { .. }
@@ -7281,7 +7510,8 @@ fn processor_inputs(processor: &Processor) -> usize {
 
 fn processor_outputs(processor: &Processor) -> usize {
     match processor {
-        Processor::Pan(_)
+        Processor::ConcertHall
+        | Processor::Pan(_)
         | Processor::Width { .. }
         | Processor::Reverb { .. }
         | Processor::Limiter { .. } => 2,
@@ -7316,6 +7546,7 @@ fn apply_processor<'gc>(
 
     let one = |inputs: &[Source]| inputs[0];
     let outputs = match processor {
+        Processor::Convolve(response) => {state.spend_node(ctx)?;vec![state.active_mut(ctx)?.graph.convolve(one(inputs),response.clone())]},
         Processor::Sine => {
             state.spend_node(ctx)?;
             vec![state.active_mut(ctx)?.graph.sine(one(inputs))]
@@ -7467,6 +7698,10 @@ fn apply_processor<'gc>(
                 .graph
                 .width(inputs[0], inputs[1], *amount)
                 .to_vec()
+        }
+        Processor::ConcertHall => {
+            state.spend_node(ctx)?;
+            state.active_mut(ctx)?.graph.concert_hall(inputs[0]).to_vec()
         }
         Processor::Reverb {
             room_size,

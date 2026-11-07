@@ -1,0 +1,10 @@
+tempo(120)
+local additive = voice { graph = function(n)
+  return organ_pipe(n.hz, {kind="flute", chiff=0, voicing="classic"}) * 0.4 >> pan(0)
+end }
+local physical = voice { graph = function(n)
+  return flue_pipe(n.hz, adsr(ms(20), ms(1), 1, ms(35)) * 0.85,
+    noise(), {min_hz=40}) * 0.8 >> pan(0)
+end }
+play(additive, timeline { at(secs(0), pattern("a3") >> hold(secs(1))) })
+play(physical, timeline { at(secs(2), pattern("a3") >> hold(secs(1))) })

@@ -6,6 +6,8 @@
 //! tempo representation merely to remain portable.
 
 mod tempo;
+mod compiled;
+pub use compiled::CompiledTempo;
 mod transport;
 
 pub use tempo::{TempoMap, TempoMapError, TempoPoint};

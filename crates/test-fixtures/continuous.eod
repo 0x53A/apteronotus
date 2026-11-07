@@ -1,0 +1,5 @@
+tempo(120)
+local drone = patch { graph = function()
+  return sine(110 + sine(0.2) * 10) * 0.1 >> pan(0)
+end }
+run(drone)

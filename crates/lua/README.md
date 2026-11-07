@@ -9,6 +9,19 @@ Behavioral decisions and provisional first-slice policy are recorded in
 note-input names, seed identity, clocks, delay bounds, patch inputs, publication
 validation, and the remaining source-transform restriction.
 
+Hosts can inject named external sources (`apteronotus_synth::ExternalSource`,
+e.g. an instrument under test from `apteronotus-research`) with
+`ExternalRegistry::new(max_entries, max_payload_bytes)` and `register`.
+Call `Evaluator::evaluate_with_externals(source, &registry)` to make them
+available as `run(external("name"))`. The returned `Program` owns the resolved
+declaration and remains valid after the registry is dropped. Names perform no
+filesystem lookup; ordinary `evaluate` uses an empty registry. Declare these
+patches outside graph functions and run them for the program lifetime.
+Preparation (clock checks, asset decoding) belongs to the source and happens
+when the persistent patch is prepared. Existing graph publication limits still
+apply independently of registry payload limits; a compatible edit keeps the
+running instance only if the source reports the declarations equivalent.
+
 The current slice supports:
 
 - Piccolo's safe core language and standard library, minus nondeterministic or
@@ -52,6 +65,15 @@ The current slice supports:
   placement;
 - `voice { params = ..., graph = function(n) ... end }`, with symbolic
   `n.hz`, `n.velocity`, `n.duration`, `n.pan`, and declared parameters;
+- suggested hardware control mappings `midi(control, {cc=82, channel=1})`,
+  with optional 1–16 channel filtering and linear scaling of MIDI 0–127 to
+  the declared control range. One mapping per program control; CC 0–119 only.
+  Hosts apply these defaults; evaluation retains only owned mapping data.
+- live keyboard bindings `midi(voice)` or `midi(voice, {channel = 1})`, with
+  channel numbers 1–16 and all channels by default. Hosts own devices and note
+  gates; evaluation retains only the binding. Keys supply `n.hz` and
+  `n.velocity`, with ADSR release on note-off. Unknown note duration makes
+  `n.duration` and note-phase curves invalid for these voices;
 - typed evaluation-only graph values and a deliberately small primitive set;
 - symbolic exponentiation and fixed-range `clamp`, including per-voice
   parameter-bound `decay(n.seconds)`;
@@ -81,8 +103,6 @@ strictly between zero and one, and damping is a coefficient in `[0, 1]`, not a
 filter cutoff in Hertz. Pitch and damping currently accept a literal or a
 direct note parameter (for example `n.hz`), but not graph arithmetic, even when
 its operands are fixed at onset. Apply modulatable filtering after the string.
-`songs/rust-and-voltage.eod` combines this primitive with oscillator fifths and
-distortion to build its sample-free rhythm instruments.
 
 For sounding-token highlighting in generated arrangements, store patterns:
 `local riffs = { pattern("e2 g2"), pattern("a2 e2") }`, then pass `riffs[i]`
@@ -142,17 +162,8 @@ new voice, or reset when frequency changes. Memory is one delay of at most
 `1/min_hz` seconds plus up to eight padding samples per string (including
 room for the sample-rate-dependent pitch ceiling).
 
-[`six-strings.eod`](../../songs/six-strings.eod) is a runnable 32-second electric
-guitar demonstration. Six tiny noise-pick voices feed six mono buses; one
-persistent patch contains six strings and one shared amp. It demonstrates all
-six strings, an upper-three-only strum, a two-semitone bend, repicking while
-bent, release, a hand mute, a new chord and palm-muted picks. Faders provide amp
-drive, additional high-string bend, and palm pressure. Open **Six Strings, One
-Amplifier** in the app, or render it with:
-
-```sh
-cargo run --release -p apteronotus-render -- --song six-strings --seconds 32 --tail 1 -o /tmp/six-strings.wav
-```
+The retained-string routing and damping path is exercised by the synthetic
+fixture in `crates/test-fixtures/strings.eod`.
 
 The score uses existing `control_signal` transport patterns and short scheduled
 audio excitations. The proposed addressed fret/pick/mute API is still a TODO;
@@ -160,7 +171,7 @@ there is no `guitar` or `strings.bank` builder yet. Scheduled curves repeat afte
 the demo's 32-second control period, while its excitation timeline is finite.
 Source highlights identify pick events, not the full subsequent vibration.
 Harmonics, realistic fret contact, bowed excitation and string coupling remain
-in the [design ledger](../../_Tasks/006-persistent-strings/README.md).
+in the [design ledger](https://github.com/0x53A/apteronotus-research/blob/main/_Tasks/006-persistent-strings/README.md).
 
 The binding can run finite or cyclic polyphonic, transformed multi-track scores
 with scalar or note-curve event controls and mapped tempo, plus persistent
@@ -239,13 +250,8 @@ schedule a transformed two-track score and measure its stereo output, and mix a
 routed voice with an autonomous persistent patch while changing a shared
 control between scheduling windows. A finite-timeline acceptance also carries
 a step tempo map through scheduling and measures notes on both sides of the
-silent gap. Shipped-song acceptances exercise every document in `songs/`,
-including continuous track ducking, sends/returns, bounded feedback delay,
-long envelopes, deterministic init randomness, pole-based percussion, finite
-through-composed placement, shared persistent analysers, compiled
-transport-clock control, external-onset ownership, the jamming song's
-declared silent-input fallback, and a separate host-fed jamming path that
-proves tracked pitch, trigger-side controls and routed bell audio.
+silent gap. Focused synthetic programs also exercise continuous patches,
+routed percussion, persistent analysers and host-fed external triggers.
 The same paths reach the native GUI and output device with:
 
 ```sh
@@ -357,7 +363,7 @@ The underlying reusable graph source `harmonics(hz, {a1, a2, ...})` accepts
 1–32 finite amplitudes with absolute sum ≤1, fundamental first. It fades
 ultrasonic partials at the device's actual sample rate. The organ is a designed
 additive approximation, not a wind/pipe physical model. See the
-[design and acceptance contract](../../_Tasks/007-synthetic-organ/README.md)
+[design and acceptance contract](https://github.com/0x53A/apteronotus-research/blob/main/_Tasks/007-synthetic-organ/README.md)
 and the Library's **Iron Choir** (`cathedral-organ`) for dry stops, full
 registration, independent pedals and a shared hall.
 
@@ -390,3 +396,101 @@ replacement for every named stop. Its pressure response is nonlinear and its
 output deliberately dark. **Pipes Under Pressure** (`organ-laboratory`) gives a
 dry comparison and a retained-pipe demonstration. The design document above
 specifies smoothing, lifetime, memory budgets and the tested tuning region.
+
+### Retained violin experiment
+
+Score-mode violins may declare `max_hz=1500` (660–2000 Hz; default 660).
+The joint pitch/bow-position domain is still validated at 24 kHz; high notes
+need a position farther from the bridge (for example `.30` at 997 Hz).
+`v:stop` and `v:slide` accept exactly one of `pitch="B5"` or `hz=997.3`,
+including the existing typed `over` duration. Numeric Hz preserves measured
+intonation without rounding it to a named pitch. Live/MIDI range is unchanged.
+
+`violin {name="Violin", string="D", mode="live", model="c3"}` stages a retained bowed
+string and fixed synthetic body. `midi(v); run(v)` activates its monophonic
+keyboard adapter. D4–E5 is the initial keyboard range; expression, signed bow
+speed, pressure and contact position have independent live controls. In default
+score mode, `play(v, timeline {at(secs(0), v:bow {string="D", speed=.4,
+force=.55, over=ms(60)})}); run(v)` builds sample-timed gestures. Score mode and
+keyboard mode have explicit ownership, with no interpreter callback in DSP.
+`v:vibrato {string="D",cents=12,rate=5.2,over=ms(500)}` fades depth from its
+current value; seconds and beat durations are supported. Rate changes remain
+immediate and phase-continuous. The app's **Violin expression** demo shows
+delayed vibrato together with authored bow motion.
+See the [gesture usage guide](https://github.com/0x53A/apteronotus-research/blob/main/violin/_Tasks/008-bowed-strings/usage.md) and
+[measured experiment](https://github.com/0x53A/apteronotus-research/blob/main/violin/_Tasks/008-bowed-strings/experiments/README.md).
+C3 uses hyperbolic stick/slip contact with retained branch history. Omit `model`
+for the existing C2 sound; `c1`, `c2` and `c3` are explicitly selectable in both
+`violin` and `bowed_string_model`. Changing the model requires replacement.
+This leaves the additive `bowed_string` helper available to existing scores.
+
+### Cello and concert flute
+
+`cello {name="Cello", string="C", mode="live"}` uses the retained bowed
+instrument API with C2/G2/D3/A3 open strings, a distinct 190/560/1700 Hz
+synthetic body profile and 4 kHz string loss. C3 is its default contact model.
+Omit `string` for four scored strings; `midi(c)` requires one string, as for
+violin. The complete bow/finger/vibrato/damping gesture API is shared. These
+profiles are designed approximations, not sampled or measured body responses.
+
+`flute(n.hz, {pressure=.8, vibrato=8, rate=5.2, breath=.022, brightness=.7})`
+returns a mono, note-clock concert-flute voice. It uses register-dependent
+harmonic groups, delayed pitch/amplitude motion, breath and a short tongue
+transient. `attack` and `release` take typed durations; pressure can be a
+signal. The other voicing choices are staged scalars. It is distinct from
+`organ_pipe(..., {kind="flute"})` and the experimental physical `flue_pipe`.
+
+The library includes MIDI cello, Cello expression and MIDI flute. The original
+`road-beneath-the-alders` song combines the new instruments in a finite 6/8
+arrangement. See [the measurements and sources](https://github.com/0x53A/apteronotus-research/blob/main/_Tasks/010-cello-flute/README.md).
+
+### Spatial organ
+
+`spatial_organ(hz, stops, space)` uses the existing `organ` registration and
+returns stereo. `organ_space(mono_source, space)` applies the same spatial field
+to a custom mono organ voice, preserving its registration and pitch.
+
+```lua
+local width = control {name="Organ width", range={0,2}, default=.75}
+local pipes = voice {graph=function(n)
+  return spatial_organ(n.hz, {{kind="principal", feet=8}},
+    {width=width, cutoff=350, delay_a_ms=11, delay_b_ms=23}) * .2
+end}
+play(pipes, pattern("c3 e3 g3 c4") >> hold(beats(.9)))
+```
+
+`width` (0–2, default .75) and `cutoff` (100–4000 Hz, default 350)
+accept graph signals; signals are clamped to these ranges. Two cascaded
+highpasses keep the bass mostly out of the side channel. `delay_a_ms` and
+`delay_b_ms` are fixed construction-time numbers in 1–50 ms, default 11 and 23;
+equal values cancel the side path. Delays have declared, bounded storage and
+retain normal response-tail metadata. No interpreter executes during rendering.
+
+The result is `L = source + side`, `R = source - side`, so mono averaging
+recovers the input (within floating-point rounding). Width zero duplicates the
+mono source into both channels. This has unity gain per channel, unlike
+constant-power center panning; reserve headroom because width adds stereo energy
+and can raise peaks. There is no hidden limiter or loudness compensation.
+The delayed difference creates frequency-dependent phase differences, not a
+measured acoustic room or independent physical pipes. Put shared room processing
+after the organ; downstream processing may change mono behavior.
+
+`concert_hall()` is a fixed mono-to-stereo room processor (originally built
+for the physical violin audition). It outputs reflections only and requires explicit persistent graph
+preparation at **48 kHz**. Other rates are rejected during preparation. It uses
+geometric early reflections and a passive sixteen-line feedback-delay network;
+absorption acts on reflected paths. Its current coefficients are a fixed hall,
+not a general room-design API. For an explicit dry plus room mix:
+
+```lua
+run(patch { inputs = 2, graph = function(cv)
+  local mono = cv.inputs[1]
+  return mono >> ((mul(1) ~ mul(1)) + concert_hall())
+end })
+```
+
+This selects the first input as the mono room source; it does not fold arbitrary
+stereo inputs. With a source that duplicates mono onto both outputs it
+retains the direct signal on both channels. Scale the hall processor explicitly
+when choosing a wet level. The host must render/drain the room after source EOF:
+eight seconds is the current response-retention horizon, not an internal fade.

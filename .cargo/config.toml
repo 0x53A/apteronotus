@@ -1,0 +1,4 @@
+# The browser DSP uses WebAssembly's portable 128-bit SIMD instructions.
+# Keep this target-specific so native builds retain their normal CPU settings.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

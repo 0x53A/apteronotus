@@ -1,12 +1,28 @@
 //! The documents the app ships with.
 //!
-//! The short teaching examples precede the complete embedded song corpus in
+//! The short teaching examples precede the curated song library in
 //! the library picker. Every document evaluates and plays on the backend, and
-//! the example tests and `corpus::the_whole_corpus_still_lowers` keep that
-//! true as the backend moves underneath them.
+//! the example tests keep that true as the backend moves underneath them.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Demos,
+    Songs,
+}
+
+impl Group {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Demos => "Demos",
+            Self::Songs => "Songs",
+        }
+    }
+}
 
 /// One shipped document.
 pub struct Example {
+    pub id: &'static str,
+    pub group: Group,
     /// What the picker shows.
     pub name: &'static str,
     /// One line on what the document demonstrates.
@@ -16,41 +32,60 @@ pub struct Example {
 
 pub const EXAMPLES: &[Example] = &[
     Example {
+        id: "three-notes",
+        group: Group::Demos,
         name: "Three notes",
         summary: "a voice, an envelope and mini-notation",
         source: include_str!("../assets/examples/three-notes.eod"),
     },
     Example {
+        id: "live-controls",
+        group: Group::Demos,
         name: "Live controls",
         summary: "a persistent patch with faders you can move while it runs",
         source: include_str!("../assets/examples/live-controls.eod"),
     },
     Example {
+        id: "pattern-algebra",
+        group: Group::Demos,
         name: "Pattern algebra",
         summary: "two tracks, rational time and structural transforms",
         source: include_str!("../assets/examples/pattern-algebra.eod"),
     },
     Example {
+        id: "struck",
+        group: Group::Demos,
         name: "Struck bars",
         summary: "percussion as pole placement — no oscillators, no samples",
         source: include_str!("../assets/examples/struck.eod"),
     },
 ];
 
-/// Teaching examples first, then the authoritative corpus without source copies.
+/// Demos first, then curated songs without source copies.
 pub fn documents() -> impl Iterator<Item = Example> {
     EXAMPLES
         .iter()
         .map(|example| Example {
+            id: example.id,
+            group: example.group,
             name: example.name,
             summary: example.summary,
             source: example.source,
         })
         .chain(apteronotus_songs::SONGS.iter().map(|song| Example {
+            id: song.name,
+            group: Group::Songs,
             name: song.name,
             summary: song.stresses,
             source: song.source,
         }))
+}
+
+/// Stable URL fragments are independent of picker order or display names.
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn from_fragment(fragment: &str) -> Option<Example> {
+    let id = fragment.strip_prefix("#library=")?;
+    documents().find(|entry| entry.id == id)
 }
 
 /// Keep the last edited buffer while browsing untouched library documents.
@@ -70,7 +105,11 @@ pub fn open_document(source: &mut String, displaced: &mut Option<String>, docume
 
 /// The document the editor opens with.
 pub fn starter() -> &'static str {
-    EXAMPLES[0].source
+    EXAMPLES
+        .iter()
+        .find(|entry| entry.id == "three-notes")
+        .unwrap()
+        .source
 }
 
 #[cfg(test)]
@@ -80,15 +119,52 @@ mod tests {
     use apteronotus_lua::evaluate;
 
     #[test]
-    fn browsing_songs_retains_the_edited_buffer_until_another_edit() {
+    fn library_ids_are_unique_and_groups_have_stable_links() {
+        let entries: Vec<_> = super::documents().collect();
+        for (index, entry) in entries.iter().enumerate() {
+            assert!(!entry.id.is_empty());
+            assert!(
+                entry
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            );
+            assert!(
+                !entries[..index]
+                    .iter()
+                    .any(|earlier| earlier.id == entry.id)
+            );
+            assert_eq!(
+                super::from_fragment(&format!("#library={}", entry.id))
+                    .unwrap()
+                    .source,
+                entry.source
+            );
+        }
+        assert_eq!(
+            super::from_fragment("#library=three-notes").unwrap().group,
+            super::Group::Demos
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.group == super::Group::Demos)
+        );
+        assert!(!entries.iter().any(|entry| entry.group == super::Group::Songs));
+        assert!(super::from_fragment("#library=missing").is_none());
+        assert!(super::from_fragment("#other=midi-organ").is_none());
+    }
+
+    #[test]
+    fn browsing_examples_retains_the_edited_buffer_until_another_edit() {
         let original = "-- my unsaved composition\n";
         let mut source = original.to_string();
         let mut displaced = None;
-        for song in apteronotus_songs::SONGS {
+        for example in super::EXAMPLES.iter().take(2) {
             assert!(super::open_document(
                 &mut source,
                 &mut displaced,
-                song.source
+                example.source
             ));
             assert_eq!(displaced.as_deref(), Some(original));
         }
@@ -114,7 +190,7 @@ mod tests {
         super::open_document(
             &mut source,
             &mut displaced,
-            apteronotus_songs::NIGHTSHIFT_DUB,
+            super::EXAMPLES[1].source,
         );
         assert_eq!(displaced.as_deref(), Some(super::starter()));
     }

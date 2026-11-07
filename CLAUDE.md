@@ -7,6 +7,24 @@ Named for the black ghost knifefish, whose electric organ discharge is among
 the most stable biological oscillators known — sub-microsecond jitter at
 roughly a kilohertz.
 
+## Task records
+
+Keep operational task state and running logs in a numbered folder under
+`~/tasks/`, with current facts separate from planned work and historical log
+entries. General reusable knowledge belongs in `~/knowledge/`. Do not stage,
+commit or push without an explicit user command.
+
+Experiments, measurements and "how we got there" history do not belong in this
+repository. They live in `apteronotus-research`
+(git@github.com:0x53A/apteronotus-research.git, locally
+`~/src/apteronotus-research`): the former `_Tasks/` design and experiment
+records under its `_Tasks/`, and the physical violin research (notes, experiment
+crates, renders) under `violin/`. Research results come back here as code plus
+a short statement of what currently *is*; do not recreate `_Tasks/` here.
+Experimental instruments stay in the research repository until stable and are
+put under test through the `ExternalSource` injection point (see `crates/synth`),
+not by adding experiment-specific code paths here.
+
 ## Layout
 
 - `crates/pattern` — the pattern algebra and the mini-notation. **No audio, no
@@ -23,7 +41,11 @@ roughly a kilohertz.
   publication budgets, per-note voices, routed stems, program-scope writable
   controls, explicit graph inputs, an allocation-bounded interpolating delay,
   and the first persistent `PatchTemplate` lowering onto fundsp. The wider
-  primitive set remains.
+  primitive set remains. `external::ExternalSource` is the injection point for
+  out-of-tree instruments: a host-owned declaration lowered as one persistent,
+  zero-input `Op::External` node, prepared on the control thread, optionally
+  monitored for faults. Lua reaches registered sources with `external("name")`;
+  `apteronotus_app::run_native_with` and the renderer accept them unchanged.
 - `crates/transport` — device-free constant/ramped `TempoMap` and exact
   cycle↔seconds conversion shared by owned programs and schedulers.
 - `crates/live` — a monotonic-frontier pitch scheduler over transport clocks,
@@ -44,14 +66,12 @@ roughly a kilohertz.
   document-absolute editor spans without rebasing their local provenance;
   escaped/CR-normalised literals and inline arithmetic coercion stay honestly
   unattributed rather than pointing at plausible wrong bytes.
-- `crates/songs` — the specification corpus from `songs/`, embedded as static
-  strings for other applications to consume. No dependencies, no evaluator, no
-  audio; the crate is a delivery mechanism, and it exists because
-  `~/src/idiosepius` had started keeping its own copies.
+- `crates/songs` — an inert curated song registry, currently empty. The
+  former corpus and provenance live in `apteronotus-research/songs/`.
 - `crates/render` — the device-free half of a Run, and offline rendering to a
   WAV file. It owns the `Program` → scheduler/arena binding (`playable_channels`,
   `persistent_runtime`, `scheduled_tracks`, `scheduled_runs`) that the GUI
-  player and the corpus test also use, so a rendered file cannot disagree with
+  player and integration tests also use, so a rendered file cannot disagree with
   what the device would have played. With no deadline there is no lookahead:
   the whole window is scheduled before the first block, and `Sequencer` is
   driven directly instead of split frontend/backend. Renders are reproducible
@@ -94,16 +114,15 @@ roughly a kilohertz.
 - `crates/app` — the first native and wasm user paths: a lexically highlighted
   Lua editor, explicit Run/Stop commands, activation diagnostics, persistent
   patch/bus execution, a permanent master fader and live control faders over
-  the production evaluator, scheduler and cpal output. It is also where the
-  corpus is pinned against the backend: `src/corpus.rs` asserts that every
-  embedded song still evaluates, lowers and opens a stereo output. Native uses a
+  the production evaluator, scheduler and cpal output. Focused programs in
+  `src/corpus.rs` check evaluation and stereo playback setup. Native uses a
   control-thread player; the custom
   web component evaluates explicitly and advances lookahead on the browser
   event loop, with wasm-pack packaging and GitHub Pages deployment.
   Compatible persistent edits retain the live arena and control values at the
   scheduling frontier. Native incompatible persistent edits crossfade at that
   same transport when tempo and layout are unchanged; layout/tempo changes and
-  browser replacement retain the transactional cycle-zero reset. The shared song
+  browser replacement retain the transactional cycle-zero reset. The shared demo and song
   library, native source Open/Save, browser import/download and debounced
   compile-only syntax diagnostics are connected. Graph/type diagnostics while
   typing, recent files and autosave remain. Sounding mini tokens
@@ -134,9 +153,7 @@ one row, and it is the topmost:
 while it executes; it builds a `GraphTemplate` that the runtime instantiates per
 onset. Loops and tables may generate topology, but a branch on a symbolic note
 value has to become an explicit graph operation rather than an ordinary `if`.
-All seven specification songs' graph functions stage cleanly under this rule —
-none contains such an `if`, and every topology-building loop is over literal
-constants. If a real instrument ever needs event-dependent topology the answer
+If a real instrument ever needs event-dependent topology the answer
 is an explicitly marked dynamic factory, not making every voice dynamic.
 
 **No host-language closure may survive into the graph.** Once
@@ -559,9 +576,9 @@ cargo fmt
 Hearing a change is `cargo run`; *looking* at one is
 
 ```
-cargo run -p apteronotus-render -- songs/techno.eod --seconds 8 -o /tmp/techno.wav
-cargo run -p apteronotus-render -- songs/techno.eod --list-tracks
-cargo run -p apteronotus-render -- songs/techno.eod --solo-track 3 --seconds 8 -o /tmp/techno-track-3.wav
+cargo run -p apteronotus-render -- crates/test-fixtures/routed.eod --seconds 8 -o /tmp/routed.wav
+cargo run -p apteronotus-render -- crates/test-fixtures/routed.eod --list-tracks
+cargo run -p apteronotus-render -- crates/test-fixtures/routed.eod --solo-track 1 --seconds 8 -o /tmp/techno-track-3.wav
 ```
 
 which reports voice count and peak level, and defaults to 32-bit float so an

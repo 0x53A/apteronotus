@@ -3,7 +3,8 @@ use apteronotus_lua::evaluate;
 
 #[test]
 fn keyboard_uses_production_retained_path_and_last_key_priority() {
-    let p = evaluate(r#"local v=violin {string="D",mode="live",model="c3"}; midi(v); run(v)"#).unwrap();
+    let p =
+        evaluate(r#"local v=violin {string="D",mode="live",model="c3"}; midi(v); run(v)"#).unwrap();
     let mut runtime = PersistentRuntime::new(
         &p.buses,
         &p.controls,

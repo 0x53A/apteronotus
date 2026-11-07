@@ -316,7 +316,10 @@ impl PolarizedBridge {
         let y = incoming.map(|a| -self.sine * a[0] + self.cosine * a[1]);
         let frames = [self.axes[0].step(x), self.axes[1].step(y)];
         let rotate = |u: f64, v: f64| {
-            [self.cosine * u - self.sine * v, self.sine * u + self.cosine * v]
+            [
+                self.cosine * u - self.sine * v,
+                self.sine * u + self.cosine * v,
+            ]
         };
         PolarizedBridgeFrame {
             velocity: rotate(frames[0].velocity, frames[1].velocity),

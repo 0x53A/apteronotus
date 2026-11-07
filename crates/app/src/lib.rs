@@ -6,12 +6,12 @@ mod corpus;
 #[cfg(not(target_arch = "wasm32"))]
 mod document;
 mod examples;
+mod externals;
 mod highlight;
 mod midi_input;
 #[cfg(target_arch = "wasm32")]
 mod midi_web;
 mod player;
-mod externals;
 pub use apteronotus_lua::ExternalRegistry;
 pub use apteronotus_synth::{External, ExternalMonitor, ExternalSource, PreparedExternal};
 mod search;
@@ -76,9 +76,15 @@ pub fn run_native_file(path: Option<&std::path::Path>) -> eframe::Result {
 /// editor text when no document is opened. Nothing is evaluated and no device
 /// opens until the user selects Run.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run_native_with(path:Option<&std::path::Path>,externals:ExternalRegistry,starter:Option<String>) -> eframe::Result {
-    if externals.payload_bytes()>externals::MAX_PAYLOAD {
-        return Err(eframe::Error::AppCreation(Box::new(std::io::Error::other("external sources exceed the 256 MiB payload allowance"))));
+pub fn run_native_with(
+    path: Option<&std::path::Path>,
+    externals: ExternalRegistry,
+    starter: Option<String>,
+) -> eframe::Result {
+    if externals.payload_bytes() > externals::MAX_PAYLOAD {
+        return Err(eframe::Error::AppCreation(Box::new(std::io::Error::other(
+            "external sources exceed the 256 MiB payload allowance",
+        ))));
     }
     let document = path
         .map(document::SavedDocument::open)
@@ -97,8 +103,10 @@ pub fn run_native_with(path:Option<&std::path::Path>,externals:ExternalRegistry,
         Box::new(move |creation| {
             style::install(&creation.egui_ctx);
             let mut app = ApteronotusApp::new();
-            if let Some(starter) = starter {app.source=starter;}
-            app.externals=externals;
+            if let Some(starter) = starter {
+                app.source = starter;
+            }
+            app.externals = externals;
             if let Some(document) = document {
                 app.source = document.source().into();
                 app.files.saved = Some(document);
@@ -109,7 +117,7 @@ pub fn run_native_with(path:Option<&std::path::Path>,externals:ExternalRegistry,
 }
 
 struct ApteronotusApp {
-    output_workload:Option<apteronotus_live::OutputWorkload>,
+    output_workload: Option<apteronotus_live::OutputWorkload>,
     externals: ExternalRegistry,
     source: String,
     syntax: syntax::SyntaxState,
@@ -232,7 +240,7 @@ impl ApteronotusApp {
         #[cfg(not(target_arch = "wasm32"))]
         let source = examples::starter();
         Self {
-            output_workload:None,
+            output_workload: None,
             externals: Default::default(),
             source: source.into(),
             syntax: syntax::SyntaxState::default(),
@@ -336,7 +344,7 @@ impl ApteronotusApp {
                         .filter(|(pending, _)| *pending == request)
                         .map(|(_, source)| source);
                     self.latest_request = request;
-                    self.output_workload=None;
+                    self.output_workload = None;
                     self.status = Status::Active {
                         generation,
                         voices,
@@ -375,9 +383,11 @@ impl ApteronotusApp {
                 PlayerEvent::ControlsChanged(controls) => {
                     self.controls = controls;
                 }
-                PlayerEvent::OutputWorkload(workload) => {self.output_workload=Some(workload);}
+                PlayerEvent::OutputWorkload(workload) => {
+                    self.output_workload = Some(workload);
+                }
                 PlayerEvent::Stopped => {
-                    self.output_workload=None;
+                    self.output_workload = None;
                     self.status = Status::Stopped;
                     self.controls.clear();
                     self.sounding = false;
@@ -686,13 +696,22 @@ play(v, riffs[1])
         let program = Arc::new(evaluate(source).unwrap());
         let graph = program.voice(program.tracks[0].voice).unwrap();
         assert_eq!(graph.lifetime().gate_tail, 0.14);
-        let sounding = Sounding { source: source.into(), program, origin: Instant::now(), effective_at: Frac::ZERO };
+        let sounding = Sounding {
+            source: source.into(),
+            program,
+            origin: Instant::now(),
+            effective_at: Frac::ZERO,
+        };
         let start = source.find("e2 e2 ~ [e2 e2]").unwrap();
         for bar in [0, 4, 24, 48] {
             let now = sounding.program.tempo.cycle_to_seconds(Frac::int(bar))
-                + super::HIGHLIGHT_LATENCY_SECONDS + 0.02;
+                + super::HIGHLIGHT_LATENCY_SECONDS
+                + 0.02;
             let ranges = active_source_ranges(&sounding, source, now);
-            assert!(ranges.contains(&(start..start + 2)), "bar {bar}: {ranges:?}");
+            assert!(
+                ranges.contains(&(start..start + 2)),
+                "bar {bar}: {ranges:?}"
+            );
         }
     }
 
@@ -1294,7 +1313,7 @@ impl ApteronotusApp {
             } => messages.push(("input fallback", message.clone(), style::CAUTION)),
             _ => {}
         }
-        if let Some(workload)=self.output_workload.filter(|v|v.over_budget_callbacks>0) {
+        if let Some(workload) = self.output_workload.filter(|v| v.over_budget_callbacks > 0) {
             messages.push(("audio rendering",format!(
                 "{} callbacks exceeded their audio-duration budget since this stream started (peak {:.0}%, mean {:.0}%). Callback time is not a device-underrun count.",
                 workload.over_budget_callbacks,100.*workload.peak_ratio,100.*workload.mean_ratio),style::CAUTION));

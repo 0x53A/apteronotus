@@ -3,7 +3,8 @@ use apteronotus_render::{RenderOptions, RenderSpan, render};
 
 #[test]
 fn bowed_gestures_render_deterministically_without_a_device() {
-    let program = evaluate(r#"
+    let program = evaluate(
+        r#"
         tempo(120)
         local v=violin {string="D",model="c3"}
         play(v,timeline {
@@ -12,7 +13,9 @@ fn bowed_gestures_render_deterministically_without_a_device() {
           at(secs(1.15),v:vibrato {string="D",cents=12,rate=5.2,over=ms(700)})
         })
         run(v)
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
     for sample_rate in [24_000.0, 48_000.0] {
         let options = RenderOptions {
             sample_rate,

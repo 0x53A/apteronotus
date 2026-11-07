@@ -14,7 +14,6 @@ use apteronotus_render::{
     write_wav,
 };
 
-
 /// One short click on the first of four steps, so onsets are exactly one cycle
 /// apart and each is over long before the next.
 const CLICKS: &str = r#"

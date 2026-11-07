@@ -15,8 +15,8 @@ mod syntax;
 
 pub use error::EvalError;
 pub use program::{
-    ExternalControlBinding, ExternalDegrade, MidiBinding, MidiControlBinding, MidiViolinBinding, PatchControl,
-    PatchControlKind, PatchId, PatchRun, Program, ProgramError, Track, VoiceId,
+    ExternalControlBinding, ExternalDegrade, MidiBinding, MidiControlBinding, MidiViolinBinding,
+    PatchControl, PatchControlKind, PatchId, PatchRun, Program, ProgramError, Track, VoiceId,
 };
 pub use syntax::{SyntaxDiagnostic, check_syntax, check_syntax_with_limit};
 
@@ -85,7 +85,9 @@ impl Default for Limits {
                 input_channels: 256,
                 output_channels: 256,
                 data_entries: 65_536,
-                contact_steps: 16, gesture_sample_work:128, gesture_block_work:1024,
+                contact_steps: 16,
+                gesture_sample_work: 128,
+                gesture_block_work: 1024,
                 delay_buffer_seconds: 600.0,
                 tail_seconds: 600.0,
             },
@@ -133,7 +135,11 @@ impl Evaluator {
     /// scripts reach with `run(external("name"))`. The returned Program owns the
     /// resolved declarations; no lookup callback survives. Registry payload and
     /// graph publication budgets remain independently enforced.
-    pub fn evaluate_with_externals(&self, source: &str, externals: &ExternalRegistry) -> Result<Program, EvalError> {
+    pub fn evaluate_with_externals(
+        &self,
+        source: &str,
+        externals: &ExternalRegistry,
+    ) -> Result<Program, EvalError> {
         if source.len() > self.limits.source_bytes {
             return Err(EvalError::SourceLimit {
                 used: source.len(),

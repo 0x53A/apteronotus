@@ -234,23 +234,30 @@ fn finger_damping_preserves_the_reciprocal_bridge_port_identity() {
 #[test]
 fn measured_body_capacity_is_bounded_and_all_modes_conserve_port_work() {
     use apteronotus_synth::bowed_bridge::MAX_BRIDGE_MODES;
-    let modes: Vec<_> = (0..MAX_BRIDGE_MODES).map(|i| BridgeMode {
-        hz: 200. * 40f64.powf(i as f64 / (MAX_BRIDGE_MODES-1) as f64),
-        q: 10. + i as f64,
-        mobility: 0.02,
-    }).collect();
+    let modes: Vec<_> = (0..MAX_BRIDGE_MODES)
+        .map(|i| BridgeMode {
+            hz: 200. * 40f64.powf(i as f64 / (MAX_BRIDGE_MODES - 1) as f64),
+            q: 10. + i as f64,
+            mobility: 0.02,
+        })
+        .collect();
     let spec = BridgeSpec::new(&modes).unwrap();
-    let mut oversized = modes.clone(); oversized.push(modes[0]);
+    let mut oversized = modes.clone();
+    oversized.push(modes[0]);
     assert!(BridgeSpec::new(&oversized).is_err());
     for rate in [24000., 96000.] {
-        let mut body=ModalBridge::new(spec,rate,&[0.26]).unwrap();
+        let mut body = ModalBridge::new(spec, rate, &[0.26]).unwrap();
         for i in 0..10000 {
-            let a=if i<5000 {(i as f64*0.093).sin()*0.1} else {0.};
-            let before=body.energy();
-            let frame=body.step([a,0.,0.,0.]);
-            let b=frame.velocity-a;
-            let work=0.26*(a*a-b*b)/rate;
-            assert!((body.energy()-before+frame.dissipated_energy-work).abs()<1e-12);
+            let a = if i < 5000 {
+                (i as f64 * 0.093).sin() * 0.1
+            } else {
+                0.
+            };
+            let before = body.energy();
+            let frame = body.step([a, 0., 0., 0.]);
+            let b = frame.velocity - a;
+            let work = 0.26 * (a * a - b * b) / rate;
+            assert!((body.energy() - before + frame.dissipated_energy - work).abs() < 1e-12);
         }
     }
 }

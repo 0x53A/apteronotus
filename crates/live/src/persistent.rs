@@ -90,7 +90,14 @@ impl PersistentRuntime {
         transport_seconds: f64,
         sample_rate: f64,
     ) -> Result<PersistentRuntime, PersistentError> {
-        Self::new_inner(layout, controls, audio_inputs, patches, transport_seconds, sample_rate)
+        Self::new_inner(
+            layout,
+            controls,
+            audio_inputs,
+            patches,
+            transport_seconds,
+            sample_rate,
+        )
     }
 
     fn new_inner<'a>(
@@ -121,7 +128,12 @@ impl PersistentRuntime {
                 });
             }
             let unit = prepare_patch_routed(
-                patch, layout, &controls, audio_inputs, transport_seconds, sample_rate,
+                patch,
+                layout,
+                &controls,
+                audio_inputs,
+                transport_seconds,
+                sample_rate,
             )
             .map_err(|source| PersistentError::Lower { index, source })?;
             if inputs == 0 {
@@ -277,7 +289,10 @@ pub enum PersistentError {
 impl core::fmt::Display for PersistentError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            PersistentError::InvalidPreparationRate(rate) => write!(f, "preparation sample rate must be finite and positive, got {rate}"),
+            PersistentError::InvalidPreparationRate(rate) => write!(
+                f,
+                "preparation sample rate must be finite and positive, got {rate}"
+            ),
             PersistentError::RunInputChannels {
                 index,
                 expected,

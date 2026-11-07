@@ -150,7 +150,11 @@ mod tests {
                 .iter()
                 .any(|entry| entry.group == super::Group::Demos)
         );
-        assert!(!entries.iter().any(|entry| entry.group == super::Group::Songs));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.group == super::Group::Songs)
+        );
         assert!(super::from_fragment("#library=missing").is_none());
         assert!(super::from_fragment("#other=midi-organ").is_none());
     }
@@ -187,11 +191,7 @@ mod tests {
     fn the_initial_library_document_is_also_recoverable() {
         let mut source = super::starter().to_string();
         let mut displaced = None;
-        super::open_document(
-            &mut source,
-            &mut displaced,
-            super::EXAMPLES[1].source,
-        );
+        super::open_document(&mut source, &mut displaced, super::EXAMPLES[1].source);
         assert_eq!(displaced.as_deref(), Some(super::starter()));
     }
 

@@ -80,7 +80,10 @@ impl BusLayout {
 
     /// Resolve a declaration ordinal within this owned layout.
     pub fn bus_id(&self, index: usize) -> Option<BusId> {
-        self.buses.get(index).map(|_| BusId {layout:self.identity,index})
+        self.buses.get(index).map(|_| BusId {
+            layout: self.identity,
+            index,
+        })
     }
 
     pub fn bus_channel_counts(&self) -> &[usize] {
@@ -155,7 +158,9 @@ impl EventRouting {
 
     /// Retain event-level ducking after sends have been lowered into a graph.
     pub fn without_sends(&self) -> Self {
-        let mut out=self.clone();out.sends.clear();out
+        let mut out = self.clone();
+        out.sends.clear();
+        out
     }
 
     pub fn sends(&self) -> &[EventSend] {

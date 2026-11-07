@@ -28,9 +28,9 @@ const ANALYSIS_FFT_SIZE: usize = 32_768;
 const ANALYSIS_FFT_HOP: usize = ANALYSIS_FFT_SIZE / 2;
 
 pub use program::{
-    needs_persistent_runtime, persistent_runtime, persistent_runtime_at, persistent_runtime_prepared, playable_channels,
-    playable_channels_for_tracks, routed_runtime, scheduled_runs, scheduled_tracks,
-    scheduled_tracks_for, stem_lane_labels,
+    needs_persistent_runtime, persistent_runtime, persistent_runtime_at,
+    persistent_runtime_prepared, playable_channels, playable_channels_for_tracks, routed_runtime,
+    scheduled_runs, scheduled_tracks, scheduled_tracks_for, stem_lane_labels,
 };
 
 /// How much of the program to render.
@@ -739,7 +739,10 @@ pub fn render(program: &Program, options: &RenderOptions) -> Result<Rendered, Re
     let main_channels =
         playable_channels_for_tracks(program, &track_indices).map_err(RenderError::Binding)?;
     let mut persistent = needs_persistent_runtime(program)
-        .then(|| persistent_runtime_prepared(program, 0.0, options.sample_rate).map_err(RenderError::Binding))
+        .then(|| {
+            persistent_runtime_prepared(program, 0.0, options.sample_rate)
+                .map_err(RenderError::Binding)
+        })
         .transpose()?;
 
     let tracks = scheduled_tracks_for(program, &track_indices).map_err(RenderError::Binding)?;
@@ -858,9 +861,15 @@ pub fn render(program: &Program, options: &RenderOptions) -> Result<Rendered, Re
     while done < frames {
         let size = (frames - done).min(MAX_BUFFER_SIZE);
         renderer.process(size, &input.buffer_ref(), &mut block.buffer_mut());
-        if !options.raw_stems && let Some(source) = persistent.as_ref()
-            .and_then(|runtime| runtime.controls().external_fault()) {
-            return Err(RenderError::External { frame_end: done + size, source });
+        if !options.raw_stems
+            && let Some(source) = persistent
+                .as_ref()
+                .and_then(|runtime| runtime.controls().external_fault())
+        {
+            return Err(RenderError::External {
+                frame_end: done + size,
+                source,
+            });
         }
         for frame in 0..size {
             if done + frame < first_frame {
@@ -975,7 +984,10 @@ fn write_wav_file(path: &Path, rendered: &Rendered, overwrite: bool) -> Result<(
 #[derive(Debug)]
 pub enum RenderError {
     /// Fault detected after this absolute block, including discarded pre-roll.
-    External { frame_end: usize, source: apteronotus_synth::ExternalFault },
+    External {
+        frame_end: usize,
+        source: apteronotus_synth::ExternalFault,
+    },
     /// The program does not reach audio at all. Carries the binding layer's
     /// own explanation.
     Binding(String),
@@ -1004,7 +1016,9 @@ impl From<ScheduleError> for RenderError {
 impl core::fmt::Display for RenderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            RenderError::External { frame_end, source } => write!(f, "{source} (audio block ending at frame {frame_end})"),
+            RenderError::External { frame_end, source } => {
+                write!(f, "{source} (audio block ending at frame {frame_end})")
+            }
             RenderError::Binding(message) => write!(f, "{message}"),
             RenderError::NothingToRender => {
                 write!(f, "the program has no playable tracks or persistent runs")

@@ -539,10 +539,7 @@ fn noise_voice_send_reaches_persistent_measured_audio() {
     assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
     assert!(rms(&left) > 0.002);
     assert!(rms(&right) > 0.002);
-    assert!(
-        rms(&room) > 0.0001,
-        "the noise send never reached its bus"
-    );
+    assert!(rms(&room) > 0.0001, "the noise send never reached its bus");
 }
 
 #[test]
@@ -606,10 +603,7 @@ fn routed_voices_reach_persistent_measured_audio() {
     assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
     assert!(rms(&left) > 0.0005);
     assert!(rms(&right) > 0.0005);
-    assert!(
-        rms(&verb) > 0.0001,
-        "the voice send never reached the bus"
-    );
+    assert!(rms(&verb) > 0.0001, "the voice send never reached the bus");
 }
 
 #[test]
@@ -722,8 +716,11 @@ fn continuous_patch_reaches_persistent_measured_audio() {
 
 #[test]
 fn resonant_percussion_send_reaches_persistent_measured_audio() {
-    let (program, stems, output) =
-        render_routed_song(include_str!("../../test-fixtures/percussion.eod"), Frac::ONE, 2.75);
+    let (program, stems, output) = render_routed_song(
+        include_str!("../../test-fixtures/percussion.eod"),
+        Frac::ONE,
+        2.75,
+    );
     let room_lane = program.buses.main_channels();
 
     assert!(
@@ -742,8 +739,11 @@ fn resonant_percussion_send_reaches_persistent_measured_audio() {
 
 #[test]
 fn external_trigger_program_reaches_audio_with_silent_input_fallback() {
-    let (program, _stems, output) =
-        render_routed_song(include_str!("../../test-fixtures/external-trigger.eod"), Frac::ONE, 2.0);
+    let (program, _stems, output) = render_routed_song(
+        include_str!("../../test-fixtures/external-trigger.eod"),
+        Frac::ONE,
+        2.0,
+    );
     assert!(program.tracks[0].external_trigger.is_some());
     assert!(!program.tracks[0].onset_bindings.is_empty());
     assert!(program.voices.iter().any(|voice| !voice.sends.is_empty()));
@@ -857,8 +857,11 @@ fn external_trigger_hears_host_audio_and_strikes_tracked_voice() {
 
 #[test]
 fn routed_mono_and_stereo_voices_reach_persistent_audio() {
-    let (program, stems, output) =
-        render_routed_song(include_str!("../../test-fixtures/routed.eod"), Frac::ONE, 2.0);
+    let (program, stems, output) = render_routed_song(
+        include_str!("../../test-fixtures/routed.eod"),
+        Frac::ONE,
+        2.0,
+    );
     let plate_lane = program.buses.main_channels();
 
     assert!(

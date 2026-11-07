@@ -513,7 +513,10 @@ pub enum Op {
     /// Host-injected persistent source; explicit persistent preparation only.
     External(crate::external::External),
     /// Persistent retained instrument: dry body and raw bridge diagnostic.
-    BowedPerformance { key: crate::ControlId, score: crate::bowed_host::BowedScore },
+    BowedPerformance {
+        key: crate::ControlId,
+        score: crate::bowed_host::BowedScore,
+    },
 
     /// (hz, pressure, turbulence) → retained experimental flue waveguide.
     /// Pressure is normalized 0..1; turbulence is clamped to ±1. Declared
@@ -722,7 +725,7 @@ impl Op {
             | Op::RunGate { .. } => 0,
             Op::External(_) => 0,
             Op::BowedPerformance { .. } => 3,
-            Op::SpatialRoom(spec) => spec.emitters.len()+5,
+            Op::SpatialRoom(spec) => spec.emitters.len() + 5,
             Op::ConcertHall
             | Op::Convolve(_)
             | Op::Sine
@@ -1107,7 +1110,7 @@ impl GraphTemplate {
                 .map(|node| match &node.op {
                     Op::ConcertHall => crate::concert_hall::preset::data_entries(),
                     Op::Convolve(response) => response.samples.len(),
-                    Op::SpatialRoom(spec) => spec.emitters.len()*8+16,
+                    Op::SpatialRoom(spec) => spec.emitters.len() * 8 + 16,
                     Op::Harmonics { amplitudes } => amplitudes.len(),
                     Op::Curve(curve) => curve.terms.len(),
                     Op::BreakpointCurve { times, values, .. } => times.len() + values.len(),
@@ -1116,7 +1119,18 @@ impl GraphTemplate {
                     // Captured payload only. Prepared/rewind/cache heap admission
                     // remains separate from this staged-data counter.
                     Op::External(spec) => spec.source().data_entries(),
-                    Op::BowedPerformance { score, .. } => score.coordinates.len()*3 + score.commands.len() * std::mem::size_of::<crate::bowed_gesture::BowCommand>().div_ceil(8) + score.clock.as_ref().map_or(0,|clock|clock.storage_values()) + 4096 * std::mem::size_of::<crate::bowed_gesture::BowAction>().div_ceil(8),
+                    Op::BowedPerformance { score, .. } => {
+                        score.coordinates.len() * 3
+                            + score.commands.len()
+                                * std::mem::size_of::<crate::bowed_gesture::BowCommand>()
+                                    .div_ceil(8)
+                            + score
+                                .clock
+                                .as_ref()
+                                .map_or(0, |clock| clock.storage_values())
+                            + 4096
+                                * std::mem::size_of::<crate::bowed_gesture::BowAction>().div_ceil(8)
+                    }
                     _ => 0,
                 })
                 .sum(),
@@ -1130,7 +1144,9 @@ impl GraphTemplate {
                     Op::StringResonator { min_hz, .. } => 1.0 / min_hz,
                     // Four half-period rails, each sized for the longest side.
                     Op::BowedString(config) => 2.0 / config.min_hz,
-                    Op::BowedPerformance { ref score, .. } => 2.0 * score.opens.len() as f64 / score.config.min_hz,
+                    Op::BowedPerformance { ref score, .. } => {
+                        2.0 * score.opens.len() as f64 / score.config.min_hz
+                    }
                     // Two delay lines at 4x rate, stored as f64 (other
                     // delay nodes store f32): count their byte-equivalent cost.
                     Op::FluePipe { min_hz } => 2.0 * 4.0 * (1.52 + 0.50) / min_hz,
@@ -1158,9 +1174,32 @@ impl GraphTemplate {
                     _ => 0.0,
                 })
                 .sum(),
-            contact_steps: self.nodes.iter().map(|node|match &node.op { Op::External(spec)=>spec.source().contact_steps(), Op::BowedString(_)=>1, Op::BowedPerformance {score,..}=>score.opens.len(),_=>0 }).sum(),
-            gesture_sample_work: self.nodes.iter().map(|node|match &node.op {Op::BowedPerformance {score,..}=>score.delivery_cost().0,_=>0}).sum(),
-            gesture_block_work: self.nodes.iter().map(|node|match &node.op {Op::BowedPerformance {score,..}=>score.delivery_cost().1,_=>0}).sum(),
+            contact_steps: self
+                .nodes
+                .iter()
+                .map(|node| match &node.op {
+                    Op::External(spec) => spec.source().contact_steps(),
+                    Op::BowedString(_) => 1,
+                    Op::BowedPerformance { score, .. } => score.opens.len(),
+                    _ => 0,
+                })
+                .sum(),
+            gesture_sample_work: self
+                .nodes
+                .iter()
+                .map(|node| match &node.op {
+                    Op::BowedPerformance { score, .. } => score.delivery_cost().0,
+                    _ => 0,
+                })
+                .sum(),
+            gesture_block_work: self
+                .nodes
+                .iter()
+                .map(|node| match &node.op {
+                    Op::BowedPerformance { score, .. } => score.delivery_cost().1,
+                    _ => 0,
+                })
+                .sum(),
             tail_seconds: self.tail(),
         }
     }
@@ -1214,8 +1253,20 @@ impl GraphTemplate {
                 limit: limits.tail_seconds,
             });
         }
-        if cost.contact_steps>limits.contact_steps {return Err(GraphLimitError::ContactWork {found:cost.contact_steps,limit:limits.contact_steps});}
-        if cost.gesture_sample_work>limits.gesture_sample_work || cost.gesture_block_work>limits.gesture_block_work {return Err(GraphLimitError::GestureWork {sample:cost.gesture_sample_work,block:cost.gesture_block_work});}
+        if cost.contact_steps > limits.contact_steps {
+            return Err(GraphLimitError::ContactWork {
+                found: cost.contact_steps,
+                limit: limits.contact_steps,
+            });
+        }
+        if cost.gesture_sample_work > limits.gesture_sample_work
+            || cost.gesture_block_work > limits.gesture_block_work
+        {
+            return Err(GraphLimitError::GestureWork {
+                sample: cost.gesture_sample_work,
+                block: cost.gesture_block_work,
+            });
+        }
         Ok(cost)
     }
 
@@ -1267,7 +1318,10 @@ impl GraphTemplate {
                     source.map(|source| lifetime.parallel(source))
                 })?;
             let intrinsic = match &node.op {
-                Op::External(spec) => Lifetime { gate_tail: 0.0, absolute_horizon: spec.source().horizon_seconds() },
+                Op::External(spec) => Lifetime {
+                    gate_tail: 0.0,
+                    absolute_horizon: spec.source().horizon_seconds(),
+                },
                 Op::Adsr(adsr) => Lifetime {
                     gate_tail: adsr.tail(),
                     absolute_horizon: 0.0,
@@ -1566,8 +1620,9 @@ impl GraphTemplate {
                 }
                 Op::FluePipe { min_hz } => min_hz.is_finite() && (20.0..=1000.0).contains(&min_hz),
                 Op::External(ref spec) => spec.valid(),
-                Op::BowedString(config) => config.valid()
-                    && crate::bowed::BowedString::new(config, 44_100.0).is_ok(),
+                Op::BowedString(config) => {
+                    config.valid() && crate::bowed::BowedString::new(config, 44_100.0).is_ok()
+                }
                 Op::BowedPerformance { ref score, .. } => score.prepare(44_100.0).is_ok(),
                 Op::StringResonator { min_hz, decay } => {
                     min_hz.is_finite()
@@ -1904,8 +1959,8 @@ pub struct GraphLimits {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GraphLimitError {
-    ContactWork {found:usize,limit:usize},
-    GestureWork {sample:usize,block:usize},
+    ContactWork { found: usize, limit: usize },
+    GestureWork { sample: usize, block: usize },
     Nodes { found: usize, limit: usize },
     Connections { found: usize, limit: usize },
     InputChannels { found: usize, limit: usize },
@@ -1918,8 +1973,14 @@ pub enum GraphLimitError {
 impl core::fmt::Display for GraphLimitError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            GraphLimitError::ContactWork {found,limit}=>write!(f,"bowed contact work {found} exceeds publication limit {limit}"),
-            GraphLimitError::GestureWork {sample,block}=>write!(f,"bowed gesture delivery exceeds publication limits ({sample}/sample, {block}/64 frames)"),
+            GraphLimitError::ContactWork { found, limit } => write!(
+                f,
+                "bowed contact work {found} exceeds publication limit {limit}"
+            ),
+            GraphLimitError::GestureWork { sample, block } => write!(
+                f,
+                "bowed gesture delivery exceeds publication limits ({sample}/sample, {block}/64 frames)"
+            ),
             GraphLimitError::Nodes { found, limit } => {
                 write!(f, "graph has {found} nodes, more than the limit of {limit}")
             }

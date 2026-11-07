@@ -55,7 +55,11 @@ fn empty_song_listing_needs_no_checkout_and_writes_nothing() {
 #[test]
 fn file_source_renders_and_refuses_overwrites() {
     let directory = Directory::new();
-    std::fs::write(directory.0.join("source.eod"), include_str!("../../test-fixtures/routed.eod")).unwrap();
+    std::fs::write(
+        directory.0.join("source.eod"),
+        include_str!("../../test-fixtures/routed.eod"),
+    )
+    .unwrap();
     succeeds(&directory.run(&["source.eod", "--seconds", "0.1", "--tail", "0", "--quiet"]));
     let output = directory.0.join("source.wav");
     let samples = wav_samples(&output);
@@ -65,7 +69,15 @@ fn file_source_renders_and_refuses_overwrites() {
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("--force"));
     assert_eq!(before, std::fs::read(&output).unwrap());
-    succeeds(&directory.run(&["source.eod", "--seconds", "0.2", "--tail", "0", "--force", "--quiet"]));
+    succeeds(&directory.run(&[
+        "source.eod",
+        "--seconds",
+        "0.2",
+        "--tail",
+        "0",
+        "--force",
+        "--quiet",
+    ]));
     assert_eq!(wav_samples(&output).len(), samples.len() * 2);
 }
 

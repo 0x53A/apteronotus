@@ -377,7 +377,9 @@ fn delay_tails_accumulate_in_series_and_buffers_sum_in_parallel() {
         input_channels: usize::MAX,
         output_channels: usize::MAX,
         data_entries: usize::MAX,
-        contact_steps:usize::MAX, gesture_sample_work:usize::MAX, gesture_block_work:usize::MAX,
+        contact_steps: usize::MAX,
+        gesture_sample_work: usize::MAX,
+        gesture_block_work: usize::MAX,
         delay_buffer_seconds: 0.69,
         tail_seconds: f64::INFINITY,
     };
@@ -535,7 +537,9 @@ fn publication_budgets_use_a_deterministic_graph_cost() {
         input_channels: usize::MAX,
         output_channels: usize::MAX,
         data_entries: usize::MAX,
-        contact_steps:usize::MAX, gesture_sample_work:usize::MAX, gesture_block_work:usize::MAX,
+        contact_steps: usize::MAX,
+        gesture_sample_work: usize::MAX,
+        gesture_block_work: usize::MAX,
         delay_buffer_seconds: f64::INFINITY,
         tail_seconds: f64::INFINITY,
     };

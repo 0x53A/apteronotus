@@ -275,34 +275,42 @@ fn explicit_preparation_clock_is_applied_before_first_sample() {
     let buses = BusLayout::new(1).unwrap();
     let store = ControlStore::new(&ControlLayout::new());
     for rate in [32_000.0, 48_000.0, 96_000.0] {
-        let mut prepared = apteronotus_synth::prepare_patch_routed(
-            &patch, &buses, &store, None, 0.0, rate,
-        ).unwrap();
+        let mut prepared =
+            apteronotus_synth::prepare_patch_routed(&patch, &buses, &store, None, 0.0, rate)
+                .unwrap();
         let mut reference = instantiate_patch_routed_at(&patch, &buses, &store, 0.0).unwrap();
         reference.set_sample_rate(rate);
         for _ in 0..4096 {
-            let mut a = [0.0]; let mut b = [0.0];
-            prepared.tick(&[], &mut a); reference.tick(&[], &mut b);
+            let mut a = [0.0];
+            let mut b = [0.0];
+            prepared.tick(&[], &mut a);
+            reference.tick(&[], &mut b);
             assert_eq!(a[0].to_bits(), b[0].to_bits());
         }
     }
     for rate in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert!(matches!(apteronotus_synth::prepare_patch_routed(
-            &patch, &buses, &store, None, 0.0, rate,
-        ), Err(LowerError::InvalidPreparationRate(_))));
+        assert!(matches!(
+            apteronotus_synth::prepare_patch_routed(&patch, &buses, &store, None, 0.0, rate,),
+            Err(LowerError::InvalidPreparationRate(_))
+        ));
     }
 }
 
 #[test]
 fn unsupported_node_rate_is_a_preparation_error_not_a_panic() {
     let mut graph = GraphBuilder::new();
-    let output = graph.convolve(Source::Const(1.0), apteronotus_synth::convolution::ImpulseResponse {
-        sample_rate: 48_000.0, samples: vec![1.0, 0.5],
-    });
+    let output = graph.convolve(
+        Source::Const(1.0),
+        apteronotus_synth::convolution::ImpulseResponse {
+            sample_rate: 48_000.0,
+            samples: vec![1.0, 0.5],
+        },
+    );
     let patch = PatchTemplate::new(graph.out_mono(output).unwrap()).unwrap();
     let buses = BusLayout::new(1).unwrap();
     let store = ControlStore::new(&ControlLayout::new());
-    assert!(matches!(apteronotus_synth::prepare_patch_routed(
-        &patch, &buses, &store, None, 0.0, 1000.0,
-    ), Err(LowerError::NodePreparation { node: 0, .. })));
+    assert!(matches!(
+        apteronotus_synth::prepare_patch_routed(&patch, &buses, &store, None, 0.0, 1000.0,),
+        Err(LowerError::NodePreparation { node: 0, .. })
+    ));
 }

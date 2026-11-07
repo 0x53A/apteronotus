@@ -21,20 +21,29 @@ pub trait ExternalSource: std::any::Any + Send + Sync + std::fmt::Debug {
     fn outputs(&self) -> usize;
     /// Finite activity horizon from transport zero, in seconds. Use 0 when the
     /// source has no authored end (it is then bounded by its run).
-    fn horizon_seconds(&self) -> f64 { 0.0 }
+    fn horizon_seconds(&self) -> f64 {
+        0.0
+    }
     /// Immutable payload size counted against graph publication budgets, in
     /// 8-byte data entries.
-    fn data_entries(&self) -> usize { 0 }
+    fn data_entries(&self) -> usize {
+        0
+    }
     /// Relative per-sample contact/solver work, counted in `GraphCost::contact_steps`.
-    fn contact_steps(&self) -> usize { 0 }
+    fn contact_steps(&self) -> usize {
+        0
+    }
     /// Whether `other` declares the same source, so a compatible live edit may
     /// keep the running instance. Identical handles always compare equal; the
     /// default treats distinct declarations as different. Implementations can
     /// compare content via `(other as &dyn Any).downcast_ref::<Self>()`.
-    fn equivalent(&self, _other: &dyn ExternalSource) -> bool { false }
+    fn equivalent(&self, _other: &dyn ExternalSource) -> bool {
+        false
+    }
     /// Prepare one concrete unit for `sample_rate`, starting at `transport_seconds`.
     /// The unit must have zero inputs and [`Self::outputs`] outputs.
-    fn prepare(&self, sample_rate: f64, transport_seconds: f64) -> Result<PreparedExternal, String>;
+    fn prepare(&self, sample_rate: f64, transport_seconds: f64)
+    -> Result<PreparedExternal, String>;
 }
 
 /// Control-thread health view of one prepared external unit.
@@ -54,19 +63,29 @@ pub struct PreparedExternal {
 #[derive(Clone)]
 pub struct External(Arc<dyn ExternalSource>);
 impl External {
-    pub fn new(source: impl ExternalSource) -> Self { Self(Arc::new(source)) }
-    pub fn from_arc(source: Arc<dyn ExternalSource>) -> Self { Self(source) }
-    pub fn source(&self) -> &dyn ExternalSource { &*self.0 }
+    pub fn new(source: impl ExternalSource) -> Self {
+        Self(Arc::new(source))
+    }
+    pub fn from_arc(source: Arc<dyn ExternalSource>) -> Self {
+        Self(source)
+    }
+    pub fn source(&self) -> &dyn ExternalSource {
+        &*self.0
+    }
     pub(crate) fn valid(&self) -> bool {
         let h = self.0.horizon_seconds();
         (1..=16).contains(&self.0.outputs()) && h.is_finite() && h >= 0.0
     }
 }
 impl PartialEq for External {
-    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) || self.0.equivalent(&*other.0) }
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.equivalent(&*other.0)
+    }
 }
 impl std::fmt::Debug for External {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// First failed external instance, in persistent node preparation order.
@@ -79,7 +98,13 @@ pub struct ExternalFault {
 }
 impl std::fmt::Display for ExternalFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} instance {}: {}", self.kind, self.instance + 1, self.reason)
+        write!(
+            f,
+            "{} instance {}: {}",
+            self.kind,
+            self.instance + 1,
+            self.reason
+        )
     }
 }
 impl std::error::Error for ExternalFault {}

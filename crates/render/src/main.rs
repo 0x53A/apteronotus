@@ -1180,8 +1180,12 @@ mod tests {
     #[test]
     fn unknown_embedded_songs_and_conflicting_inputs_are_rejected() {
         for text in [
-            "--song unknown", "--song", "s.eod --song drift",
-            "--song drift s.eod", "--song drift --song waves", "--list-songs --song drift",
+            "--song unknown",
+            "--song",
+            "s.eod --song drift",
+            "--song drift s.eod",
+            "--song drift --song waves",
+            "--list-songs --song drift",
         ] {
             assert!(parse(&arguments(text)).is_err(), "{text}");
         }

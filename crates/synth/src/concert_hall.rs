@@ -165,7 +165,7 @@ mod tests {
     }
 }
 
-#[path="concert_hall_preset.rs"]
+#[path = "concert_hall_preset.rs"]
 pub mod preset;
 
 /// Fixed-clock fundsp adapter for the prepared audition hall. Off-thread
@@ -176,39 +176,73 @@ pub struct HallUnit {
     compatible: bool,
 }
 impl HallUnit {
-    pub fn new(rate:f64) -> Result<Self,&'static str> {
-        Ok(Self{hall:preset::prepare(rate)?,compatible:true})
+    pub fn new(rate: f64) -> Result<Self, &'static str> {
+        Ok(Self {
+            hall: preset::prepare(rate)?,
+            compatible: true,
+        })
     }
 }
 impl fundsp::prelude32::AudioUnit for HallUnit {
-    fn reset(&mut self) { self.hall.reset(); }
-    fn set_sample_rate(&mut self, rate:f64) {
-        let compatible=rate==self.hall.sample_rate();
-        if compatible!=self.compatible {self.hall.reset();}
-        self.compatible=compatible;
+    fn reset(&mut self) {
+        self.hall.reset();
     }
-    fn tick(&mut self,input:&[f32],output:&mut[f32]) {
+    fn set_sample_rate(&mut self, rate: f64) {
+        let compatible = rate == self.hall.sample_rate();
+        if compatible != self.compatible {
+            self.hall.reset();
+        }
+        self.compatible = compatible;
+    }
+    fn tick(&mut self, input: &[f32], output: &mut [f32]) {
         if self.compatible {
-            let wet=self.hall.tick(input[0] as f64);
-            output[0]=wet[0] as f32;output[1]=wet[1] as f32;
-        } else {output.fill(0.);}
-    }
-    fn process(&mut self,size:usize,input:&fundsp::prelude32::BufferRef,output:&mut fundsp::prelude32::BufferMut) {
-        for i in 0..size {
-            let mut wet=[0.;2];
-            self.tick(&[input.at_f32(0,i)],&mut wet);
-            output.set_f32(0,i,wet[0]);output.set_f32(1,i,wet[1]);
+            let wet = self.hall.tick(input[0] as f64);
+            output[0] = wet[0] as f32;
+            output[1] = wet[1] as f32;
+        } else {
+            output.fill(0.);
         }
     }
-    fn inputs(&self)->usize {1}
-    fn outputs(&self)->usize {2}
-    fn route(&mut self,_:&fundsp::prelude32::SignalFrame,_:f64)->fundsp::prelude32::SignalFrame {
-        let mut out=fundsp::prelude32::SignalFrame::new(2);
-        out.fill(fundsp::prelude32::Signal::Unknown);out
+    fn process(
+        &mut self,
+        size: usize,
+        input: &fundsp::prelude32::BufferRef,
+        output: &mut fundsp::prelude32::BufferMut,
+    ) {
+        for i in 0..size {
+            let mut wet = [0.; 2];
+            self.tick(&[input.at_f32(0, i)], &mut wet);
+            output.set_f32(0, i, wet[0]);
+            output.set_f32(1, i, wet[1]);
+        }
     }
-    fn get_id(&self)->u64 {0x4150_5445_4841_4c4c}
-    fn footprint(&self)->usize {
-        std::mem::size_of::<Self>() + self.hall.buffers.iter().map(|b|b.capacity()*8).sum::<usize>()
-            + self.hall.history.capacity()*8 + self.hall.taps.capacity()*std::mem::size_of::<(usize,[f64;2])>()
+    fn inputs(&self) -> usize {
+        1
+    }
+    fn outputs(&self) -> usize {
+        2
+    }
+    fn route(
+        &mut self,
+        _: &fundsp::prelude32::SignalFrame,
+        _: f64,
+    ) -> fundsp::prelude32::SignalFrame {
+        let mut out = fundsp::prelude32::SignalFrame::new(2);
+        out.fill(fundsp::prelude32::Signal::Unknown);
+        out
+    }
+    fn get_id(&self) -> u64 {
+        0x4150_5445_4841_4c4c
+    }
+    fn footprint(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .hall
+                .buffers
+                .iter()
+                .map(|b| b.capacity() * 8)
+                .sum::<usize>()
+            + self.hall.history.capacity() * 8
+            + self.hall.taps.capacity() * std::mem::size_of::<(usize, [f64; 2])>()
     }
 }

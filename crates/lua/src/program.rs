@@ -364,10 +364,15 @@ impl Program {
         }
         let mut midi_violins = self.midi_violins.clone();
         for binding in &mut midi_violins {
-            let Some(id)=self.controls.corresponding_id(binding.key,&active.controls) else {return false};
-            binding.key=id;
+            let Some(id) = self
+                .controls
+                .corresponding_id(binding.key, &active.controls)
+            else {
+                return false;
+            };
+            binding.key = id;
         }
-        self.midi_violins=midi_violins;
+        self.midi_violins = midi_violins;
         self.midi_controls = midi_controls;
         self.voices = voices;
         self.tracks = tracks;
@@ -394,25 +399,37 @@ impl Program {
         limits: GraphLimits,
         value_limits: ValueLimits,
     ) -> Result<(), ProgramError> {
-        let (mut contacts,mut sample_work,mut block_work)=(0usize,0usize,0usize);
+        let (mut contacts, mut sample_work, mut block_work) = (0usize, 0usize, 0usize);
         for run in &self.runs {
-            if let Some(patch)=self.patch(run.patch) {
-                let cost=patch.graph().cost();
-                contacts=contacts.saturating_add(cost.contact_steps);
-                sample_work=sample_work.saturating_add(cost.gesture_sample_work);
-                block_work=block_work.saturating_add(cost.gesture_block_work);
+            if let Some(patch) = self.patch(run.patch) {
+                let cost = patch.graph().cost();
+                contacts = contacts.saturating_add(cost.contact_steps);
+                sample_work = sample_work.saturating_add(cost.gesture_sample_work);
+                block_work = block_work.saturating_add(cost.gesture_block_work);
             }
         }
-        if contacts>limits.contact_steps || sample_work>limits.gesture_sample_work || block_work>limits.gesture_block_work {
-            return Err(ProgramError::InvalidMidiBinding {index:0,message:"aggregate retained contact/gesture work exceeds publication limits".into()});
+        if contacts > limits.contact_steps
+            || sample_work > limits.gesture_sample_work
+            || block_work > limits.gesture_block_work
+        {
+            return Err(ProgramError::InvalidMidiBinding {
+                index: 0,
+                message: "aggregate retained contact/gesture work exceeds publication limits"
+                    .into(),
+            });
         }
-        for (index,binding) in self.midi_violins.iter().enumerate() {
+        for (index, binding) in self.midi_violins.iter().enumerate() {
             let valid = self.patch(binding.patch).is_some_and(|p|p.graph().nodes.iter().any(|n|matches!(&n.op,Op::BowedPerformance {key,score} if *key==binding.key && score.live && score.opens.len()==1 && score.commands.is_empty() && (score.opens[0]-440.0*2.0_f64.powf((f64::from(binding.min_key)-69.0)/12.0)).abs()<1e-8 && 440.0*2.0_f64.powf((f64::from(binding.max_key)-69.0)/12.0)<=score.config.max_hz)))
                 && self.runs.iter().any(|run|run.patch==binding.patch && run.span.is_none())
                 && self.controls.spec(binding.key).is_some() && binding.channel.is_none_or(|c|c<16)
                 && binding.min_key<=binding.max_key && binding.max_key<128
                 && !self.midi_violins[..index].iter().any(|other|other.key==binding.key);
-            if !valid {return Err(ProgramError::InvalidMidiBinding {index,message:"invalid retained violin binding or missing run".into()});}
+            if !valid {
+                return Err(ProgramError::InvalidMidiBinding {
+                    index,
+                    message: "invalid retained violin binding or missing run".into(),
+                });
+            }
         }
         for (index, binding) in self.midi_controls.iter().enumerate() {
             if self.controls.spec(binding.control).is_none()
@@ -564,21 +581,38 @@ impl Program {
                     .map_err(|source| ProgramError::TrackValues { index, source })?;
             }
         }
-        let mut bowed_addresses=std::collections::HashSet::new();
+        let mut bowed_addresses = std::collections::HashSet::new();
         for (index, run) in self.runs.iter().enumerate() {
             let Some(patch) = self.patch(run.patch) else {
                 return Err(ProgramError::MissingRunPatch { index });
             };
             for node in &patch.graph().nodes {
-                if let Op::BowedPerformance {key,..}=node.op
-                    && !bowed_addresses.insert(key) {return Err(ProgramError::InvalidMidiBinding {index,message:"duplicate retained violin address across running instances".into()});}
+                if let Op::BowedPerformance { key, .. } = node.op
+                    && !bowed_addresses.insert(key)
+                {
+                    return Err(ProgramError::InvalidMidiBinding {
+                        index,
+                        message: "duplicate retained violin address across running instances"
+                            .into(),
+                    });
+                }
             }
             if let Some(span) = run.span {
                 if span.begin >= span.end {
                     return Err(ProgramError::InvalidRunSpan { index });
                 }
-                if patch.graph().nodes.iter().any(|n|matches!(n.op,Op::BowedPerformance {..}|Op::External(_))) {
-                    return Err(ProgramError::InvalidMidiBinding {index,message:"retained violin and external sources require a program-lifetime run".into()});
+                if patch
+                    .graph()
+                    .nodes
+                    .iter()
+                    .any(|n| matches!(n.op, Op::BowedPerformance { .. } | Op::External(_)))
+                {
+                    return Err(ProgramError::InvalidMidiBinding {
+                        index,
+                        message:
+                            "retained violin and external sources require a program-lifetime run"
+                                .into(),
+                    });
                 }
                 if patch.graph().inputs != 0 {
                     return Err(ProgramError::TimedRunInputs { index });
@@ -726,9 +760,19 @@ fn ops_compatible(
                 target: right_target,
             },
         ) => left_controls.corresponding_id(*left_target, right_controls) == Some(*right_target),
-        (Op::BowedPerformance { key: left_key, score: left_score },
-         Op::BowedPerformance { key: right_key, score: right_score }) =>
-            left_score == right_score && left_controls.corresponding_id(*left_key, right_controls) == Some(*right_key),
+        (
+            Op::BowedPerformance {
+                key: left_key,
+                score: left_score,
+            },
+            Op::BowedPerformance {
+                key: right_key,
+                score: right_score,
+            },
+        ) => {
+            left_score == right_score
+                && left_controls.corresponding_id(*left_key, right_controls) == Some(*right_key)
+        }
         _ => left == right,
     }
 }
@@ -783,7 +827,8 @@ fn rebind_graph_arenas(
     to_buses: &BusLayout,
 ) -> bool {
     for node in &mut graph.nodes {
-        if let Op::ControlWrite { target } | Op::BowedPerformance { key: target, .. } = &mut node.op {
+        if let Op::ControlWrite { target } | Op::BowedPerformance { key: target, .. } = &mut node.op
+        {
             let Some(rebound) = from_controls.corresponding_id(*target, to_controls) else {
                 return false;
             };

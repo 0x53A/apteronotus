@@ -24,17 +24,17 @@ static ALLOCATOR: Counted = Counted;
 
 #[test]
 fn gesture_delivery_rendering_and_reset_do_not_allocate() {
+    use apteronotus_synth::bowed::{BowedKind, BowedModel};
     use apteronotus_synth::bowed_gesture::{BowAction, c2_config};
     use apteronotus_synth::bowed_host::BowedScore;
     use apteronotus_synth::{
         ControlLayout, ControlSpec, ControlStore, GraphBuilder, PatchTemplate, instantiate_patch,
     };
-    use apteronotus_synth::bowed::{BowedKind, BowedModel};
-    for (model,kind,min_hz,open_hz) in [
-        (BowedModel::C2,BowedKind::Violin,196.0,293.6648),
-        (BowedModel::C3,BowedKind::Violin,196.0,293.6648),
-        (BowedModel::C4,BowedKind::Violin,196.0,293.6648),
-        (BowedModel::C3,BowedKind::Cello,65.0,65.40639132514966),
+    for (model, kind, min_hz, open_hz) in [
+        (BowedModel::C2, BowedKind::Violin, 196.0, 293.6648),
+        (BowedModel::C3, BowedKind::Violin, 196.0, 293.6648),
+        (BowedModel::C4, BowedKind::Violin, 196.0, 293.6648),
+        (BowedModel::C3, BowedKind::Cello, 65.0, 65.40639132514966),
     ] {
         let mut layout = ControlLayout::new();
         let key = layout
@@ -42,7 +42,9 @@ fn gesture_delivery_rendering_and_reset_do_not_allocate() {
             .unwrap();
         let score = BowedScore {
             config: apteronotus_synth::bowed::BowedConfig {
-                model, kind, min_hz,
+                model,
+                kind,
+                min_hz,
                 ..c2_config()
             },
             live: true,
@@ -66,10 +68,14 @@ fn gesture_delivery_rendering_and_reset_do_not_allocate() {
                 &[
                     BowAction::Stop {
                         string: 0,
-                        hz: if kind == BowedKind::Cello {73.41619197935188} else {440.0},
+                        hz: if kind == BowedKind::Cello {
+                            73.41619197935188
+                        } else {
+                            440.0
+                        },
                         // Install the low-C finger target before fading vibrato;
                         // joint publication bounds conservatively include both endpoints.
-                        over: if kind == BowedKind::Cello {0} else {100},
+                        over: if kind == BowedKind::Cello { 0 } else { 100 },
                     },
                     BowAction::Bow {
                         string: Some(0),
@@ -115,32 +121,67 @@ fn gesture_delivery_rendering_and_reset_do_not_allocate() {
 
 #[test]
 fn reciprocal_bridge_and_four_strings_render_and_reset_without_allocation() {
-    for physical in [false, true] { reciprocal_allocation_case(physical); }
+    for physical in [false, true] {
+        reciprocal_allocation_case(physical);
+    }
 }
 fn reciprocal_allocation_case(physical: bool) {
     use apteronotus_synth::bowed::{BowedConfig, BowedControls, BowedModel, BowedString};
     use apteronotus_synth::bowed_bridge::{BridgeSpec, ModalBridge};
     use fundsp::prelude32::AudioUnit;
-    let mut bridge=ModalBridge::new(BridgeSpec::experiment(1.).unwrap(),48000.,&[1.;4]).unwrap();
-    let mut strings: Vec<_>=[196.,294.8366557,440.,659.255114].iter().enumerate().map(|(i,hz)| {
-        let mut s=BowedString::new(BowedConfig {model:BowedModel::C4,min_hz:195.,max_hz:700.,..Default::default()},48000.).unwrap();
-        s.set_controls(BowedControls {hz:*hz,speed:0.4,force:if i==1 {0.35}else{0.},position:0.24}).unwrap();
-        if physical {
-            s.configure_contact(apteronotus_synth::bowed_contact::BowContactCalibration {
-                impedance:1.,velocity_unit:5.,normal_force_unit:1.,static_friction:0.8,sliding_friction:0.8/15.,slip_knee:0.2,
-            }).unwrap();
-        }
-        s.connect_bridge(bridge.load(i).unwrap()).unwrap();s
-    }).collect();
-    ALLOCATIONS.with(|v|v.set(0));MEASURING.with(|v|v.set(true));
+    let mut bridge =
+        ModalBridge::new(BridgeSpec::experiment(1.).unwrap(), 48000., &[1.; 4]).unwrap();
+    let mut strings: Vec<_> = [196., 294.8366557, 440., 659.255114]
+        .iter()
+        .enumerate()
+        .map(|(i, hz)| {
+            let mut s = BowedString::new(
+                BowedConfig {
+                    model: BowedModel::C4,
+                    min_hz: 195.,
+                    max_hz: 700.,
+                    ..Default::default()
+                },
+                48000.,
+            )
+            .unwrap();
+            s.set_controls(BowedControls {
+                hz: *hz,
+                speed: 0.4,
+                force: if i == 1 { 0.35 } else { 0. },
+                position: 0.24,
+            })
+            .unwrap();
+            if physical {
+                s.configure_contact(apteronotus_synth::bowed_contact::BowContactCalibration {
+                    impedance: 1.,
+                    velocity_unit: 5.,
+                    normal_force_unit: 1.,
+                    static_friction: 0.8,
+                    sliding_friction: 0.8 / 15.,
+                    slip_knee: 0.2,
+                })
+                .unwrap();
+            }
+            s.connect_bridge(bridge.load(i).unwrap()).unwrap();
+            s
+        })
+        .collect();
+    ALLOCATIONS.with(|v| v.set(0));
+    MEASURING.with(|v| v.set(true));
     for _ in 0..48000 {
-        let input=std::array::from_fn(|i|strings[i].bridge_incident() as f64);
-        let frame=bridge.step(input);
-        for s in &mut strings {s.next_sample_at_bridge(frame.velocity);}
+        let input = std::array::from_fn(|i| strings[i].bridge_incident() as f64);
+        let frame = bridge.step(input);
+        for s in &mut strings {
+            s.next_sample_at_bridge(frame.velocity);
+        }
     }
-    bridge.reset();for s in &mut strings {s.reset();}
-    MEASURING.with(|v|v.set(false));
-    assert_eq!(ALLOCATIONS.with(Cell::get),0);
+    bridge.reset();
+    for s in &mut strings {
+        s.reset();
+    }
+    MEASURING.with(|v| v.set(false));
+    assert_eq!(ALLOCATIONS.with(Cell::get), 0);
 }
 
 #[test]
@@ -149,21 +190,55 @@ fn polarized_bridge_and_two_string_planes_do_not_allocate() {
     use apteronotus_synth::bowed_bridge::{BridgeSpec, PolarizedBridge};
     use fundsp::prelude32::AudioUnit;
     let mut bridge = PolarizedBridge::new(
-        [BridgeSpec::experiment(0.5).unwrap(), BridgeSpec::experiment(1.).unwrap()],
-        0.53, 48000., &[0.26],
-    ).unwrap();
+        [
+            BridgeSpec::experiment(0.5).unwrap(),
+            BridgeSpec::experiment(1.).unwrap(),
+        ],
+        0.53,
+        48000.,
+        &[0.26],
+    )
+    .unwrap();
     let mut strings = std::array::from_fn::<_, 2, _>(|axis| {
-        let mut s = BowedString::new(BowedConfig { model: BowedModel::C4, ..Default::default() },48000.).unwrap();
-        s.set_controls(BowedControls {hz:294.8,speed:0.4,force:if axis==0 {0.3} else {0.},position:0.18}).unwrap();
-        s.connect_bridge(bridge.load(0).unwrap()).unwrap(); s
+        let mut s = BowedString::new(
+            BowedConfig {
+                model: BowedModel::C4,
+                ..Default::default()
+            },
+            48000.,
+        )
+        .unwrap();
+        s.set_controls(BowedControls {
+            hz: 294.8,
+            speed: 0.4,
+            force: if axis == 0 { 0.3 } else { 0. },
+            position: 0.18,
+        })
+        .unwrap();
+        s.connect_bridge(bridge.load(0).unwrap()).unwrap();
+        s
     });
-    ALLOCATIONS.with(|v|v.set(0)); MEASURING.with(|v|v.set(true));
+    ALLOCATIONS.with(|v| v.set(0));
+    MEASURING.with(|v| v.set(true));
     for _ in 0..48000 {
-        let a = [[strings[0].bridge_incident() as f64,strings[1].bridge_incident() as f64],[0.;2],[0.;2],[0.;2]];
+        let a = [
+            [
+                strings[0].bridge_incident() as f64,
+                strings[1].bridge_incident() as f64,
+            ],
+            [0.; 2],
+            [0.; 2],
+            [0.; 2],
+        ];
         let frame = bridge.step(a);
-        for axis in 0..2 {strings[axis].next_sample_at_bridge(frame.velocity[axis]);}
+        for axis in 0..2 {
+            strings[axis].next_sample_at_bridge(frame.velocity[axis]);
+        }
     }
-    bridge.reset(); for s in &mut strings {s.reset();}
-    MEASURING.with(|v|v.set(false));
-    assert_eq!(ALLOCATIONS.with(Cell::get),0);
+    bridge.reset();
+    for s in &mut strings {
+        s.reset();
+    }
+    MEASURING.with(|v| v.set(false));
+    assert_eq!(ALLOCATIONS.with(Cell::get), 0);
 }

@@ -20,10 +20,10 @@ use piccolo::{
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 const INTERNAL_CONTROL_PREFIX: &str = "__apteronotus.";
-#[path = "violin.rs"]
-mod violin;
 #[path = "streams.rs"]
 mod streams;
+#[path = "violin.rs"]
+mod violin;
 
 pub(crate) const PRELUDE: &str = r#"
 -- Piccolo intentionally ships a very small table library. These are ordinary
@@ -947,9 +947,9 @@ pub(crate) fn install<'gc>(
     ctx.set_global("__apteronotus_voice_meta", voice_meta);
 
     let patch_meta = Table::new(&ctx);
-    violin::install(ctx,state.clone())?;
+    violin::install(ctx, state.clone())?;
     set_callback(ctx, "external", state.clone(), external)?;
-    streams::install(ctx,state.clone())?;
+    streams::install(ctx, state.clone())?;
     set_operator(ctx, patch_meta, MetaMethod::Index, state, patch_index)?;
     ctx.set_global("__apteronotus_patch_meta", patch_meta);
 
@@ -972,7 +972,10 @@ pub(crate) fn finalize<'gc>(
     let mut state = state.borrow_mut();
     streams::route_producers(ctx, &mut state)?;
     finalize_shared_signals(ctx, &mut state)?;
-    if state.pending_sends.is_empty() && state.pending_master.is_none() && !streams::has_output(&state) {
+    if state.pending_sends.is_empty()
+        && state.pending_master.is_none()
+        && !streams::has_output(&state)
+    {
         return Ok(());
     }
     if state.active.is_some() {
@@ -1003,7 +1006,9 @@ pub(crate) fn finalize<'gc>(
     });
     let mut outputs = (0..total_channels).map(Source::Input).collect::<Vec<_>>();
     let streams = streams::compile(ctx, &mut state)?;
-    if let Some(stream) = streams.output { outputs[..main_channels].copy_from_slice(&stream); }
+    if let Some(stream) = streams.output {
+        outputs[..main_channels].copy_from_slice(&stream);
+    }
 
     for send in sends {
         let range = state
@@ -1011,7 +1016,11 @@ pub(crate) fn finalize<'gc>(
             .buses
             .bus_range(send.bus)
             .ok_or_else(|| binding_error(ctx, "send bus does not belong to this edit"))?;
-        let inputs = streams.buses.get(&send.bus).cloned().unwrap_or_else(||range.map(Source::Input).collect());
+        let inputs = streams
+            .buses
+            .get(&send.bus)
+            .cloned()
+            .unwrap_or_else(|| range.map(Source::Input).collect());
         let wet = apply_processor(ctx, &mut state, &send.processor, &inputs)?;
         if wet.len() != main_channels {
             return Err(binding_error(
@@ -1029,7 +1038,6 @@ pub(crate) fn finalize<'gc>(
             outputs[channel] = state.active_mut(ctx)?.graph.add(outputs[channel], scaled);
         }
     }
-
 
     if let Some(master) = master {
         let mastered = apply_processor(ctx, &mut state, &master, &outputs[..main_channels])?;
@@ -1438,23 +1446,59 @@ fn begin_patch<'gc>(
 }
 
 fn external<'gc>(
-    ctx: Context<'gc>, state: &Rc<RefCell<BuildState>>, mut stack: piccolo::Stack<'gc, '_>,
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    if stack.len()!=1 {return Err(binding_error(ctx,"external expects one registered source name"));}
-    let Value::String(name)=stack.get(0) else {return Err(binding_error(ctx,"external expects a registered source name"));};
-    let name=name.to_str().map_err(|_|binding_error(ctx,"source name must be UTF-8"))?;
-    let mut state=state.borrow_mut();
-    if state.active.is_some() {return Err(binding_error(ctx,"external must be declared outside a graph"));}
-    let spec=state.externals.get(name).cloned().ok_or_else(||binding_error(ctx,format!("external source {name:?} is not registered by the host")))?;
-    if state.program.patches.len()>=state.limits.patches {return Err(binding_error(ctx,"patch limit exceeded"));}
-    state.graph_nodes=state.graph_nodes.saturating_add(1);
-    if state.graph_nodes>state.limits.graph_nodes {return Err(binding_error(ctx,"graph node limit exceeded"));}
-    let mut builder=GraphBuilder::new();let outputs=builder.external(spec);
-    let graph=builder.out(&outputs).map_err(|e|binding_error(ctx,e.to_string()))?;
-    graph.validate_limits(state.limits.graph_publication).map_err(|e|binding_error(ctx,e.to_string()))?;
-    let patch=PatchTemplate::new(graph).map_err(|e|binding_error(ctx,e.to_string()))?;
-    let id=state.program.patches.len();state.program.patches.push(patch);state.program.patch_controls.push(Vec::new());
-    stack.replace(ctx,lua_patch(ctx,id)?);Ok(CallbackReturn::Return)
+    if stack.len() != 1 {
+        return Err(binding_error(
+            ctx,
+            "external expects one registered source name",
+        ));
+    }
+    let Value::String(name) = stack.get(0) else {
+        return Err(binding_error(
+            ctx,
+            "external expects a registered source name",
+        ));
+    };
+    let name = name
+        .to_str()
+        .map_err(|_| binding_error(ctx, "source name must be UTF-8"))?;
+    let mut state = state.borrow_mut();
+    if state.active.is_some() {
+        return Err(binding_error(
+            ctx,
+            "external must be declared outside a graph",
+        ));
+    }
+    let spec = state.externals.get(name).cloned().ok_or_else(|| {
+        binding_error(
+            ctx,
+            format!("external source {name:?} is not registered by the host"),
+        )
+    })?;
+    if state.program.patches.len() >= state.limits.patches {
+        return Err(binding_error(ctx, "patch limit exceeded"));
+    }
+    state.graph_nodes = state.graph_nodes.saturating_add(1);
+    if state.graph_nodes > state.limits.graph_nodes {
+        return Err(binding_error(ctx, "graph node limit exceeded"));
+    }
+    let mut builder = GraphBuilder::new();
+    let outputs = builder.external(spec);
+    let graph = builder
+        .out(&outputs)
+        .map_err(|e| binding_error(ctx, e.to_string()))?;
+    graph
+        .validate_limits(state.limits.graph_publication)
+        .map_err(|e| binding_error(ctx, e.to_string()))?;
+    let patch = PatchTemplate::new(graph).map_err(|e| binding_error(ctx, e.to_string()))?;
+    let id = state.program.patches.len();
+    state.program.patches.push(patch);
+    state.program.patch_controls.push(Vec::new());
+    stack.replace(ctx, lua_patch(ctx, id)?);
+    Ok(CallbackReturn::Return)
 }
 
 fn finish_patch<'gc>(
@@ -1919,12 +1963,23 @@ fn run<'gc>(
     let Value::UserData(data) = stack.get(0) else {
         return Err(binding_error(ctx, "run expects a patch handle"));
     };
-    let retained_violin=violin::patch(stack.get(0));
-    let patch = if let Some(patch)=retained_violin {patch} else {
-        data.downcast_static::<LuaPatch>().map_err(|_| binding_error(ctx,"run expects a patch or violin"))?.0
+    let retained_violin = violin::patch(stack.get(0));
+    let patch = if let Some(patch) = retained_violin {
+        patch
+    } else {
+        data.downcast_static::<LuaPatch>()
+            .map_err(|_| binding_error(ctx, "run expects a patch or violin"))?
+            .0
     };
-    let out=if matches!(stack.get(1),Value::Table(_)) {streams::destination(ctx,stack.get(1))?} else {None};
-    if streams::run_pipeline(ctx,state,patch,stack.get(1))? {stack.clear();return Ok(CallbackReturn::Return);}
+    let out = if matches!(stack.get(1), Value::Table(_)) {
+        streams::destination(ctx, stack.get(1))?
+    } else {
+        None
+    };
+    if streams::run_pipeline(ctx, state, patch, stack.get(1))? {
+        stack.clear();
+        return Ok(CallbackReturn::Return);
+    }
     let span = if stack.len() >= 2 && out.is_none() {
         let Value::UserData(data) = stack.get(1) else {
             return Err(binding_error(ctx, "run span must come from span(...)"));
@@ -1944,8 +1999,13 @@ fn run<'gc>(
         ));
     }
     let mut state = state.borrow_mut();
-    if retained_violin.is_some() && (span.is_some() || state.program.runs.iter().any(|r|r.patch.index()==patch)) {
-        return Err(binding_error(ctx,"run a violin once for the program lifetime; schedule lift_bow to end excitation"));
+    if retained_violin.is_some()
+        && (span.is_some() || state.program.runs.iter().any(|r| r.patch.index() == patch))
+    {
+        return Err(binding_error(
+            ctx,
+            "run a violin once for the program lifetime; schedule lift_bow to end excitation",
+        ));
     }
     if patch >= state.program.patches.len() {
         return Err(binding_error(
@@ -1964,7 +2024,10 @@ fn run<'gc>(
         span,
         routing: EventRouting::new(),
     });
-    if let Some(bus)=out {let index=state.program.runs.len()-1;streams::route_run(&mut state,index,bus);}
+    if let Some(bus) = out {
+        let index = state.program.runs.len() - 1;
+        streams::route_run(&mut state, index, bus);
+    }
     stack.clear();
     Ok(CallbackReturn::Return)
 }
@@ -2275,7 +2338,9 @@ fn at<'gc>(
         ));
     }
     let start = read_placement_time(ctx, state, stack.get(0))?;
-    if violin::at(ctx,state,&mut stack,start)? {return Ok(CallbackReturn::Return);}
+    if violin::at(ctx, state, &mut stack, start)? {
+        return Ok(CallbackReturn::Return);
+    }
     let capture_cycles = if stack.len() == 3 {
         read_capture_duration(ctx, state, start, stack.get(2))?
     } else {
@@ -2344,7 +2409,9 @@ fn timeline<'gc>(
             "timeline expects a table of at() placements",
         ));
     };
-    if violin::timeline(ctx,table,&mut stack)? {return Ok(CallbackReturn::Return);}
+    if violin::timeline(ctx, table, &mut stack)? {
+        return Ok(CallbackReturn::Return);
+    }
 
     let mut events = Vec::new();
     let mut controls = Vec::new();
@@ -2645,7 +2712,9 @@ fn midi<'gc>(
             "midi expects a voice or control and an options table",
         ));
     }
-    if violin::midi(ctx,state,&mut stack)? {return Ok(CallbackReturn::Return);}
+    if violin::midi(ctx, state, &mut stack)? {
+        return Ok(CallbackReturn::Return);
+    }
     let Value::UserData(data) = stack.get(0) else {
         return Err(binding_error(ctx, "midi expects a voice handle"));
     };
@@ -2741,19 +2810,28 @@ fn midi<'gc>(
         .ok_or_else(|| binding_error(ctx, "voice handle does not belong to this edit"))?;
     apteronotus_synth::validate_live_voice(template)
         .map_err(|error| binding_error(ctx, error.to_string()))?;
-    if state.program.midi_bindings.len() + state.program.midi_violins.len() + state.program.tracks.len() >= state.limits.tracks {
+    if state.program.midi_bindings.len()
+        + state.program.midi_violins.len()
+        + state.program.tracks.len()
+        >= state.limits.tracks
+    {
         return Err(binding_error(ctx, "MIDI binding limit exceeded"));
     }
     state.program.midi_bindings.push(MidiBinding {
         voice: VoiceId(voice),
         channel,
     });
-    if let Value::Table(options)=stack.get(1) {
-        let out=options.get_value(ctx,"out");
-        if !matches!(out,Value::Nil) {
-            let Value::UserData(data)=out else {return Err(binding_error(ctx,"MIDI out must be a bus"));};
-            let bus=*data.downcast_static::<LuaBus>().map_err(|_|binding_error(ctx,"MIDI out must be a bus"))?;
-            let index=state.program.midi_bindings.len()-1;streams::route_midi(&mut state,index,bus);
+    if let Value::Table(options) = stack.get(1) {
+        let out = options.get_value(ctx, "out");
+        if !matches!(out, Value::Nil) {
+            let Value::UserData(data) = out else {
+                return Err(binding_error(ctx, "MIDI out must be a bus"));
+            };
+            let bus = *data
+                .downcast_static::<LuaBus>()
+                .map_err(|_| binding_error(ctx, "MIDI out must be a bus"))?;
+            let index = state.program.midi_bindings.len() - 1;
+            streams::route_midi(&mut state, index, bus);
         }
     }
     stack.replace(ctx, ());
@@ -2786,7 +2864,9 @@ fn play_bound<'gc>(
     binding: u64,
     base: Option<usize>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    if violin::play(ctx,state,stack,argument_offset)? {return Ok(CallbackReturn::Return);}
+    if violin::play(ctx, state, stack, argument_offset)? {
+        return Ok(CallbackReturn::Return);
+    }
     enum PlayTarget {
         Voice(usize),
         Patch(usize),
@@ -2807,8 +2887,8 @@ fn play_bound<'gc>(
             "play target must be a voice or patch handle",
         ));
     };
-    let out=streams::destination(ctx,stack.get(argument_offset+2))?;
-    let routes_patch=matches!(target,PlayTarget::Patch(_));
+    let out = streams::destination(ctx, stack.get(argument_offset + 2))?;
+    let routes_patch = matches!(target, PlayTarget::Patch(_));
     let (pattern, routing, controls, external_trigger) = match stack.get(argument_offset + 1) {
         Value::String(source) => {
             let source = source
@@ -2843,7 +2923,11 @@ fn play_bound<'gc>(
     };
 
     let mut state = state.borrow_mut();
-    if state.program.tracks.len() + state.program.midi_bindings.len() + state.program.midi_violins.len() >= state.limits.tracks {
+    if state.program.tracks.len()
+        + state.program.midi_bindings.len()
+        + state.program.midi_violins.len()
+        >= state.limits.tracks
+    {
         return Err(binding_error(
             ctx,
             format!("track limit of {} exceeded", state.limits.tracks),
@@ -2989,9 +3073,14 @@ fn play_bound<'gc>(
             });
         }
     }
-    if let Some(bus)=out {
-        if routes_patch {let index=state.program.runs.len()-1;streams::route_run(&mut state,index,bus);}
-        else {let index=state.program.tracks.len()-1;streams::route_track(&mut state,index,bus);}
+    if let Some(bus) = out {
+        if routes_patch {
+            let index = state.program.runs.len() - 1;
+            streams::route_run(&mut state, index, bus);
+        } else {
+            let index = state.program.tracks.len() - 1;
+            streams::route_track(&mut state, index, bus);
+        }
     }
     stack.clear();
     Ok(CallbackReturn::Return)
@@ -5523,35 +5612,49 @@ fn harmonics<'gc>(
 }
 
 fn bowed_string_model<'gc>(
-    ctx: Context<'gc>, state: &Rc<RefCell<BuildState>>, mut stack: piccolo::Stack<'gc, '_>,
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    if stack.len() != 5 { return Err(binding_error(ctx,
-        "bowed_string_model expects hz, speed, force, position, { min_hz, max_hz }")); }
+    if stack.len() != 5 {
+        return Err(binding_error(
+            ctx,
+            "bowed_string_model expects hz, speed, force, position, { min_hz, max_hz }",
+        ));
+    }
     let generation = current_generation(ctx, state)?;
     let hz = read_mono(ctx, stack.get(0), generation)?;
     let speed = read_mono(ctx, stack.get(1), generation)?;
     let force = read_mono(ctx, stack.get(2), generation)?;
     let position = read_mono(ctx, stack.get(3), generation)?;
-    let Value::Table(spec) = stack.get(4) else { return Err(binding_error(ctx, "bowed string bounds must be a table")); };
+    let Value::Table(spec) = stack.get(4) else {
+        return Err(binding_error(ctx, "bowed string bounds must be a table"));
+    };
     let config = apteronotus_synth::bowed::BowedConfig {
         kind: apteronotus_synth::bowed::BowedKind::Violin,
         min_hz: read_number(ctx, spec.get_value(ctx, "min_hz"), "bowed minimum Hz")?,
         max_hz: read_number(ctx, spec.get_value(ctx, "max_hz"), "bowed maximum Hz")?,
         model: match spec.get_value(ctx, "model") {
             Value::Nil => apteronotus_synth::bowed::BowedModel::C1,
-            Value::String(s) if s.as_bytes()==b"c1" => apteronotus_synth::bowed::BowedModel::C1,
-            Value::String(s) if s.as_bytes()==b"c2" => apteronotus_synth::bowed::BowedModel::C2,
-            Value::String(s) if s.as_bytes()==b"c3" => apteronotus_synth::bowed::BowedModel::C3,
-            Value::String(s) if s.as_bytes()==b"c4" => apteronotus_synth::bowed::BowedModel::C4,
-            _ => return Err(binding_error(ctx,"bow model must be c1, c2, c3 or c4")),
+            Value::String(s) if s.as_bytes() == b"c1" => apteronotus_synth::bowed::BowedModel::C1,
+            Value::String(s) if s.as_bytes() == b"c2" => apteronotus_synth::bowed::BowedModel::C2,
+            Value::String(s) if s.as_bytes() == b"c3" => apteronotus_synth::bowed::BowedModel::C3,
+            Value::String(s) if s.as_bytes() == b"c4" => apteronotus_synth::bowed::BowedModel::C4,
+            _ => return Err(binding_error(ctx, "bow model must be c1, c2, c3 or c4")),
         },
     };
     if !config.valid() || apteronotus_synth::bowed::BowedString::new(config, 44_100.0).is_err() {
-        return Err(binding_error(ctx, "invalid bowed pitch bounds or initial joint domain"));
+        return Err(binding_error(
+            ctx,
+            "invalid bowed pitch bounds or initial joint domain",
+        ));
     }
     let mut state = state.borrow_mut();
     state.spend_node(ctx)?;
-    let output = state.active_mut(ctx)?.graph.bowed_string_model(hz, speed, force, position, config);
+    let output = state
+        .active_mut(ctx)?
+        .graph
+        .bowed_string_model(hz, speed, force, position, config);
     stack.replace(ctx, lua_source(ctx, generation, [output])?);
     Ok(CallbackReturn::Return)
 }
@@ -6221,10 +6324,20 @@ fn width<'gc>(
 }
 
 fn concert_hall<'gc>(
-    ctx: Context<'gc>, state: &Rc<RefCell<BuildState>>, mut stack: piccolo::Stack<'gc, '_>,
+    ctx: Context<'gc>,
+    state: &Rc<RefCell<BuildState>>,
+    mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    if stack.len()!=0 {return Err(binding_error(ctx,"concert_hall expects no arguments; prepared at 48000 Hz"));}
-    stack.replace(ctx,lua_processor(ctx,processor_generation(state),Processor::ConcertHall)?);
+    if stack.len() != 0 {
+        return Err(binding_error(
+            ctx,
+            "concert_hall expects no arguments; prepared at 48000 Hz",
+        ));
+    }
+    stack.replace(
+        ctx,
+        lua_processor(ctx, processor_generation(state), Processor::ConcertHall)?,
+    );
     Ok(CallbackReturn::Return)
 }
 
@@ -6536,7 +6649,9 @@ fn mix<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    if streams::mix(ctx,state,&mut stack)? {return Ok(CallbackReturn::Return);}
+    if streams::mix(ctx, state, &mut stack)? {
+        return Ok(CallbackReturn::Return);
+    }
     let generation = current_generation(ctx, state)?;
     if let Value::Table(table) = stack.get(0)
         && table.length() > 0
@@ -7026,7 +7141,9 @@ fn pipe<'gc>(
     state: &Rc<RefCell<BuildState>>,
     mut stack: piccolo::Stack<'gc, '_>,
 ) -> Result<CallbackReturn<'gc>, Error<'gc>> {
-    if streams::pipe(ctx,state,&mut stack)? {return Ok(CallbackReturn::Return);}
+    if streams::pipe(ctx, state, &mut stack)? {
+        return Ok(CallbackReturn::Return);
+    }
     if is_processor(stack.get(0)) && is_processor(stack.get(1)) {
         let generation = processor_generation(state);
         let left = read_processor(ctx, stack.get(0), generation)?;
@@ -7546,7 +7663,15 @@ fn apply_processor<'gc>(
 
     let one = |inputs: &[Source]| inputs[0];
     let outputs = match processor {
-        Processor::Convolve(response) => {state.spend_node(ctx)?;vec![state.active_mut(ctx)?.graph.convolve(one(inputs),response.clone())]},
+        Processor::Convolve(response) => {
+            state.spend_node(ctx)?;
+            vec![
+                state
+                    .active_mut(ctx)?
+                    .graph
+                    .convolve(one(inputs), response.clone()),
+            ]
+        }
         Processor::Sine => {
             state.spend_node(ctx)?;
             vec![state.active_mut(ctx)?.graph.sine(one(inputs))]
@@ -7701,7 +7826,11 @@ fn apply_processor<'gc>(
         }
         Processor::ConcertHall => {
             state.spend_node(ctx)?;
-            state.active_mut(ctx)?.graph.concert_hall(inputs[0]).to_vec()
+            state
+                .active_mut(ctx)?
+                .graph
+                .concert_hall(inputs[0])
+                .to_vec()
         }
         Processor::Reverb {
             room_size,

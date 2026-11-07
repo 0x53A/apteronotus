@@ -9,13 +9,12 @@ use apteronotus_pattern::{ControlValue, Frac, Span, Value};
 // The device-free half of a Run — what the program is, and whether it reaches
 // audio at all — is shared with the offline renderer. Two copies of this would
 // mean the file a render is measured from could disagree with the sound.
-#[cfg(test)]
-pub(crate) use apteronotus_render::{persistent_runtime, persistent_runtime_at};
 use apteronotus_render::persistent_runtime_prepared;
 pub(crate) use apteronotus_render::{
-    needs_persistent_runtime, playable_channels, scheduled_runs,
-    scheduled_tracks,
+    needs_persistent_runtime, playable_channels, scheduled_runs, scheduled_tracks,
 };
+#[cfg(test)]
+pub(crate) use apteronotus_render::{persistent_runtime, persistent_runtime_at};
 use apteronotus_synth::{ParamId, ParamValue};
 use fundsp::prelude32::AudioUnit;
 use std::sync::Arc;
@@ -163,8 +162,12 @@ impl PlayerWorker {
     pub fn pump(&mut self) {
         while let Ok(command) = self.command_rx.try_recv() {
             let event = match command {
-                Command::Run { request, source, externals } => {
-                    match crate::externals::evaluate(self.player.evaluator,&source,&externals)
+                Command::Run {
+                    request,
+                    source,
+                    externals,
+                } => {
+                    match crate::externals::evaluate(self.player.evaluator, &source, &externals)
                         .and_then(|candidate| self.player.activate(candidate))
                     {
                         Ok(activation) => PlayerEvent::Active {
@@ -213,8 +216,8 @@ impl PlayerWorker {
         if let Some(controls) = self.player.take_midi_controls() {
             let _ = self.event_tx.send(PlayerEvent::ControlsChanged(controls));
         }
-        if let Some(workload)=self.player.take_workload_update() {
-            let _=self.event_tx.send(PlayerEvent::OutputWorkload(workload));
+        if let Some(workload) = self.player.take_workload_update() {
+            let _ = self.event_tx.send(PlayerEvent::OutputWorkload(workload));
         }
         if let Err(message) = self.player.fill_active_lookahead() {
             let _ = self.event_tx.send(PlayerEvent::RuntimeError(message));
@@ -239,8 +242,12 @@ struct Player {
     external_levels: Vec<bool>,
     external_ordinal: u64,
     midi_voices: MidiVoices,
-    bowed_keys: std::collections::HashMap<apteronotus_synth::ControlId,apteronotus_live::BowedKeyboard>,
-    bowed_ports: std::collections::HashMap<apteronotus_synth::ControlId,apteronotus_synth::bowed_host::BowedHandle>,
+    bowed_keys:
+        std::collections::HashMap<apteronotus_synth::ControlId, apteronotus_live::BowedKeyboard>,
+    bowed_ports: std::collections::HashMap<
+        apteronotus_synth::ControlId,
+        apteronotus_synth::bowed_host::BowedHandle,
+    >,
     midi_program: Arc<Program>,
     midi_pending: std::collections::VecDeque<(f64, Arc<Program>)>,
     midi_ordinal: u64,
@@ -252,19 +259,25 @@ struct Player {
     /// find again after every incompatible edit.
     volume_decibels: f32,
     reported_prepared_fault: Option<apteronotus_synth::ExternalFault>,
-    workload_reported_frames:u64,
+    workload_reported_frames: u64,
 }
 
 impl Player {
-    fn take_workload_update(&mut self)->Option<apteronotus_live::OutputWorkload> {
-        let output=self.output.as_ref()?;
-        let observed=output.workload()?;
-        if self.workload_reported_frames==0
-            || observed.frames>=self.workload_reported_frames.saturating_add(output.sample_rate() as u64)
-            || observed.frames<self.workload_reported_frames {
-            self.workload_reported_frames=observed.frames;
+    fn take_workload_update(&mut self) -> Option<apteronotus_live::OutputWorkload> {
+        let output = self.output.as_ref()?;
+        let observed = output.workload()?;
+        if self.workload_reported_frames == 0
+            || observed.frames
+                >= self
+                    .workload_reported_frames
+                    .saturating_add(output.sample_rate() as u64)
+            || observed.frames < self.workload_reported_frames
+        {
+            self.workload_reported_frames = observed.frames;
             Some(observed)
-        } else {None}
+        } else {
+            None
+        }
     }
 
     fn new() -> Player {
@@ -290,7 +303,7 @@ impl Player {
             activation_generation: 0,
             volume_decibels: MasterGain::MAX_DECIBELS,
             reported_prepared_fault: None,
-            workload_reported_frames:0,
+            workload_reported_frames: 0,
         }
     }
 
@@ -307,9 +320,11 @@ impl Player {
     fn activate(&mut self, candidate: Program) -> Result<Activation, String> {
         let clock = self.clock_started;
         let origin = self.sequencer_origin_seconds;
-        if let Some(runtime)=&self.persistent {
+        if let Some(runtime) = &self.persistent {
             for binding in &self.revisions.active().program.midi_violins {
-                if let Some(handle)=runtime.controls().bowed_handle(binding.key) {self.bowed_ports.insert(binding.key,handle);}
+                if let Some(handle) = runtime.controls().bowed_handle(binding.key) {
+                    self.bowed_ports.insert(binding.key, handle);
+                }
             }
         }
         let activation = self.activate_candidate(candidate)?;
@@ -335,16 +350,26 @@ impl Player {
         let active_persistent = self.persistent.is_some();
         let tempo_changed =
             self.output.is_some() && candidate.tempo != self.revisions.active().program.tempo;
-        let mut room_edits=Vec::new();
+        let mut room_edits = Vec::new();
         let reuse_persistent = self.output.is_some()
             && !tempo_changed
             && active_persistent
             && needs_persistent
             && self.output_channels == Some(channels)
-            && if let Some(changes)=candidate.reuse_with_room_edits(&self.revisions.active().program) {
-                room_edits=self.persistent.as_ref().expect("active arena").controls().prepare_room_edits(&changes).map_err(str::to_owned)?;
+            && if let Some(changes) =
+                candidate.reuse_with_room_edits(&self.revisions.active().program)
+            {
+                room_edits = self
+                    .persistent
+                    .as_ref()
+                    .expect("active arena")
+                    .controls()
+                    .prepare_room_edits(&changes)
+                    .map_err(str::to_owned)?;
                 true
-            } else {false};
+            } else {
+                false
+            };
         let reset = needs_hard_reset(
             self.output.is_some(),
             active_persistent,
@@ -369,9 +394,8 @@ impl Player {
         // Select the clock and prepare the new arena together. The candidate
         // stream remains paused; no active state changes if preparation fails.
         let (mut pending_output, persistent) = if needs_persistent && !reuse_persistent {
-            let (output, runtime) = open_prepared_persistent_output(
-                &candidate, 0.0, self.volume_decibels,
-            )?;
+            let (output, runtime) =
+                open_prepared_persistent_output(&candidate, 0.0, self.volume_decibels)?;
             (Some(output), Some(runtime))
         } else {
             (None, None)
@@ -465,8 +489,10 @@ impl Player {
             .submit(candidate, boundary, |program| program.validate(limits))
             .map_err(|error| error.to_string())?;
         let revision = self.revisions.advance_to(boundary);
-        self.fallback =
-            (!previous.tracks.is_empty() || !previous.midi_bindings.is_empty() || !previous.midi_violins.is_empty()).then_some(previous);
+        self.fallback = (!previous.tracks.is_empty()
+            || !previous.midi_bindings.is_empty()
+            || !previous.midi_violins.is_empty())
+        .then_some(previous);
         if !reuse_persistent {
             self.persistent = persistent;
             self.reported_prepared_fault = None;
@@ -494,7 +520,9 @@ impl Player {
             self.clock_started = Some(Instant::now());
         }
 
-        for edit in room_edits {edit.commit();}
+        for edit in room_edits {
+            edit.commit();
+        }
 
         self.activation_generation = self.activation_generation.saturating_add(1);
         let controls = control_views(&self.revisions.active().program, self.persistent.as_ref());
@@ -535,10 +563,14 @@ impl Player {
         let boundary_seconds = candidate.tempo.cycle_to_seconds(boundary);
         let target_seconds = boundary_seconds + LOOKAHEAD_SECONDS;
         let (mut output, persistent) = open_prepared_persistent_output(
-            &candidate, boundary_seconds, MasterGain::MIN_DECIBELS,
+            &candidate,
+            boundary_seconds,
+            MasterGain::MIN_DECIBELS,
         )?;
         if output.sample_rate() != self.output.as_ref().expect("active output").sample_rate() {
-            return Err("replacement device clock changed; previous performance remains active".into());
+            return Err(
+                "replacement device clock changed; previous performance remains active".into(),
+            );
         }
 
         // Prove the complete candidate window against the selected clock.
@@ -762,8 +794,8 @@ impl Player {
     /// path `hard_reset` already guarantees.
     fn stop(&mut self) -> Result<(), String> {
         self.midi_voices = MidiVoices::default();
-            self.bowed_keys.clear();
-            self.bowed_ports.clear();
+        self.bowed_keys.clear();
+        self.bowed_ports.clear();
         self.midi_program = Arc::new(Program::default());
         self.midi_pending.clear();
         let Some(output) = self.output.take() else {
@@ -806,7 +838,10 @@ impl Player {
         let Some(started) = self.clock_started else {
             return Ok(());
         };
-        let fault = self.persistent.as_ref().and_then(|runtime| runtime.controls().external_fault());
+        let fault = self
+            .persistent
+            .as_ref()
+            .and_then(|runtime| runtime.controls().external_fault());
         if new_prepared_fault(&mut self.reported_prepared_fault, fault.clone()) {
             return Err(fault.expect("new fault is present").to_string());
         }
@@ -872,10 +907,14 @@ impl Player {
     }
 
     fn midi_panic(&mut self) {
-        for port in self.bowed_ports.values() {port.panic_detach();}
-        if let Some(runtime)=&self.persistent {
+        for port in self.bowed_ports.values() {
+            port.panic_detach();
+        }
+        if let Some(runtime) = &self.persistent {
             for binding in &self.midi_program.midi_violins {
-                if let Some(handle)=runtime.controls().bowed_handle(binding.key) {handle.panic_detach();}
+                if let Some(handle) = runtime.controls().bowed_handle(binding.key) {
+                    handle.panic_detach();
+                }
             }
         }
         self.bowed_keys.clear();
@@ -928,17 +967,25 @@ impl Player {
             .front()
             .is_some_and(|(at, _)| *at <= seconds)
         {
-            let next = self.midi_pending.pop_front().expect("checked pending revision").1;
+            let next = self
+                .midi_pending
+                .pop_front()
+                .expect("checked pending revision")
+                .1;
             for binding in &self.midi_program.midi_violins {
                 if !next.midi_violins.contains(binding) {
-                    if let Some(runtime)=&self.persistent {
-                        if let Some(handle)=runtime.controls().bowed_handle(binding.key) {handle.panic_detach();}
+                    if let Some(runtime) = &self.persistent {
+                        if let Some(handle) = runtime.controls().bowed_handle(binding.key) {
+                            handle.panic_detach();
+                        }
                     }
-                    if let Some(port)=self.bowed_ports.remove(&binding.key) {port.panic_detach();}
+                    if let Some(port) = self.bowed_ports.remove(&binding.key) {
+                        port.panic_detach();
+                    }
                     self.bowed_keys.remove(&binding.key);
                 }
             }
-            self.midi_program=next;
+            self.midi_program = next;
         }
     }
 
@@ -960,10 +1007,25 @@ impl Player {
             return Ok(());
         };
         for binding in &self.midi_program.midi_violins {
-            let handle=runtime.controls().bowed_handle(binding.key).or_else(||self.bowed_ports.get(&binding.key).cloned()).ok_or("missing retained violin runtime")?;
+            let handle = runtime
+                .controls()
+                .bowed_handle(binding.key)
+                .or_else(|| self.bowed_ports.get(&binding.key).cloned())
+                .ok_or("missing retained violin runtime")?;
             // Retained instruments use their own transport clock, including after a compatible edit.
-            let gesture_at=self.sequencer_origin_seconds+at;
-            self.bowed_keys.entry(binding.key).or_default().message(packet.message,&handle,gesture_at,binding.channel,binding.min_key,binding.max_key).map_err(str::to_string)?;
+            let gesture_at = self.sequencer_origin_seconds + at;
+            self.bowed_keys
+                .entry(binding.key)
+                .or_default()
+                .message(
+                    packet.message,
+                    &handle,
+                    gesture_at,
+                    binding.channel,
+                    binding.min_key,
+                    binding.max_key,
+                )
+                .map_err(str::to_string)?;
         }
         match packet.message {
             MidiMessage::ControlChange { channel, cc, value } => {
@@ -1142,8 +1204,8 @@ fn new_prepared_fault(
     previous: &mut Option<apteronotus_synth::ExternalFault>,
     current: Option<apteronotus_synth::ExternalFault>,
 ) -> bool {
-    let changed=current.is_some() && *previous!=current;
-    *previous=current;
+    let changed = current.is_some() && *previous != current;
+    *previous = current;
     changed
 }
 
@@ -1189,12 +1251,20 @@ fn open_prepared_persistent_output(
     initial_decibels: f32,
 ) -> Result<(AudioOutput, PersistentRuntime), String> {
     open_prepared_persistent_with(program, transport_seconds, |prepare| {
-        let requested_channels = program.audio_inputs.specs().first().map_or(0, |s| s.channels);
+        let requested_channels = program
+            .audio_inputs
+            .specs()
+            .first()
+            .map_or(0, |s| s.channels);
         AudioOutput::open_prepared_with_default_input_at_level(
-            program.buses.total_channels(), program.buses.main_channels(),
-            program.audio_inputs.total_channels(), requested_channels,
-            initial_decibels, prepare,
-        ).map_err(|error| error.to_string())
+            program.buses.total_channels(),
+            program.buses.main_channels(),
+            program.audio_inputs.total_channels(),
+            requested_channels,
+            initial_decibels,
+            prepare,
+        )
+        .map_err(|error| error.to_string())
     })
 }
 
@@ -1204,19 +1274,24 @@ fn open_prepared_persistent_output(
 fn open_prepared_persistent_with<O>(
     program: &Program,
     transport_seconds: f64,
-    open: impl FnOnce(&mut dyn FnMut(f64) -> Result<Box<dyn fundsp::prelude32::AudioUnit>, String>) -> Result<O, String>,
+    open: impl FnOnce(
+        &mut dyn FnMut(f64) -> Result<Box<dyn fundsp::prelude32::AudioUnit>, String>,
+    ) -> Result<O, String>,
 ) -> Result<(O, PersistentRuntime), String> {
     let mut runtime = None;
     let mut called = false;
     let output = open(&mut |rate| {
-        if called { return Err("persistent preparation factory called more than once".into()); }
+        if called {
+            return Err("persistent preparation factory called more than once".into());
+        }
         called = true;
         let mut prepared = persistent_runtime_prepared(program, transport_seconds, rate)?;
         let processor = prepared.take_processor_with_audio_inputs();
         runtime = Some(prepared);
         Ok(processor)
     })?;
-    let runtime = runtime.ok_or_else(|| "output did not prepare its persistent processor".to_string())?;
+    let runtime =
+        runtime.ok_or_else(|| "output did not prepare its persistent processor".to_string())?;
     Ok((output, runtime))
 }
 
@@ -1320,7 +1395,11 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>, midi
     let mut awaited = None;
     loop {
         match command_rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Command::Run { request, source, externals }) => {
+            Ok(Command::Run {
+                request,
+                source,
+                externals,
+            }) => {
                 if evaluation_thread.is_some() {
                     let event = PlayerEvent::Error {
                         request,
@@ -1337,7 +1416,8 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>, midi
                         thread::Builder::new()
                             .name("apteronotus-evaluation".into())
                             .spawn(move || {
-                                let result = crate::externals::evaluate(evaluator,&source,&externals);
+                                let result =
+                                    crate::externals::evaluate(evaluator, &source, &externals);
                                 let _ = result_tx.send((request, result));
                             })
                             .expect("failed to start an evaluation job"),
@@ -1404,8 +1484,8 @@ fn run_worker(command_rx: Receiver<Command>, event_tx: Sender<PlayerEvent>, midi
         if let Some(controls) = player.take_midi_controls() {
             let _ = event_tx.send(PlayerEvent::ControlsChanged(controls));
         }
-        if let Some(workload)=player.take_workload_update() {
-            let _=event_tx.send(PlayerEvent::OutputWorkload(workload));
+        if let Some(workload) = player.take_workload_update() {
+            let _ = event_tx.send(PlayerEvent::OutputWorkload(workload));
         }
         if let Err(message) = player.fill_active_lookahead()
             && event_tx.send(PlayerEvent::RuntimeError(message)).is_err()
@@ -1442,70 +1522,89 @@ mod tests {
 
     #[test]
     fn prepared_runtime_faults_report_once_and_can_report_after_recovery() {
-        let fault=Some(apteronotus_synth::ExternalFault{instance:0,kind:"test".into(),reason:"latched silent".into()});
-        let mut previous=None;
-        assert!(!super::new_prepared_fault(&mut previous,None));
-        assert!(super::new_prepared_fault(&mut previous,fault.clone()));
-        assert!(!super::new_prepared_fault(&mut previous,fault.clone()));
-        assert!(!super::new_prepared_fault(&mut previous,None));
-        assert!(super::new_prepared_fault(&mut previous,fault.clone()));
+        let fault = Some(apteronotus_synth::ExternalFault {
+            instance: 0,
+            kind: "test".into(),
+            reason: "latched silent".into(),
+        });
+        let mut previous = None;
+        assert!(!super::new_prepared_fault(&mut previous, None));
+        assert!(super::new_prepared_fault(&mut previous, fault.clone()));
+        assert!(!super::new_prepared_fault(&mut previous, fault.clone()));
+        assert!(!super::new_prepared_fault(&mut previous, None));
+        assert!(super::new_prepared_fault(&mut previous, fault.clone()));
     }
 
     #[test]
     fn selected_clock_factory_retains_the_playing_processors_control_arena() {
-        let program = evaluate(r#"
+        let program = evaluate(
+            r#"
             local level=control{name="level",range={0,1},default=.2}
             run(patch{graph=function() return sine(1000)*level end})
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         for rate in [32_000.0, 48_000.0, 96_000.0] {
-            let (mut unit, runtime) = super::open_prepared_persistent_with(
-                &program, 0.0, |prepare| prepare(rate),
-            ).unwrap();
+            let (mut unit, runtime) =
+                super::open_prepared_persistent_with(&program, 0.0, |prepare| prepare(rate))
+                    .unwrap();
             let mut reference = super::persistent_runtime_prepared(&program, 0.0, rate).unwrap();
             let mut expected = reference.take_processor_with_audio_inputs();
-            let input=vec![0.;unit.inputs()];
-            let mut actual=vec![0.;unit.outputs()];
-            let mut target=vec![0.;expected.outputs()];
+            let input = vec![0.; unit.inputs()];
+            let mut actual = vec![0.; unit.outputs()];
+            let mut target = vec![0.; expected.outputs()];
             for _ in 0..4096 {
-                unit.tick(&input,&mut actual);expected.tick(&input,&mut target);
-                assert_eq!(actual,target);
+                unit.tick(&input, &mut actual);
+                expected.tick(&input, &mut target);
+                assert_eq!(actual, target);
             }
-            runtime.controls().set(program.controls.id("level").unwrap(),0.).unwrap();
+            runtime
+                .controls()
+                .set(program.controls.id("level").unwrap(), 0.)
+                .unwrap();
             for _ in 0..128 {
-                unit.tick(&input,&mut actual);
-                assert!(actual.iter().all(|v| *v==0.));
+                unit.tick(&input, &mut actual);
+                assert!(actual.iter().all(|v| *v == 0.));
             }
         }
     }
 
     #[test]
     fn selected_clock_factory_preserves_transport_coordinate_and_rejects_bad_rate() {
-        let program=evaluate(r#"
+        let program = evaluate(
+            r#"
             tempo(120)
             run(patch{graph=function()
                 return control_signal("0.2 0.8" >> segment(2),bars(1))
             end})
-        "#).unwrap();
-        let (mut unit, _) = super::open_prepared_persistent_with(&program,1.5,|prepare|prepare(48_000.)).unwrap();
-        let mut output=vec![0.;unit.outputs()];
-        unit.tick(&vec![0.;unit.inputs()],&mut output);
-        assert!(output.iter().all(|x|(*x-0.8).abs()<1e-6));
-        let result=super::open_prepared_persistent_with(&program,0.,|prepare|prepare(f64::NAN));
+        "#,
+        )
+        .unwrap();
+        let (mut unit, _) =
+            super::open_prepared_persistent_with(&program, 1.5, |prepare| prepare(48_000.))
+                .unwrap();
+        let mut output = vec![0.; unit.outputs()];
+        unit.tick(&vec![0.; unit.inputs()], &mut output);
+        assert!(output.iter().all(|x| (*x - 0.8).abs() < 1e-6));
+        let result =
+            super::open_prepared_persistent_with(&program, 0., |prepare| prepare(f64::NAN));
         assert!(result.err().unwrap().contains("sample rate"));
     }
 
     #[test]
     fn output_open_failure_does_not_publish_a_candidate_arena() {
-        let program=evaluate(r#"run(patch{graph=function()return dc(.2)end})"#).unwrap();
-        let result:Result<((),_),String>=super::open_prepared_persistent_with(&program,0.,|prepare| {
-            let _candidate=prepare(48_000.)?;
-            Err("injected stream failure".into())
-        });
-        assert_eq!(result.err().unwrap(),"injected stream failure");
-        let skipped:Result<((),_),String>=super::open_prepared_persistent_with(&program,0.,|_|Ok(()));
+        let program = evaluate(r#"run(patch{graph=function()return dc(.2)end})"#).unwrap();
+        let result: Result<((), _), String> =
+            super::open_prepared_persistent_with(&program, 0., |prepare| {
+                let _candidate = prepare(48_000.)?;
+                Err("injected stream failure".into())
+            });
+        assert_eq!(result.err().unwrap(), "injected stream failure");
+        let skipped: Result<((), _), String> =
+            super::open_prepared_persistent_with(&program, 0., |_| Ok(()));
         assert!(skipped.err().unwrap().contains("did not prepare"));
-        let repeated=super::open_prepared_persistent_with(&program,0.,|prepare| {
-            let _first=prepare(48_000.)?;
+        let repeated = super::open_prepared_persistent_with(&program, 0., |prepare| {
+            let _first = prepare(48_000.)?;
             prepare(48_000.)
         });
         assert!(repeated.err().unwrap().contains("more than once"));

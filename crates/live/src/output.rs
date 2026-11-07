@@ -363,7 +363,10 @@ impl AudioOutput {
         prepare: impl FnOnce(f64) -> Result<Box<dyn AudioUnit>, String>,
     ) -> Result<AudioOutput, OutputError> {
         Self::open_prepared_inner(
-            stem_channels, main_channels, external_channels, requested_channels,
+            stem_channels,
+            main_channels,
+            external_channels,
+            requested_channels,
             master_decibels,
             |rate| prepare_processor(rate, stem_channels, external_channels, prepare).map(Some),
         )
@@ -378,8 +381,12 @@ impl AudioOutput {
         master_decibels: f32,
     ) -> Result<AudioOutput, OutputError> {
         Self::open_prepared_inner(
-            sequencer_channels, synth_channels, external_channels, requested_channels,
-            master_decibels, |_| Ok(processor),
+            sequencer_channels,
+            synth_channels,
+            external_channels,
+            requested_channels,
+            master_decibels,
+            |_| Ok(processor),
         )
     }
 
@@ -396,7 +403,8 @@ impl AudioOutput {
         }
         if synth_channels > sequencer_channels {
             return Err(OutputError::MainChannels {
-                stems: sequencer_channels, main: synth_channels,
+                stems: sequencer_channels,
+                main: synth_channels,
             });
         }
         let host = cpal::default_host();
@@ -840,8 +848,8 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let device_channels = config.channels as usize;
-    #[cfg(not(target_arch="wasm32"))]
-    let callback_rate=config.sample_rate as f64;
+    #[cfg(not(target_arch = "wasm32"))]
+    let callback_rate = config.sample_rate as f64;
     // fundsp's block path operates on fixed, non-interleaved SIMD buffers.
     // Both are allocated before the callback starts.
     renderer.set_sample_rate(config.sample_rate as f64);
@@ -851,19 +859,25 @@ where
     device.build_output_stream(
         config,
         move |output: &mut [T], _: &OutputCallbackInfo| {
-            let frames=output.len()/device_channels;
-            let render=||render_output_buffer(
-                renderer.as_mut(),
-                &input,
-                &mut synth,
-                output,
-                device_channels,
-                &rendered_frames,
-            );
-            #[cfg(not(target_arch="wasm32"))]
-            _workload.measure(frames,callback_rate,render);
-            #[cfg(target_arch="wasm32")]
-            {let _=frames;let mut render=render;render();}
+            let frames = output.len() / device_channels;
+            let render = || {
+                render_output_buffer(
+                    renderer.as_mut(),
+                    &input,
+                    &mut synth,
+                    output,
+                    device_channels,
+                    &rendered_frames,
+                )
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            _workload.measure(frames, callback_rate, render);
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = frames;
+                let mut render = render;
+                render();
+            }
         },
         |error| eprintln!("audio output error: {error}"),
         None,
@@ -942,13 +956,20 @@ fn prepare_processor(
     prepare: impl FnOnce(f64) -> Result<Box<dyn AudioUnit>, String>,
 ) -> Result<Box<dyn AudioUnit>, OutputError> {
     let processor = prepare(rate).map_err(OutputError::Preparation)?;
-    let expected = stems.checked_add(external)
+    let expected = stems
+        .checked_add(external)
         .ok_or_else(|| OutputError::Preparation("processor channel count overflow".into()))?;
     if processor.inputs() != expected {
-        return Err(OutputError::ProcessorInputChannels { expected, found: processor.inputs() });
+        return Err(OutputError::ProcessorInputChannels {
+            expected,
+            found: processor.inputs(),
+        });
     }
     if processor.outputs() != stems {
-        return Err(OutputError::ProcessorOutputChannels { expected: stems, found: processor.outputs() });
+        return Err(OutputError::ProcessorOutputChannels {
+            expected: stems,
+            found: processor.outputs(),
+        });
     }
     Ok(processor)
 }
@@ -1031,27 +1052,39 @@ mod tests {
         let good = prepare_processor(48_000.0, 2, 1, |rate| {
             assert_eq!(rate, 48_000.0);
             Ok(Box::new(Net::new(3, 2)))
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!((good.inputs(), good.outputs()), (3, 2));
         assert!(matches!(
             prepare_processor(48_000.0, 2, 1, |_| Ok(Box::new(Net::new(2, 2)))),
-            Err(OutputError::ProcessorInputChannels { expected: 3, found: 2 })
+            Err(OutputError::ProcessorInputChannels {
+                expected: 3,
+                found: 2
+            })
         ));
         assert!(matches!(
             prepare_processor(48_000.0, 2, 1, |_| Ok(Box::new(Net::new(3, 1)))),
-            Err(OutputError::ProcessorOutputChannels { expected: 2, found: 1 })
+            Err(OutputError::ProcessorOutputChannels {
+                expected: 2,
+                found: 1
+            })
         ));
     }
 
     #[test]
     fn invalid_output_layout_does_not_invoke_preparation_or_access_device() {
-        let result = AudioOutput::open_prepared_with_default_input_at_level(
-            1, 2, 0, 0, -12.0, |_| panic!("invalid layout reached preparation"),
-        );
-        assert!(matches!(result, Err(OutputError::MainChannels { stems: 1, main: 2 })));
-        let result = AudioOutput::open_prepared_with_default_input_at_level(
-            0, 0, 0, 0, -12.0, |_| panic!("empty layout reached preparation"),
-        );
+        let result =
+            AudioOutput::open_prepared_with_default_input_at_level(1, 2, 0, 0, -12.0, |_| {
+                panic!("invalid layout reached preparation")
+            });
+        assert!(matches!(
+            result,
+            Err(OutputError::MainChannels { stems: 1, main: 2 })
+        ));
+        let result =
+            AudioOutput::open_prepared_with_default_input_at_level(0, 0, 0, 0, -12.0, |_| {
+                panic!("empty layout reached preparation")
+            });
         assert!(matches!(result, Err(OutputError::NoSynthChannels)));
     }
 
@@ -1072,22 +1105,30 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_arch="wasm32"))]
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn observing_callback_work_preserves_audio_and_frame_clock() {
-        let counters=crate::output_workload::WorkloadCounters::default();
-        let mut observed=fundsp::prelude32::dc((0.25,-0.25));
-        let mut reference=observed.clone();
-        let input=BufferVec::new(0);let mut a=BufferVec::new(2);let mut b=BufferVec::new(2);
-        let ca=AtomicU64::new(0);let cb=AtomicU64::new(0);
-        for frames in [1,17,64,512,2048,127] {
-            let mut x=vec![0_f32;frames*2];let mut y=x.clone();
-            counters.measure(frames,48000.,||render_output_buffer(&mut observed,&input,&mut a,&mut x,2,&ca));
-            render_output_buffer(&mut reference,&input,&mut b,&mut y,2,&cb);
-            assert_eq!(x,y);assert_eq!(ca.load(Ordering::Relaxed),cb.load(Ordering::Relaxed));
+        let counters = crate::output_workload::WorkloadCounters::default();
+        let mut observed = fundsp::prelude32::dc((0.25, -0.25));
+        let mut reference = observed.clone();
+        let input = BufferVec::new(0);
+        let mut a = BufferVec::new(2);
+        let mut b = BufferVec::new(2);
+        let ca = AtomicU64::new(0);
+        let cb = AtomicU64::new(0);
+        for frames in [1, 17, 64, 512, 2048, 127] {
+            let mut x = vec![0_f32; frames * 2];
+            let mut y = x.clone();
+            counters.measure(frames, 48000., || {
+                render_output_buffer(&mut observed, &input, &mut a, &mut x, 2, &ca)
+            });
+            render_output_buffer(&mut reference, &input, &mut b, &mut y, 2, &cb);
+            assert_eq!(x, y);
+            assert_eq!(ca.load(Ordering::Relaxed), cb.load(Ordering::Relaxed));
         }
-        let v=counters.snapshot(48000.).unwrap();assert_eq!(v.callbacks,6);
-        assert_eq!(v.frames,ca.load(Ordering::Relaxed));
+        let v = counters.snapshot(48000.).unwrap();
+        assert_eq!(v.callbacks, 6);
+        assert_eq!(v.frames, ca.load(Ordering::Relaxed));
         assert!(v.mean_ratio.is_finite() && v.peak_ratio.is_finite());
     }
 

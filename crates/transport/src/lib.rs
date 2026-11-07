@@ -5,8 +5,8 @@
 //! must not require linking cpal, and the language must not invent a parallel
 //! tempo representation merely to remain portable.
 
-mod tempo;
 mod compiled;
+mod tempo;
 pub use compiled::CompiledTempo;
 mod transport;
 

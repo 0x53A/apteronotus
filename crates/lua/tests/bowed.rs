@@ -271,11 +271,19 @@ fn measured_pitch_and_extended_score_range_keep_joint_domain_validation() {
 #[test]
 fn cello_has_its_own_body_open_strings_and_midi_range() {
     use apteronotus_synth::{Op, bowed::BowedKind};
-    let p=evaluate("local c=cello {mode='live',string='C'}; midi(c); run(c)").unwrap();
-    assert_eq!(p.midi_violins[0].min_key,36);
-    let score=p.patches[0].graph().nodes.iter().find_map(|n|match &n.op {Op::BowedPerformance{score,..}=>Some(score),_=>None}).unwrap();
-    assert_eq!(score.config.kind,BowedKind::Cello);
-    assert!((score.opens[0]-65.40639132514966).abs()<1e-10);
+    let p = evaluate("local c=cello {mode='live',string='C'}; midi(c); run(c)").unwrap();
+    assert_eq!(p.midi_violins[0].min_key, 36);
+    let score = p.patches[0]
+        .graph()
+        .nodes
+        .iter()
+        .find_map(|n| match &n.op {
+            Op::BowedPerformance { score, .. } => Some(score),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(score.config.kind, BowedKind::Cello);
+    assert!((score.opens[0] - 65.40639132514966).abs() < 1e-10);
     assert!(score.prepare(24000.).is_ok());
     assert!(evaluate("local c=cello {string='E'};run(c)").is_err());
     assert!(evaluate("local v=violin {string='C'};run(v)").is_err());

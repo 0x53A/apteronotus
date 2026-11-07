@@ -182,8 +182,15 @@ pub fn prepare_patch_routed(
         return Err(LowerError::InvalidPreparationRate(sample_rate));
     }
     instantiate_routed_live_impl(
-        patch.graph(), &Note::new(440.0), layout, &EventRouting::new(),
-        Some(controls), audio_inputs, transport_seconds, None, sample_rate,
+        patch.graph(),
+        &Note::new(440.0),
+        layout,
+        &EventRouting::new(),
+        Some(controls),
+        audio_inputs,
+        transport_seconds,
+        None,
+        sample_rate,
     )
 }
 
@@ -499,7 +506,9 @@ fn instantiate_routed_live_impl(
     live: Option<(&crate::LiveGate, f64)>,
     sample_rate: f64,
 ) -> Result<Box<dyn AudioUnit>, LowerError> {
-    if live.is_some() { reject_prepared_voice(template)?; }
+    if live.is_some() {
+        reject_prepared_voice(template)?;
+    }
     if !transport_seconds.is_finite() {
         return Err(LowerError::InvalidTransportTime(transport_seconds));
     }
@@ -916,9 +925,15 @@ fn instantiate_compiled_live(
                 gate.clone(),
                 delay,
             ))
-        } else if let Op::Slew { response_time, initial } = &node.op {
+        } else if let Op::Slew {
+            response_time,
+            initial,
+        } = &node.op
+        {
             let seconds = resolve_init_scalar(*response_time, note, template)?;
-            if !seconds.is_finite() || seconds < 0.0 { return Err(LowerError::InvalidSlewTime(seconds)); }
+            if !seconds.is_finite() || seconds < 0.0 {
+                return Err(LowerError::InvalidSlewTime(seconds));
+            }
             compiled.slew(crate::analyzer::SlewUnit::new(seconds, *initial), inputs[0])
         } else if matches!(
             node.op,
@@ -1063,7 +1078,10 @@ pub enum LowerError {
     InvalidSlewTime(f64),
     InvalidTransportTime(f64),
     InvalidPreparationRate(f64),
-    NodePreparation { node: usize, reason: &'static str },
+    NodePreparation {
+        node: usize,
+        reason: &'static str,
+    },
     InvalidBreakpointCurve,
     UnknownAudioInput,
     /// A live note cannot know its duration until the player releases it.
@@ -1099,7 +1117,10 @@ impl From<ParamValueError> for LowerError {
 impl core::fmt::Display for LowerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            LowerError::PreparedPatchRequired => write!(f, "external source requires explicit persistent patch preparation"),
+            LowerError::PreparedPatchRequired => write!(
+                f,
+                "external source requires explicit persistent patch preparation"
+            ),
             LowerError::External(error) => write!(f, "cannot prepare external source: {error}"),
             LowerError::Template(error) => error.fmt(f),
             LowerError::Routing(error) => error.fmt(f),
@@ -1132,8 +1153,13 @@ impl core::fmt::Display for LowerError {
                     "slew response time must be finite and non-negative, got {seconds}"
                 )
             }
-            LowerError::NodePreparation { node, reason } => write!(f, "cannot prepare graph node {node}: {reason}"),
-            LowerError::InvalidPreparationRate(rate) => write!(f, "preparation sample rate must be finite and positive, got {rate}"),
+            LowerError::NodePreparation { node, reason } => {
+                write!(f, "cannot prepare graph node {node}: {reason}")
+            }
+            LowerError::InvalidPreparationRate(rate) => write!(
+                f,
+                "preparation sample rate must be finite and positive, got {rate}"
+            ),
             LowerError::InvalidTransportTime(seconds) => write!(
                 f,
                 "persistent transport start must be finite, got {seconds}"
@@ -1268,11 +1294,12 @@ impl Resolver<'_> {
 
 /// Backend values corresponding one-for-one with a data-only [`ControlLayout`].
 pub struct ControlStore {
-    externals: std::sync::Mutex<Vec<(String, std::sync::Arc<dyn crate::external::ExternalMonitor>)>>,
+    externals:
+        std::sync::Mutex<Vec<(String, std::sync::Arc<dyn crate::external::ExternalMonitor>)>>,
     rooms: std::sync::Mutex<Vec<crate::spatial_host::RoomHandle>>,
     layout: ControlLayout,
     values: Vec<Shared>,
-    bowed: std::sync::Mutex<HashMap<ControlId,crate::bowed_host::BowedHandle>>,
+    bowed: std::sync::Mutex<HashMap<ControlId, crate::bowed_host::BowedHandle>>,
 }
 
 impl ControlStore {
@@ -1293,14 +1320,28 @@ impl ControlStore {
     /// Sample the first failed external unit on the host/control thread.
     /// This lock is never taken by DSP; healthy/completed instances return None.
     pub fn external_fault(&self) -> Option<crate::external::ExternalFault> {
-        self.externals.lock().expect("control-thread external registry").iter()
-            .enumerate().find_map(|(instance,(kind,monitor))| monitor.fault()
-                .map(|reason| crate::external::ExternalFault{instance,kind:kind.clone(),reason}))
+        self.externals
+            .lock()
+            .expect("control-thread external registry")
+            .iter()
+            .enumerate()
+            .find_map(|(instance, (kind, monitor))| {
+                monitor
+                    .fault()
+                    .map(|reason| crate::external::ExternalFault {
+                        instance,
+                        kind: kind.clone(),
+                        reason,
+                    })
+            })
     }
 
     /// Number of monitored external units registered by preparation.
     pub fn external_monitor_count(&self) -> usize {
-        self.externals.lock().expect("control-thread external registry").len()
+        self.externals
+            .lock()
+            .expect("control-thread external registry")
+            .len()
     }
 
     /// Reserve all changed room instances before publishing any of them.
@@ -1346,13 +1387,22 @@ impl ControlStore {
     }
 
     /// Arena-scoped gesture port installed when its retained instrument lowers.
-    pub fn bowed_handle(&self,id:ControlId)->Option<crate::bowed_host::BowedHandle> {
+    pub fn bowed_handle(&self, id: ControlId) -> Option<crate::bowed_host::BowedHandle> {
         self.bowed.lock().ok()?.get(&id).cloned()
     }
-    fn register_bowed(&self,id:ControlId,live:bool)->Result<crate::bowed_host::BowedHandle,ControlError> {
-        self.layout.spec(id).ok_or(ControlError::UnknownControl(id))?;
-        let handle=crate::bowed_host::BowedHandle::new(live);
-        self.bowed.lock().expect("control-thread bowed registry").insert(id,handle.clone());
+    fn register_bowed(
+        &self,
+        id: ControlId,
+        live: bool,
+    ) -> Result<crate::bowed_host::BowedHandle, ControlError> {
+        self.layout
+            .spec(id)
+            .ok_or(ControlError::UnknownControl(id))?;
+        let handle = crate::bowed_host::BowedHandle::new(live);
+        self.bowed
+            .lock()
+            .expect("control-thread bowed registry")
+            .insert(id, handle.clone());
         Ok(handle)
     }
 
@@ -1372,10 +1422,16 @@ fn constant_node(x: f64, net: &mut Net, constants: &mut HashMap<u64, FundspNode>
         .or_insert_with(|| net.push(Box::new(dc(x as f32))))
 }
 
-fn reject_prepared_voice(template: &GraphTemplate) -> Result<(),LowerError> {
-    if template.nodes.iter().any(|node|matches!(node.op,Op::External(_))) {
+fn reject_prepared_voice(template: &GraphTemplate) -> Result<(), LowerError> {
+    if template
+        .nodes
+        .iter()
+        .any(|node| matches!(node.op, Op::External(_)))
+    {
         Err(LowerError::PreparedPatchRequired)
-    } else { Ok(()) }
+    } else {
+        Ok(())
+    }
 }
 
 fn unit_for(
@@ -1483,38 +1539,78 @@ fn unit_for(
             })),
         },
         Op::DcBlock => Box::new(dcblock()),
-        Op::ConcertHall => Box::new(crate::concert_hall::HallUnit::new(sample_rate)
-            .map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?),
+        Op::ConcertHall => Box::new(crate::concert_hall::HallUnit::new(sample_rate).map_err(
+            |reason| LowerError::NodePreparation {
+                node: node_index,
+                reason,
+            },
+        )?),
         Op::SpatialRoom(spec) => {
-            let unit=crate::spatial_host::ReplaceableRoom::new(spec.clone(),sample_rate).map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?;
-            if let Some(controls)=controls {controls.rooms.lock().expect("control-thread room registry").push(unit.handle());}
+            let unit = crate::spatial_host::ReplaceableRoom::new(spec.clone(), sample_rate)
+                .map_err(|reason| LowerError::NodePreparation {
+                    node: node_index,
+                    reason,
+                })?;
+            if let Some(controls) = controls {
+                controls
+                    .rooms
+                    .lock()
+                    .expect("control-thread room registry")
+                    .push(unit.handle());
+            }
             Box::new(unit)
-        },
-        Op::Convolve(response) => Box::new(crate::convolution::ConvolutionUnit::new(response.clone(),sample_rate).map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?),
+        }
+        Op::Convolve(response) => Box::new(
+            crate::convolution::ConvolutionUnit::new(response.clone(), sample_rate).map_err(
+                |reason| LowerError::NodePreparation {
+                    node: node_index,
+                    reason,
+                },
+            )?,
+        ),
         Op::StringResonator { min_hz, decay } => {
             Box::new(crate::string::StringUnit::new(*min_hz, *decay))
         }
         Op::BowedString(config) => Box::new(
-            crate::bowed::BowedString::new(*config, sample_rate)
-                .map_err(|reason| LowerError::NodePreparation { node: node_index, reason })?,
+            crate::bowed::BowedString::new(*config, sample_rate).map_err(|reason| {
+                LowerError::NodePreparation {
+                    node: node_index,
+                    reason,
+                }
+            })?,
         ),
         Op::External(spec) => {
-            let controls=controls.ok_or(LowerError::ControlStoreRequired)?;
-            let source=spec.source();
-            let prepared=source.prepare(sample_rate,transport_seconds).map_err(LowerError::External)?;
-            if prepared.unit.inputs()!=0 || prepared.unit.outputs()!=source.outputs() {
-                return Err(LowerError::External(format!("{} prepared a unit with the wrong channel layout",source.kind())));
+            let controls = controls.ok_or(LowerError::ControlStoreRequired)?;
+            let source = spec.source();
+            let prepared = source
+                .prepare(sample_rate, transport_seconds)
+                .map_err(LowerError::External)?;
+            if prepared.unit.inputs() != 0 || prepared.unit.outputs() != source.outputs() {
+                return Err(LowerError::External(format!(
+                    "{} prepared a unit with the wrong channel layout",
+                    source.kind()
+                )));
             }
-            if let Some(monitor)=prepared.monitor {
-                controls.externals.lock().expect("control-thread external registry").push((source.kind().to_string(),monitor));
+            if let Some(monitor) = prepared.monitor {
+                controls
+                    .externals
+                    .lock()
+                    .expect("control-thread external registry")
+                    .push((source.kind().to_string(), monitor));
             }
             prepared.unit
         }
-        Op::BowedPerformance {key,score} => {
-            let controls=controls.ok_or(LowerError::ControlStoreRequired)?;
-            let handle=controls.register_bowed(*key,score.live)?;
-            Box::new(crate::bowed_host::BowedInstrumentUnit::new(score.clone(),handle,transport_seconds)
-                .expect("validated bowed performance"))
+        Op::BowedPerformance { key, score } => {
+            let controls = controls.ok_or(LowerError::ControlStoreRequired)?;
+            let handle = controls.register_bowed(*key, score.live)?;
+            Box::new(
+                crate::bowed_host::BowedInstrumentUnit::new(
+                    score.clone(),
+                    handle,
+                    transport_seconds,
+                )
+                .expect("validated bowed performance"),
+            )
         }
         Op::Delay(range) => Box::new(tap(range.min_seconds() as f32, range.max_seconds() as f32)),
         Op::Reverb {

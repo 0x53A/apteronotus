@@ -97,7 +97,12 @@ fn controls_validate_joint_delays_and_reject_atomically() {
 
 #[test]
 fn tick_block_and_repeated_runs_are_identical() {
-    for model in [BowedModel::C1, BowedModel::C2, BowedModel::C3, BowedModel::C4] {
+    for model in [
+        BowedModel::C1,
+        BowedModel::C2,
+        BowedModel::C3,
+        BowedModel::C4,
+    ] {
         let mut tick = BowedString::new(
             BowedConfig {
                 model,
@@ -268,22 +273,50 @@ fn c3_clone_retains_contact_history_and_reset_repeats_the_trace() {
 #[test]
 fn cello_low_strings_sustain_and_damp_at_supported_rates() {
     use apteronotus_synth::bowed::BowedKind;
-    for rate in [24000.,48000.] {
-        for hz in [65.40639132514966,97.99885899543733,146.8323839587038,220.] {
-            let mut string=BowedString::new(BowedConfig {kind:BowedKind::Cello,min_hz:65.,max_hz:660.,model:BowedModel::C3},rate).unwrap();
-            string.set_controls(BowedControls {hz,..controls()}).unwrap();
-            let audio:Vec<_>=(0..(rate*2.) as usize).map(|_|string.next_sample()).collect();
-            let sustain=&audio[rate as usize..];assert!(rms(sustain)>0.01);
+    for rate in [24000., 48000.] {
+        for hz in [
+            65.40639132514966,
+            97.99885899543733,
+            146.8323839587038,
+            220.,
+        ] {
+            let mut string = BowedString::new(
+                BowedConfig {
+                    kind: BowedKind::Cello,
+                    min_hz: 65.,
+                    max_hz: 660.,
+                    model: BowedModel::C3,
+                },
+                rate,
+            )
+            .unwrap();
+            string
+                .set_controls(BowedControls { hz, ..controls() })
+                .unwrap();
+            let audio: Vec<_> = (0..(rate * 2.) as usize)
+                .map(|_| string.next_sample())
+                .collect();
+            let sustain = &audio[rate as usize..];
+            assert!(rms(sustain) > 0.01);
             // Periodicity at the authored fundamental; catches unstable low-C
             // operation without using an amplitude-only smoke assertion.
-            let lag=(rate/hz).round() as usize;
-            let mismatch=sustain.iter().zip(&sustain[lag..]).map(|(a,b)|(*a as f64-*b as f64).powi(2)).sum::<f64>()/(sustain.len()-lag) as f64;
-            assert!(mismatch.sqrt()/rms(sustain)<0.25,"{hz} Hz at {rate}: mismatch {mismatch}");
-            string.detach();string.set_damping(0.7).unwrap();
-            let tail:Vec<_>=(0..rate as usize).map(|_|string.next_sample()).collect();
-            assert!(rms(&tail[(rate*0.8) as usize..])<1e-8);
-            assert_eq!(string.diagnostics().emergency_resets,0);
-            assert_eq!(string.diagnostics().rejected_controls,0);
+            let lag = (rate / hz).round() as usize;
+            let mismatch = sustain
+                .iter()
+                .zip(&sustain[lag..])
+                .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+                .sum::<f64>()
+                / (sustain.len() - lag) as f64;
+            assert!(
+                mismatch.sqrt() / rms(sustain) < 0.25,
+                "{hz} Hz at {rate}: mismatch {mismatch}"
+            );
+            string.detach();
+            string.set_damping(0.7).unwrap();
+            let tail: Vec<_> = (0..rate as usize).map(|_| string.next_sample()).collect();
+            assert!(rms(&tail[(rate * 0.8) as usize..]) < 1e-8);
+            assert_eq!(string.diagnostics().emergency_resets, 0);
+            assert_eq!(string.diagnostics().rejected_controls, 0);
         }
     }
 }
